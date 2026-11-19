@@ -1,0 +1,12 @@
+[package]
+name = "xila-core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Hardware independent logic of XilaOS: character grid, themes, keyboard, terminal, shell"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+xila-db = { path = "../db" }

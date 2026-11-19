@@ -1,0 +1,16 @@
+[package]
+name = "xila-kernel"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "The XilaOS kernel: a UEFI application that takes over the machine"
+
+[[bin]]
+name = "xila-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+xila-core = { path = "../core" }
+xila-db = { path = "../db" }

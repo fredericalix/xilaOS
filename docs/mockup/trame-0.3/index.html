@@ -1,0 +1,1934 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trame 0.3 — un système où tout est donnée</title>
+<style>
+/* Polices embarquées : le paquet fonctionne sans réseau */
+@font-face{font-family:"VT323";font-style:normal;font-weight:400;font-display:swap;src:url(fonts/vt323-latin-ext-400-normal.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"VT323";font-style:normal;font-weight:400;font-display:swap;src:url(fonts/vt323-latin-400-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Silkscreen";font-style:normal;font-weight:400;font-display:swap;src:url(fonts/silkscreen-latin-ext-400-normal.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"Silkscreen";font-style:normal;font-weight:400;font-display:swap;src:url(fonts/silkscreen-latin-400-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Silkscreen";font-style:normal;font-weight:700;font-display:swap;src:url(fonts/silkscreen-latin-ext-700-normal.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"Silkscreen";font-style:normal;font-weight:700;font-display:swap;src:url(fonts/silkscreen-latin-700-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+/* Jetons : « aube » par défaut (clair), « nuit » en sombre. Le décor 3D lit les mêmes jetons. */
+:root{
+  color-scheme: light;
+  --scene: day;
+  --page:#ffe0a3;
+  --sky-top:#fff3c4; --sky-mid-calm:#ffe6b0; --sky-mid-hot:#ffd0a6; --sky-hz-calm:#fff0b8; --sky-hz-hot:#ffa56b;
+  --ground:#fbefd2; --grid:#e3b877; --tower-base:#ffffff; --wall:#5a3410; --ink:#2f1a06;
+  --h1:#128f84; --h2:#6a4fd0; --h3:#c77700; --h4:#d1366f; --h5:#5a8f14; --h6:#2a73c9;
+  --mast-bg:linear-gradient(90deg,#ffeaa6,#ffcf99); --mast-line:#4a2a0c; --mast-logo:#e8702a; --mast-ink:#4a2a0c;
+  --bar-bg:#4a2a0c; --bar-ink:#fff3d1; --bar-icon:#ffcf8a;
+  --term-base:#fff6dc; --term-out:#6b4416; --term-prompt:#2f1a06; --term-cmd:#c2410c;
+  --boot-base:#fdeeb8; --boot-out:#8a5a00;
+  --mesh:rgba(255,246,220,.3); --plate:rgba(255,246,220,.86); --shade:#fffaf0; --tint:#2f1a06;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --scene: night;
+    --page:#ffd392;
+    --sky-top:#120a04; --sky-mid-calm:#4a2a12; --sky-mid-hot:#7a2a1a; --sky-hz-calm:#f0b24a; --sky-hz-hot:#ff7436;
+    --ground:#1a1007; --grid:#8a5a22; --tower-base:#22150a; --wall:#fff0cf; --ink:#fff3d6;
+    --h1:#5fe3c9; --h2:#b9a2ff; --h3:#ffc24d; --h4:#ff7fa8; --h5:#c9f06a; --h6:#7cc0ff;
+    --mast-bg:linear-gradient(90deg,#ffe19a,#ffbf85); --mast-line:#3a2008; --mast-logo:#e0661f; --mast-ink:#3a2008;
+    --bar-bg:#fff3d1; --bar-ink:#2a1706; --bar-icon:#e0661f;
+    --term-base:#241505; --term-out:#ffd9a0; --term-prompt:#fff6dc; --term-cmd:#ffef7a;
+    --boot-base:#2b2204; --boot-out:#ffd24d;
+    --mesh:rgba(20,10,0,.36); --plate:rgba(36,21,5,.8); --shade:#0a0502; --tint:#fff6dc;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --scene: night;
+  --page:#ffd392;
+  --sky-top:#120a04; --sky-mid-calm:#4a2a12; --sky-mid-hot:#7a2a1a; --sky-hz-calm:#f0b24a; --sky-hz-hot:#ff7436;
+  --ground:#1a1007; --grid:#8a5a22; --tower-base:#22150a; --wall:#fff0cf; --ink:#fff3d6;
+  --h1:#5fe3c9; --h2:#b9a2ff; --h3:#ffc24d; --h4:#ff7fa8; --h5:#c9f06a; --h6:#7cc0ff;
+  --mast-bg:linear-gradient(90deg,#ffe19a,#ffbf85); --mast-line:#3a2008; --mast-logo:#e0661f; --mast-ink:#3a2008;
+  --bar-bg:#fff3d1; --bar-ink:#2a1706; --bar-icon:#e0661f;
+  --term-base:#241505; --term-out:#ffd9a0; --term-prompt:#fff6dc; --term-cmd:#ffef7a;
+  --boot-base:#2b2204; --boot-out:#ffd24d;
+  --mesh:rgba(20,10,0,.36); --plate:rgba(36,21,5,.8); --shade:#0a0502; --tint:#fff6dc;
+}
+
+*,*::before,*::after{box-sizing:inherit}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0}
+body{
+  background:var(--page);color:var(--mast-ink);overflow:hidden;
+  display:grid;grid-template-rows:auto auto minmax(0,1fr);
+  font:21px/1.08 "VT323",ui-monospace,Menlo,Consolas,"Courier New",monospace;letter-spacing:.03em;
+}
+button,input{font:inherit;letter-spacing:inherit;color:inherit}
+button{background:none;border:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+
+/* Bandeau encadré, avec le trait interrompu en morse */
+.mast{background:var(--mast-bg);padding:9px 10px 10px}
+.frame{border-left:2px solid var(--mast-line);border-right:2px solid var(--mast-line)}
+.edge{display:flex;align-items:center;height:2px}
+.edge i{display:block;height:2px;background:var(--mast-line)}
+.edge .morse{flex:0 0 56px;background:linear-gradient(90deg,var(--mast-line) 0 20px,transparent 20px 28px,var(--mast-line) 28px 38px,transparent 38px 46px,var(--mast-line) 46px 50px,transparent 50px)}
+.edge .morse.rev{transform:scaleX(-1)}
+.edge .gap{flex:0 0 30px;background:none}
+.ver{position:relative;flex:none;padding:0 14px;line-height:0;white-space:nowrap}
+.ver::before,.ver::after{content:"";position:absolute;top:-6px;width:2px;height:12px;background:var(--mast-line)}
+.ver::before{left:0}.ver::after{right:0}
+.mast-row{display:flex;justify-content:space-between;align-items:center;gap:6px 18px;flex-wrap:wrap;padding:9px 14px 11px}
+.mark{font-family:"Silkscreen","VT323",ui-monospace,monospace;font-weight:700;font-size:32px;line-height:1;letter-spacing:.02em;margin:0;color:var(--mast-logo)}
+.knobs{display:flex;gap:2px 18px;flex-wrap:wrap}
+.knobs button{padding:2px 4px;white-space:pre}
+.knobs b{font-weight:400;text-decoration:underline;text-underline-offset:3px}
+
+/* Barre de titre : dit sur quel écran on se trouve */
+.bar{
+  position:relative;z-index:5;margin:0 3px;border-radius:999px;background:var(--bar-bg);color:var(--bar-ink);
+  display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 12px 3px 26px;min-height:28px;
+}
+.bar h1{font-family:"Silkscreen","VT323",ui-monospace,monospace;font-weight:700;font-size:17px;line-height:1.1;letter-spacing:.08em;text-transform:uppercase;margin:0;overflow-wrap:anywhere}
+#menu-btn{display:grid;place-items:center;width:34px;height:22px;color:var(--bar-icon);border-radius:6px}
+#menu-btn svg{width:22px;height:14px}
+#menu{
+  position:absolute;right:8px;top:100%;margin-top:5px;z-index:20;display:grid;min-width:230px;
+  background:var(--term-base);color:var(--term-out);border:2px solid var(--term-out);padding:6px 10px;
+  grid-template-columns:auto auto;column-gap:18px;
+}
+#menu button{text-align:left;white-space:pre;padding:1px 2px;color:var(--c,var(--term-out))}
+#menu button:hover,#menu button:focus{background:var(--term-out);color:var(--term-base);outline:0}
+
+/* Le vide : c’est là que vit le décor */
+.stage{position:relative;min-height:0;overflow:hidden;background:#000}
+#scene{position:absolute;inset:0;width:100%;height:100%;display:block;image-rendering:pixelated;touch-action:none;cursor:grab}
+#scene.drag{cursor:grabbing}
+#scene.pick{cursor:pointer}
+.mesh{position:absolute;inset:0;pointer-events:none;
+  background-image:linear-gradient(var(--mesh) 1px,transparent 1px),linear-gradient(90deg,var(--mesh) 1px,transparent 1px);background-size:4px 4px}
+#places button,#tag{position:absolute;left:0;top:0;background:var(--plate);padding:0 7px;white-space:nowrap}
+#places button{color:var(--c)}
+#tag{pointer-events:none;color:var(--term-prompt)}
+#tag small{font-size:inherit;color:var(--term-out);margin-left:10px}
+
+/* Le terminal : il part du bas et monte à mesure qu’on écrit */
+.term{
+  position:absolute;left:0;right:0;bottom:0;max-height:58%;display:flex;flex-direction:column;justify-content:flex-end;
+  background:var(--term-base);color:var(--term-out);
+}
+@supports (color: color-mix(in srgb, red, blue)){
+  .term{
+    background:color-mix(in srgb, var(--hue, var(--term-base)) 25%, var(--hue-shade, var(--term-base)));
+    color:color-mix(in srgb, var(--hue, var(--term-out)) 58%, var(--hue-tint, var(--term-out)));
+  }
+}
+.term.boot{--term-base:var(--boot-base);--term-out:var(--boot-out)}
+.term.tinted{--hue-shade:var(--shade);--hue-tint:var(--tint)}
+.scroll{overflow-y:auto;scrollbar-width:none;padding-bottom:5px}
+.scroll::-webkit-scrollbar{display:none}
+.head .mark{font-size:27px;color:inherit;padding:3px 8px 7px}
+.head hr{border:0;border-top:2px solid currentColor;margin:0 0 16px}
+.line{white-space:pre-wrap;overflow-wrap:anywhere;padding:0 8px;min-height:1.08em;margin:0}
+.ps{color:var(--term-prompt)}
+.cmd{color:var(--term-cmd)}
+.nm{color:var(--c);text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}
+.prompt{display:flex}
+.prompt input{flex:1;min-width:0;background:none;border:0;outline:0;padding:0;margin:0;color:var(--term-cmd);caret-color:var(--term-cmd)}
+.prompt:focus-within{background:var(--plate)}
+#boot-go button{color:var(--term-prompt);text-decoration:underline;text-underline-offset:3px;margin-right:2ch}
+.inv{background:var(--term-out);color:var(--term-base)}
+/* Les applications : un écran plein, en mode texte, avec sa ligne de touches en bas */
+#app{position:absolute;inset:0;z-index:4;display:flex;flex-direction:column;background:var(--term-base);color:var(--term-out)}
+#app-main{flex:1;min-height:0;overflow:auto;scrollbar-width:none;position:relative}
+#app-main::-webkit-scrollbar{display:none}
+#app-body{white-space:pre;padding:8px 10px}
+#app-body .line{white-space:pre-wrap;padding:0}
+#app-body u{text-underline-offset:3px}
+#app-cv{display:block;width:100%;height:100%;object-fit:contain;image-rendering:pixelated;background:#120a04}
+canvas.img{display:block;margin:6px 0 10px 2ch;width:288px;max-width:80%;height:auto;image-rendering:pixelated;border:2px solid currentColor}
+#app-keys{margin:0;background:var(--bar-bg);color:var(--bar-ink);padding:3px 10px;white-space:pre-wrap}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+@media (max-width:640px){
+  body{font-size:18px}
+  .mark{font-size:25px}
+  .mast-row{padding:7px 10px 9px}
+  .bar h1{font-size:14px}
+  .edge .morse{flex-basis:36px}
+  .edge .gap{flex-basis:12px}
+  .term{max-height:55%}
+}
+</style>
+</head>
+<body>
+<header class="mast">
+  <div class="frame">
+    <div class="edge" aria-hidden="true"><i style="flex:3"></i><i class="morse"></i><i class="gap"></i><i class="morse rev"></i><i style="flex:9"></i><i class="morse"></i><i class="gap"></i><i class="morse rev"></i><i style="flex:1"></i><span class="ver">Version 0.3</span><i style="flex:0 0 24px"></i></div>
+    <div class="mast-row">
+      <p class="mark">Trame</p>
+      <div class="knobs">
+        <button id="m-mood" aria-label="Changer d’ambiance">ambiance [<b id="m-mood-v">auto</b>] <span id="meter" aria-hidden="true">[..........]</span></button>
+        <button id="m-sound" aria-label="Changer le son">son [<b id="m-sound-v">ambiance</b>]</button>
+        <button id="m-irc" aria-label="Ouvrir les salons">irc [<b id="m-irc-v">0</b>]</button>
+      </div>
+    </div>
+    <div class="edge" aria-hidden="true"><i style="flex:0 0 40px"></i><i class="gap"></i><i style="flex:8"></i><i class="morse"></i><i style="flex:4"></i><i class="morse"></i><i class="gap"></i><i class="morse rev"></i><i style="flex:3"></i></div>
+  </div>
+</header>
+
+<div class="bar">
+  <h1 id="title">Démarrage</h1>
+  <button id="menu-btn" aria-haspopup="true" aria-expanded="false" aria-controls="menu" aria-label="Changer d’écran">
+    <svg viewBox="0 0 22 14" fill="currentColor" aria-hidden="true"><rect width="22" height="2.6"/><rect y="5.7" width="22" height="2.6"/><rect y="11.4" width="22" height="2.6"/></svg>
+  </button>
+  <div id="menu" hidden></div>
+</div>
+
+<main class="stage" id="stage">
+  <canvas id="scene" aria-label="Vue en trois dimensions de la machine : chaque bloc est un dossier, un service ou un programme."></canvas>
+  <div class="mesh" aria-hidden="true"></div>
+  <div id="places"></div>
+  <div id="tag" hidden></div>
+  <section class="term boot" id="term" aria-label="Terminal">
+    <div class="scroll" id="scroll">
+      <div class="head"><p class="mark">Trame</p><hr></div>
+      <div id="out" role="log" aria-live="polite"></div>
+      <p class="line" id="boot-go" hidden><button id="enter">[Entrée] Entrer avec le son</button><button id="enter-mute">[S] Entrer sans le son</button></p>
+      <p class="line" id="nogl" hidden>Ce navigateur n’arrive pas à afficher la 3D (WebGL indisponible). Essaie un autre navigateur ou réactive l’accélération matérielle.</p>
+      <div class="line prompt" id="prompt" hidden><label class="ps" id="ps" for="q"></label><input id="q" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Ligne de commande"></div>
+    </div>
+  </section>
+  <section id="app" hidden aria-label="Application">
+    <div id="app-main"><canvas id="app-cv" width="320" height="200" hidden></canvas><div id="app-body"></div></div>
+    <div class="line prompt" id="app-ask" hidden><label class="ps" id="app-ask-l" for="app-in"></label><input id="app-in" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+    <p id="app-keys"></p>
+  </section>
+</main>
+
+<script src="vendor/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+const $ = s => document.querySelector(s);
+const clamp = (v,a,b) => Math.min(b, Math.max(a, v));
+const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function rng(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rand = rng(1984);
+
+if(!window.THREE){ $('#nogl').hidden=false; $('#enter').disabled=true; return; }
+
+/* ───────────────────────── Données de la maquette ─────────────────────────
+   Chaque ligne devient un objet de la base interne :
+   [nom, taille en Mo, fermé (0/1), description, latence en ms pour « ailleurs », type] */
+const DISTRICTS = [
+  {id:'etc', label:'réglages', prefix:'/etc/', hue:1, kind:'file', owner:'root', col:-1, row:-1, items:[
+    ['hosts',.01,0,'11 lignes'],['fstab',.01,0,'6 montages'],['ssh',.3,1,'Clés d’hôte et configuration du serveur SSH'],
+    ['ssl',4,1,'Certificats et clés privées'],['nginx',1.2,0,'14 sites déclarés'],['systemd',2.4,0,'212 unités'],
+    ['cron.d',.1,0,'9 tâches planifiées'],['sudoers',.01,1,'Qui a le droit de devenir root'],['passwd',.01,0,'38 comptes'],
+    ['shadow',.01,1,'Empreintes des mots de passe'],['network',.2,0,'3 interfaces'],['apt',.6,0,'7 dépôts'],
+    ['consul',.4,0,'Découverte de services'],['vault',.3,1,'Configuration du coffre'],['prometheus',.8,0,'64 cibles surveillées'],
+    ['grafana',1.5,0,'Sources de données et tableaux de bord']]},
+  {id:'srv', label:'données', prefix:'/srv/', hue:3, kind:'file', owner:'root', col:0, row:-1, items:[
+    ['mongodb',412000,1,'3 membres de réplication, 48 bases'],['elasticsearch',890000,1,'212 index'],
+    ['kafka',365000,0,'86 sujets, 7 jours de rétention'],['redis',18000,0,'2 instantanés'],['grafana',2200,0,'96 tableaux de bord'],
+    ['prometheus',128000,0,'30 jours de mesures'],['registry',74000,0,'412 images'],['jenkins',56000,0,'138 tâches'],
+    ['vault',900,1,'Secrets chiffrés'],['backups',520000,0,'Dernier passage cette nuit à 03 h 12']]},
+  {id:'log', label:'journaux', prefix:'/var/log/', hue:2, kind:'file', owner:'root', col:1, row:-1, items:[
+    ['syslog',820,0,'Dernière ligne il y a 2 s'],['auth.log',96,1,'Connexions et tentatives'],['nginx',2400,0,'access.log, error.log, 14 archives'],
+    ['kafka',6100,0,'server.log, controller.log'],['mongodb',3800,0,'mongod.log, 9 archives'],['elasticsearch',9200,0,'Journaux lents compris'],
+    ['redis',140,0,'redis-server.log'],['graylog',5200,0,'server.log'],['jenkins',1900,0,'Un fichier par tâche'],
+    ['kern.log',310,0,'Messages du noyau'],['docker',2700,0,'Un fichier par conteneur'],['journal',4100,0,'Journal binaire de systemd']]},
+  {id:'home', label:'chez toi', prefix:'~/', hue:0, kind:'file', owner:'toi', col:-1, row:1, items:[
+    ['photos',184000,0,'12 480 images, 96 albums'],['sauvegardes',240000,0,'3 instantanés complets'],['jeux',310000,0,'27 jeux installés'],
+    ['budget',.04,0,'Feuille de calcul : coûts mensuels',0,'feuille'],['carnet',.02,0,'Pile de quatre cartes',0,'pile'],
+    ['entrepôt',.01,0,'Niveau de jeu, 16 cases sur 16',0,'niveau'],
+    ['aube',.003,0,'Morceau calme',0,'morceau'],['cavalcade',.004,0,'Morceau vif',0,'morceau'],['nocturne',.003,0,'Morceau posé',0,'morceau'],
+    ['plasma',.002,0,'Film génératif d’une minute',0,'film'],['tunnel',.002,0,'Film génératif d’une minute',0,'film'],
+    ['phare',.4,0,'Image de 96 points sur 64',0,'image'],['dunes',.4,0,'Image de 96 points sur 64',0,'image'],['circuit',.4,0,'Image de 96 points sur 64',0,'image'],
+    ['accueil',.002,0,'Page : point de départ',0,'page'],['manuel',.004,0,'Page : mode d’emploi',0,'page'],['galerie',.001,0,'Page : toutes les images de la base',0,'page'],
+    ['notes',.01,0,'Carnet de bord',0,'texte'],['agenda',.02,0,'Texte libre',0,'texte']]},
+  {id:'proc', label:'en marche', prefix:'en marche/', hue:4, kind:'proc', owner:'', col:0, row:1, items:[
+    ['mongod',15800,0,'Tourne depuis 41 jours'],['kafka',8200,0,'Tourne depuis 41 jours'],['elasticsearch',31000,0,'Tourne depuis 12 jours'],
+    ['redis-server',4100,0,'Tourne depuis 41 jours'],['nginx',180,0,'8 processus'],['dockerd',620,0,'23 conteneurs'],
+    ['prometheus',5400,0,'Tourne depuis 30 jours'],['grafana',410,0,'Tourne depuis 30 jours'],['sshd',12,0,'2 sessions ouvertes'],
+    ['systemd',28,0,'Le tout premier programme'],['consul',190,0,'5 pairs joints'],['tailscaled',85,0,'14 machines visibles'],
+    ['vigie',420,0,'Agent : surveille les charges et les journaux',0,'agent'],['archiviste',610,0,'Agent : connaît la base par cœur',0,'agent'],
+    ['luthier',380,0,'Agent : règle le son et la musique',0,'agent'],['portier',290,0,'Agent : garde les clés',0,'agent']]},
+  {id:'net', label:'ailleurs', prefix:'ailleurs/', hue:5, kind:'net', owner:'', col:1, row:1, items:[
+    ['stockage objet',1400000,0,'Une porte vers un espace distant',22],['sauvegarde distante',520000,0,'Copie de /srv/backups',9],
+    ['dépôt git',23800,0,'38 dépôts suivis',14],['miroir de paquets',88000,0,'Synchronisé il y a 1 h',6],
+    ['portable',512000,1,'Éteint depuis hier soir',0],
+    ['#trame',2,0,'Salon général',1,'salon'],['#veille',1,0,'Salon des alertes',1,'salon'],['#atelier',1,0,'Salon du son et des images',1,'salon']]}
+];
+const B = 16, PITCH = 21;
+
+/* Le contenu des objets. Un morceau, une image, un niveau de jeu : tout est donnée, rien n’est fichier. */
+const SEED = {
+  budget:{c:{A1:'Poste',B1:'Mensuel',C1:'Annuel',A2:'Serveurs',B2:'420',C2:'=B2*12',A3:'Stockage',B3:'135',C3:'=B3*12',
+    A4:'Sauvegardes',B4:'60',C4:'=B4*12',A5:'Réseau',B5:'48',C5:'=B5*12',A6:'Licences',B6:'90',C6:'=B6*12',
+    A8:'Total',B8:'=SOMME(B2:B6)',C8:'=SOMME(C2:C6)',A9:'Moyenne',B9:'=MOYENNE(B2:B6)',A10:'Le plus cher',B10:'=MAX(B2:B6)'}},
+  carnet:{cartes:[
+    {t:'Accueil', x:'Une pile est un paquet de cartes reliées entre elles.|Chaque carte porte un texte et des liens numérotés.', l:[['Idées',1],['À faire',2],['À propos',3]]},
+    {t:'Idées', x:'Un écran par quartier.|Des agents qui se promènent dans la base.|Un tableur dont chaque feuille est un objet.', l:[['Retour à l’accueil',0]]},
+    {t:'À faire', x:'Brancher un vrai réseau IRC.|Lire de vrais fichiers de son et d’image.|Ouvrir le vrai web.', l:[['Retour à l’accueil',0]]},
+    {t:'À propos', x:'Trame 0.3 est une maquette.|Ce que tu modifies ici reste dans la base de ce navigateur.', l:[['Retour à l’accueil',0]]}]},
+  'entrepôt':{m:[
+    '################',
+    '#P.....#.......#',
+    '#......#..M....#',
+    '#..%%..#.......#',
+    '#..%%......%%%.#',
+    '#..........%...#',
+    '#......#...%.M.#',
+    '####.###.......#',
+    '#......#..######',
+    '#..M...#.......#',
+    '#......#.......#',
+    '#..%...........#',
+    '#..%...###..M..#',
+    '#..%%..#.......#',
+    '#......#....M..#',
+    '################']},
+  /* Morceaux : gamme, grille d’accords (degrés), mélodie écrite pas à pas (chiffre = degré, « . » = tenue, « - » = silence) */
+  aube:{bpm:76, mood:'calme', root:55, oct:12, wave:'triangle', scale:[0,2,4,5,7,9,11], bars:8, prog:[0,4,5,3,0,4,3,4],
+    lead:['2.......4.......','6.......4...5...','7.......9.......','7...5...3.......','4.......2...4...','8.......6.......','7...5...7...8...','8...........6...'],
+    bass:'x.......x.......', k:'x...............', s:'................', h:'....x.......x...'},
+  cavalcade:{bpm:124, mood:'vif', root:57, oct:12, wave:'square', scale:[0,2,3,5,7,8,10], bars:8, prog:[0,0,5,6,0,0,3,4],
+    lead:['4.4.7.4.6.4.2.4.','4.4.7.4.9.7.6.4.','5.7.9.7.5.7.9.7.','6.8.a.8.6.8.a.8.','7...6.4...2.4...','7...6.4...6.7...','7.5.3.5.7.5.3.5.','8.6.4.6.8...6...'],
+    bass:'x..x..x.x..x..xo', k:'x...x...x...x...', s:'....x.......x...', h:'x.x.x.x.x.x.x.xx'},
+  nocturne:{bpm:92, mood:'posé', root:50, oct:12, wave:'triangle', scale:[0,2,3,5,7,9,10], bars:8, prog:[0,3,0,4,0,3,6,4],
+    lead:['..4...7...6.4...','..5...7...9.7...','..4...7...9...7.','8.....6...4.....','..4...7...6.4...','..5...7...a.9...','8...a...8...6...','4.......6.5.4...'],
+    bass:'x.....x...x.....', k:'x.........x.....', s:'....x.......x...', h:'..x...x...x...x.'},
+  plasma:{f:'plasma', d:60}, tunnel:{f:'tunnel', d:60},
+  phare:{g:'phare'}, dunes:{g:'dunes'}, circuit:{g:'circuit'},
+  accueil:{src:['# Trame, page d’accueil','Ici, une page est un objet de la base comme un autre : du texte, des liens, des images.','{{image:phare}}','Par où commencer :',
+    '  [[manuel|Lire le manuel]]','  [[galerie|Voir la galerie d’images]]','  [[objet:carnet|Ouvrir le carnet, une pile de cartes]]',
+    '  [[objet:budget|Ouvrir le budget, une feuille de calcul]]','  [[objet:plasma|Regarder un film]]','  [[https://exemple.org|Sortir vers le vrai web]]']},
+  manuel:{src:['# Manuel express','Tout se pilote au clavier. Dans le terminal, « aide k » donne la liste des touches.',
+    'Tout est un objet de la base : tape « base », puis un numéro, ou écris un select.','Les agents vivent dans les salons : [Alt]+[I] pour les lire et leur répondre.',
+    '{{image:circuit}}','  [[accueil|Retour à l’accueil]]']},
+  galerie:{src:['# Galerie','Cette page n’a aucun contenu à elle : elle interroge la base et montre chaque objet de type image.','{{liste:image}}','  [[accueil|Retour à l’accueil]]']},
+  notes:{x:'Trame 0.3 : première maquette où tout est objet.|Idée : laisser les agents écrire ici.'},
+  agenda:{x:'Mardi : brancher les agents sur la base.|Mercredi : essayer un vrai modèle par OpenRouter.'},
+  '#trame':{l:[]}, '#veille':{l:[]}, '#atelier':{l:[]}
+};
+
+function fmtSize(mb){
+  const f = (n,d) => n.toLocaleString('fr-FR',{maximumFractionDigits:d});
+  if(mb < 1) return f(Math.max(1,Math.round(mb*1024)),0)+' Ko';
+  if(mb < 1000) return f(mb, mb<10?1:0)+' Mo';
+  if(mb < 1e6) return f(mb/1000, mb<1e4?1:0)+' Go';
+  return f(mb/1e6,1)+' To';
+}
+const norm = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+
+/* ───────────────────────── Ambiance : un seul nombre, de 0 (calme) à 1 (intense) ───────────────────────── */
+const mood = {mode:'auto', energy:0, I:0.04};
+function nudge(x){ mood.energy = clamp(mood.energy + x, 0, 1.15); }
+
+/* ───────────────────────── Son génératif (Web Audio, aucun fichier) ───────────────────────── */
+const Sound = (function(){
+  let ctx=null, master, dryIn, wetIn, echoIn, padFilter, padGain, arpBus, bellBus, sfxBus, noiseBuf, analyser;
+  let style='ambiance', song=null, full=false, songStep=0;
+  const musical=()=>style==='musique' && !!song, tempo=I=>musical() ? song.bpm*(full ? 1 : .86+.24*I) : 72+56*I;
+  let muted=false, step=0, nextT=0, chord=0;
+  const voices=[], beats=[];
+  const mtof = m => 440*Math.pow(2,(m-69)/12);
+  const CHORDS=[[50,57,60,64,65],[46,53,57,62,65],[48,53,57,64,67],[43,50,53,58,60]];
+  const BASS=[38,34,41,43];
+  const PENT=[0,3,5,7,10,12,15,17,19,22];
+  const now = () => ctx ? ctx.currentTime : performance.now()/1000;
+
+  function impulse(sec, decay){
+    const n=Math.floor(ctx.sampleRate*sec), b=ctx.createBuffer(2,n,ctx.sampleRate);
+    for(let c=0;c<2;c++){ const d=b.getChannelData(c); for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/n,decay); }
+    return b;
+  }
+  function start(){
+    if(ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    ctx = new AC();
+    master = ctx.createGain(); master.gain.value = 0.0001;
+    const comp = ctx.createDynamicsCompressor(); comp.threshold.value=-16; comp.ratio.value=5; comp.attack.value=.005; comp.release.value=.2;
+    master.connect(comp); comp.connect(ctx.destination);
+    analyser=ctx.createAnalyser(); analyser.fftSize=128; analyser.smoothingTimeConstant=.6; master.connect(analyser);
+    dryIn = ctx.createGain(); dryIn.connect(master);
+    const conv = ctx.createConvolver(); conv.buffer = impulse(4.4, 2.4);
+    wetIn = ctx.createGain(); wetIn.gain.value=.8; wetIn.connect(conv); conv.connect(master);
+    const delay = ctx.createDelay(1); delay.delayTime.value=.33;
+    const fb = ctx.createGain(); fb.gain.value=.36;
+    echoIn = ctx.createGain(); echoIn.gain.value=.42; echoIn.connect(delay); delay.connect(fb); fb.connect(delay); delay.connect(dryIn); delay.connect(wetIn);
+
+    // Nappe : cinq voix qui glissent d’un accord à l’autre
+    padFilter = ctx.createBiquadFilter(); padFilter.type='lowpass'; padFilter.frequency.value=500; padFilter.Q.value=.5;
+    padGain = ctx.createGain(); padGain.gain.value=.11;
+    padFilter.connect(padGain); padGain.connect(dryIn); padGain.connect(wetIn);
+    CHORDS[0].forEach((m,i)=>{
+      const g=ctx.createGain(); g.gain.value=.5;
+      const o1=ctx.createOscillator(); o1.type='triangle'; o1.frequency.value=mtof(m);
+      const o2=ctx.createOscillator(); o2.type='sine'; o2.frequency.value=mtof(m)*1.0035;
+      const lfo=ctx.createOscillator(); lfo.frequency.value=.045+.027*i;
+      const lg=ctx.createGain(); lg.gain.value=.28;
+      lfo.connect(lg); lg.connect(g.gain);
+      o1.connect(g); o2.connect(g); g.connect(padFilter);
+      o1.start(); o2.start(); lfo.start();
+      voices.push({o1,o2});
+    });
+    // Souffle
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate*2, ctx.sampleRate);
+    { const d=noiseBuf.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1; }
+    const air=ctx.createBufferSource(); air.buffer=noiseBuf; air.loop=true;
+    const af=ctx.createBiquadFilter(); af.type='bandpass'; af.frequency.value=900; af.Q.value=.6;
+    const ag=ctx.createGain(); ag.gain.value=.018;
+    air.connect(af); af.connect(ag); ag.connect(wetIn); air.start();
+
+    arpBus=ctx.createGain(); arpBus.connect(dryIn); arpBus.connect(echoIn);
+    { const s=ctx.createGain(); s.gain.value=.3; arpBus.connect(s); s.connect(wetIn); }
+    bellBus=ctx.createGain(); bellBus.connect(wetIn);
+    { const s=ctx.createGain(); s.gain.value=.35; bellBus.connect(s); s.connect(dryIn); }
+    sfxBus=ctx.createGain(); sfxBus.connect(dryIn);
+    { const s=ctx.createGain(); s.gain.value=.5; sfxBus.connect(s); s.connect(wetIn); }
+
+    master.gain.setTargetAtTime(muted?0:.6, ctx.currentTime, .9);
+    nextT = ctx.currentTime + .08; beats.length = 0;
+  }
+  function env(g, t, peak, attack, decay){
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(peak,.0002), t+attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+attack+decay);
+  }
+  function pluck(t, midi, peak, bright, decay, bus){
+    const o=ctx.createOscillator(); o.type = bright>.5 ? 'sawtooth' : 'triangle'; o.frequency.value=mtof(midi);
+    const f=ctx.createBiquadFilter(); f.type='lowpass'; f.Q.value=2;
+    f.frequency.setValueAtTime(700+3600*bright, t); f.frequency.exponentialRampToValueAtTime(320, t+decay);
+    const g=ctx.createGain(); env(g,t,peak,.004,decay);
+    o.connect(f); f.connect(g); g.connect(bus||arpBus); o.start(t); o.stop(t+decay+.05);
+  }
+  function bell(t, midi, peak, decay){
+    const f0=mtof(midi), g=ctx.createGain(); env(g,t,peak,.006,decay||3);
+    const o=ctx.createOscillator(); o.frequency.value=f0;
+    const p=ctx.createOscillator(); p.frequency.value=f0*2.76; const pg=ctx.createGain(); pg.gain.value=.18;
+    o.connect(g); p.connect(pg); pg.connect(g); g.connect(bellBus);
+    o.start(t); p.start(t); o.stop(t+(decay||3)+.1); p.stop(t+(decay||3)+.1);
+  }
+  function bass(t, midi, peak, dur){
+    const o=ctx.createOscillator(); o.type='sawtooth'; o.frequency.value=mtof(midi);
+    const s=ctx.createOscillator(); s.frequency.value=mtof(midi-12);
+    const f=ctx.createBiquadFilter(); f.type='lowpass'; f.Q.value=4;
+    f.frequency.setValueAtTime(900,t); f.frequency.exponentialRampToValueAtTime(140,t+dur);
+    const g=ctx.createGain(); env(g,t,peak,.008,dur);
+    o.connect(f); s.connect(f); f.connect(g); g.connect(dryIn);
+    o.start(t); s.start(t); o.stop(t+dur+.05); s.stop(t+dur+.05);
+  }
+  function kick(t, peak){
+    const o=ctx.createOscillator(); o.frequency.setValueAtTime(135,t); o.frequency.exponentialRampToValueAtTime(42,t+.12);
+    const g=ctx.createGain(); env(g,t,peak,.003,.24); o.connect(g); g.connect(dryIn); o.start(t); o.stop(t+.3);
+  }
+  function noiseHit(t, peak, decay, type, freq, bus){
+    const s=ctx.createBufferSource(); s.buffer=noiseBuf; s.loop=true;
+    const f=ctx.createBiquadFilter(); f.type=type; f.frequency.value=freq;
+    const g=ctx.createGain(); env(g,t,peak,.002,decay);
+    s.connect(f); f.connect(g); g.connect(bus); s.start(t, Math.random()*1.5); s.stop(t+decay+.05);
+    return f;
+  }
+  function setChord(t){
+    CHORDS[chord].forEach((m,i)=>{ const f=mtof(m);
+      voices[i].o1.frequency.setTargetAtTime(f, t, 1.1);
+      voices[i].o2.frequency.setTargetAtTime(f*1.0035, t, 1.1); });
+  }
+  // Mode musical : gamme, grille et mélodie viennent d’un objet « morceau » de la base
+  const deg=c=>parseInt(c,36);
+  function note(d){ const sc=song.scale, n=sc.length; return song.root+sc[((d%n)+n)%n]+12*Math.floor(d/n); }
+  function lead(t, midi, dur, peak, wave){
+    const o=ctx.createOscillator(); o.type=wave||'square'; o.frequency.value=mtof(midi);
+    const v=ctx.createOscillator(); v.frequency.value=5.5; const vg=ctx.createGain(); vg.gain.setValueAtTime(0,t); vg.gain.linearRampToValueAtTime(mtof(midi)*.006, t+Math.min(dur,.4)); v.connect(vg); vg.connect(o.frequency);
+    const f=ctx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=wave==='square' ? 1900 : 3200;
+    const g=ctx.createGain(); g.gain.setValueAtTime(.0001,t); g.gain.exponentialRampToValueAtTime(peak, t+.012); g.gain.setValueAtTime(peak, t+Math.max(.03,dur-.04)); g.gain.exponentialRampToValueAtTime(.0001, t+dur+.12);
+    o.connect(f); f.connect(g); g.connect(arpBus); o.start(t); v.start(t); o.stop(t+dur+.2); v.stop(t+dur+.2);
+  }
+  function scheduleSong(t, I){
+    const st=songStep, bar=Math.floor(st/16)%song.bars, s=st%16, d=song.prog[bar], E=full ? .85 : I, sd=60/tempo(I)/4, oc=song.oct||0;
+    songStep=(st+1)%(song.bars*16);
+    if(s%4===0) beats.push({t, strong:s===0});
+    if(!ctx) return;
+    if(s===0) [note(d)-12, note(d+4)-12, note(d), note(d+2), note(d+4)].forEach((m,i)=>{ const f=mtof(m); voices[i].o1.frequency.setTargetAtTime(f,t,.12); voices[i].o2.frequency.setTargetAtTime(f*1.0035,t,.12); });
+    const c=song.lead[bar][s];
+    if(c!=='.' && c!=='-'){ let n=1; while(s+n<16 && song.lead[bar][s+n]==='.') n++; lead(t, note(deg(c))+oc, n*sd, .085*(.65+.35*E), song.wave); }
+    if(E>.2){ const ev=E<.45 ? 4 : E<.7 ? 2 : 1; if(s%ev===0) pluck(t, note(d+[0,2,4,2,7,4,2,4][(s/ev)%8])+oc, .07*clamp((E-.2)/.3,0,1), clamp(E-.2,0,1), .16+.2*(1-E)); }
+    if(E>.33 && song.bass[s]!=='.'){ let b=note(d); while(b>48) b-=12; bass(t, b+(song.bass[s]==='o' ? 12 : 0), .25*clamp((E-.33)/.2,0,1), sd*1.7); }
+    if(E>.5 && song.k[s]==='x') kick(t, .6*clamp((E-.5)/.2,0,1));
+    if(E>.58 && song.s[s]==='x'){ const f=noiseHit(t, .15*clamp((E-.58)/.15,0,1), .12, 'bandpass', 1900, dryIn); f.Q.value=.8; }
+    if(E>.66 && song.h[s]==='x') noiseHit(t, .05*clamp((E-.66)/.15,0,1), .04, 'highpass', 7000, dryIn);
+  }
+  function schedule(s, t, I){
+    if(musical()){ scheduleSong(t, I); return; }
+    if(s%4===0) beats.push({t, strong:s%16===0});
+    if(!ctx) return;
+    const c=CHORDS[chord];
+    if(Math.random() < .055*(1-.85*I)) bell(t, c[Math.floor(Math.random()*5)]+12*(1+Math.floor(Math.random()*2)), .06+.04*Math.random(), 3.2);
+    const a=clamp((I-.16)/.3,0,1);
+    if(a>0){
+      const every = I<.4 ? 4 : I<.68 ? 2 : 1;
+      if(s%every===0){
+        const k=Math.floor(s/every), up=[0,2,1,3,2,4,3,1][k%8];
+        pluck(t, c[up]+12+(k%16>11?12:0), .17*a*(s%4===0?1:.72), clamp(I*1.1-.25,0,1), .2+.22*(1-I));
+      }
+    }
+    const b=clamp((I-.4)/.22,0,1);
+    if(b>0 && [0,3,6,10,12,14].indexOf(s%16)>=0) bass(t, BASS[chord]+(s%16===10?12:0), .32*b, .22);
+    const k=clamp((I-.58)/.18,0,1);
+    if(k>0 && s%4===0) kick(t, .8*k);
+    const h=clamp((I-.7)/.18,0,1);
+    if(h>0 && (s%4===2 || (I>.88 && s%2===1))) noiseHit(t, (s%4===2?.11:.055)*h, .045, 'highpass', 7000, dryIn);
+  }
+  function tick(I){
+    const t0=now();
+    if(nextT < t0-.5) nextT = t0+.05;           // retour d’onglet : on repart d’ici
+    while(nextT < t0+.16){
+      schedule(step, nextT, I);
+      nextT += 60/tempo(I)/4;
+      step=(step+1)%64;
+      if(step===0 && !musical()){ chord=(chord+1)%4; if(ctx) setChord(nextT); }
+    }
+    if(ctx){
+      padFilter.frequency.setTargetAtTime(430+3900*Math.pow(I,1.6), t0, .4);
+      padGain.gain.setTargetAtTime(musical() ? .06 : .115-.045*I, t0, .4);
+    }
+  }
+  return {
+    start, tick, now, beats,
+    get style(){ return style; }, get song(){ return song; },
+    setStyle(v){ style=v; if(v!=='musique' && ctx) setChord(ctx.currentTime); },
+    setSong(d){ song=d; songStep=0; }, setFull(b){ full=b; },
+    songPos(){ if(!musical()) return null; const st=(songStep+song.bars*16-1)%(song.bars*16); return {bar:Math.floor(st/16), step:st%16, bars:song.bars}; },
+    spectrum(n){ if(!analyser) return null; const d=new Uint8Array(analyser.frequencyBinCount); analyser.getByteFrequencyData(d);
+      const out=[]; for(let i=0;i<n;i++){ const a=Math.floor(Math.pow(i/n,1.6)*44), b=Math.max(a+1, Math.floor(Math.pow((i+1)/n,1.6)*44)); let s=0; for(let k=a;k<b;k++) s+=d[k]; out.push(s/(b-a)/255); } return out; },
+    shot(){ if(!ctx||muted) return; const t=ctx.currentTime; noiseHit(t, .13, .1, 'lowpass', 1700, sfxBus); pluck(t, 46, .1, .9, .09, sfxBus); },
+    get on(){ return !!ctx && !muted; },
+    get ready(){ return !!ctx; },
+    mute(m){ muted=m; if(ctx) master.gain.setTargetAtTime(m?0:.6, ctx.currentTime, .06); },
+    resume(){ if(ctx && ctx.state==='suspended') ctx.resume(); },
+    pause(){ if(ctx && ctx.state==='running') ctx.suspend(); },
+    key(n){ if(!ctx||muted) return; pluck(ctx.currentTime, 74+PENT[Math.abs(n)%7], .05, .2, .09, sfxBus); },
+    chime(h){ if(!ctx||muted) return; const t=ctx.currentTime, m=62+PENT[Math.round(clamp(h,0,1)*9)]; bell(t,m,.13,1.8); bell(t+.09,m+7,.09,2.2); },
+    deny(){ if(!ctx||muted) return; const t=ctx.currentTime;
+      [98,104.5].forEach(fq=>{ const o=ctx.createOscillator(); o.type='sawtooth'; o.frequency.value=fq;
+        const f=ctx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=420;
+        const g=ctx.createGain(); env(g,t,.14,.006,.22); o.connect(f); f.connect(g); g.connect(sfxBus); o.start(t); o.stop(t+.3); }); },
+    unlock(){ if(!ctx||muted) return; const t=ctx.currentTime;
+      [0,3,7,10,12,15,19].forEach((d,i)=>pluck(t+i*.055, 62+d, .09, .7, .35, sfxBus));
+      const f=noiseHit(t, .05, .9, 'bandpass', 600, sfxBus); f.Q.value=2; f.frequency.exponentialRampToValueAtTime(5200, t+.8); },
+    whoosh(){ if(!ctx||muted) return; const t=ctx.currentTime;
+      const f=noiseHit(t, .035, .7, 'bandpass', 300, wetIn); f.Q.value=1.2; f.frequency.exponentialRampToValueAtTime(2200, t+.55); }
+  };
+})();
+
+/* ───────────────────────── Scène ───────────────────────── */
+const canvas = $('#scene');
+let renderer;
+try{ renderer = new THREE.WebGLRenderer({canvas, antialias:false, powerPreference:'high-performance'}); }
+catch(e){ $('#nogl').hidden=false; $('#enter').disabled=true; $('#enter-mute').disabled=true; return; }
+const PX=2;                      // un pixel du décor = 2 pixels d’écran, comme une trame
+renderer.setPixelRatio(1/PX);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 1400);
+scene.fog = new THREE.FogExp2(0x000000, 0.0058);
+
+const C = v => new THREE.Color(v);
+const P = {night:true, top:C(0), midCalm:C(0), midHot:C(0), hzCalm:C(0), hzHot:C(0), ground:C(0), grid:C(0), base:C(0), wall:C(0), ink:C(0), hues:[]};
+const WHITE = C(0xffffff);
+
+// Ciel : dégradé en trois tons, dont l’horizon change avec l’ambiance
+const sky = new THREE.Mesh(new THREE.SphereGeometry(900, 32, 20), new THREE.ShaderMaterial({
+  side:THREE.BackSide, depthWrite:false, fog:false,
+  uniforms:{top:{value:C(0)}, mid:{value:C(0)}, hz:{value:C(0)}},
+  vertexShader:'varying vec3 vDir; void main(){ vDir=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:'varying vec3 vDir; uniform vec3 top; uniform vec3 mid; uniform vec3 hz; void main(){ float h=normalize(vDir).y; vec3 c=mix(hz,mid,smoothstep(-0.01,0.085,h)); c=mix(c,top,smoothstep(0.05,0.42,h)); gl_FragColor=vec4(c,1.0); }'
+}));
+sky.renderOrder = -10; scene.add(sky);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(3000,3000), new THREE.MeshBasicMaterial());
+ground.rotation.x = -Math.PI/2; ground.position.y = -.02; scene.add(ground);
+
+const gridMat = new THREE.LineBasicMaterial({transparent:true, opacity:.4});
+{ const pts=[]; for(let i=-180;i<=180;i+=3){ pts.push(i,0,-180, i,0,180, -180,0,i, 180,0,i); }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pts,3));
+  scene.add(new THREE.LineSegments(g, gridMat)); }
+
+function dotTexture(){
+  const c=document.createElement('canvas'); c.width=c.height=128; const x=c.getContext('2d');
+  const g=x.createRadialGradient(64,64,0,64,64,64); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(.35,'rgba(255,255,255,.55)'); g.addColorStop(1,'rgba(255,255,255,0)');
+  x.fillStyle=g; x.fillRect(0,0,128,128); return new THREE.CanvasTexture(c);
+}
+const DOT = dotTexture();
+
+const UNIT = new THREE.BoxGeometry(1,1,1); UNIT.translate(0,.5,0);
+const EDGES = new THREE.EdgesGeometry(UNIT);
+const FLAT = new THREE.PlaneGeometry(1,1); FLAT.rotateX(-Math.PI/2);
+const BEAM = new THREE.BufferGeometry(); BEAM.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,1,0],3));
+
+const towers=[], bodies=[], pads=[];
+DISTRICTS.forEach(d=>{
+  const cx=d.col*PITCH, cz=d.row*PITCH/2;
+  const pad=new THREE.Mesh(FLAT, new THREE.MeshBasicMaterial({transparent:true, depthWrite:false}));
+  pad.scale.set(B+2,1,B+2); pad.position.set(cx,.005,cz); pad.renderOrder=1; scene.add(pad);
+  const h=(B+2)/2, lg=new THREE.BufferGeometry();
+  lg.setAttribute('position', new THREE.Float32BufferAttribute([-h,0,-h, h,0,-h, h,0,h, -h,0,h],3));
+  const line=new THREE.LineLoop(lg, new THREE.LineBasicMaterial({transparent:true, opacity:.7})); line.position.set(cx,.02,cz); scene.add(line);
+  d.top=Math.max.apply(null, d.items.map(it=>.5+2.1*Math.log10(it[1]+1)));
+  pads.push({d, pad, line});
+
+  const n=d.items.length, cols=Math.ceil(Math.sqrt(n)), cell=B/cols;
+  d.items.forEach((it,i)=>{
+    const c=i%cols, r=Math.floor(i/cols), size=it[1];
+    const x=cx-B/2+cell*(c+.5)+(rand()-.5)*cell*.18, z=cz-B/2+cell*(r+.5)+(rand()-.5)*cell*.18;
+    const w=clamp(.55+.34*Math.log10(size+1), .65, cell*.8), dp=w*(.82+rand()*.36);
+    const hgt=.5+2.1*Math.log10(size+1);
+    const g=new THREE.Group(); g.position.set(x,0,z);
+    const col=new THREE.Group(); col.scale.set(w,hgt,dp); g.add(col);
+    const geo=UNIT.clone(); geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(72),3));
+    const body=new THREE.Mesh(geo, new THREE.MeshBasicMaterial({vertexColors:true, transparent:true}));
+    const edges=new THREE.LineSegments(EDGES, new THREE.LineBasicMaterial({transparent:true}));
+    col.add(body); col.add(edges);
+    const pool=new THREE.Mesh(FLAT, new THREE.MeshBasicMaterial({map:DOT, transparent:true, depthWrite:false, fog:false}));
+    pool.scale.set(w*3.6,1,dp*3.6); pool.position.y=.04; pool.renderOrder=3; g.add(pool);
+    const beam=new THREE.Line(BEAM, new THREE.LineBasicMaterial({transparent:true, opacity:.9}));
+    beam.scale.y=46; beam.position.y=hgt; beam.visible=false; g.add(beam);
+    scene.add(g);
+    const t={d, name:it[0], path:d.prefix+it[0], size, locked:!!it[2], detail:it[3], ms:it[4]||0, x, z, w, dp, h:hgt,
+             g, col, body, edges, pool, beam, cage:null, phase:rand()*6.28, f1:.15+rand()*.3, f2:.07+rand()*.2, load:.3,
+             dim:1, dimGoal:1, ghost:0, match:false, key:norm(it[0]+' '+d.prefix+it[0]+' '+d.label)};
+    body.userData.t=t; towers.push(t); bodies.push(body);
+    if(t.locked) makeCage(t);
+    if(d.kind==='net') makeArc(t);
+  });
+});
+
+function makeCage(t){
+  const W=t.w+.9, Dp=t.dp+.9, H=t.h+.9, pts=[], n=Math.ceil(H/.42);
+  for(let k=0;k<=n;k++){ const y=H*k/n, a=W/2, b=Dp/2; pts.push(-a,y,-b, a,y,-b,  a,y,-b, a,y,b,  a,y,b, -a,y,b,  -a,y,b, -a,y,-b); }
+  [[-1,-1],[1,-1],[1,1],[-1,1]].forEach(s=>pts.push(s[0]*W/2,0,s[1]*Dp/2, s[0]*W/2,H,s[1]*Dp/2));
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pts,3));
+  t.cage=new THREE.LineSegments(g, new THREE.LineBasicMaterial({transparent:true, opacity:.55}));
+  t.cage.userData={flash:0, melt:-1}; t.g.add(t.cage);
+}
+function makeArc(t){
+  const l=Math.hypot(t.x,t.z)||1, dx=t.x/l, dz=t.z/l, pts=[];
+  for(let i=0;i<=56;i++){ const u=i/56; pts.push(t.x+dx*260*u, t.h+ (4*u*(1-u))*60 - t.h*u, t.z+dz*260*u); }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pts,3));
+  t.arc=new THREE.Line(g, new THREE.LineBasicMaterial({transparent:true, opacity:.65})); scene.add(t.arc);
+}
+
+// Circulation : des grains de lumière le long des avenues
+const NP=280, lanes=[];
+[0,-21,21].forEach(z=>lanes.push({ax:'x', k:z}));
+[-10.5,10.5,-31.5,31.5].forEach(x=>lanes.push({ax:'z', k:x}));
+const flow={pos:new Float32Array(NP*3), col:new Float32Array(NP*3), p:[]};
+for(let i=0;i<NP;i++){ const ln=lanes[Math.floor(rand()*lanes.length)];
+  flow.p.push({ln, s:(rand()*2-1)*46, v:(2+rand()*5)*(rand()<.5?-1:1), hue:Math.floor(rand()*6), off:(rand()-.5)*.9, rank:rand()}); }
+const flowGeo=new THREE.BufferGeometry();
+flowGeo.setAttribute('position', new THREE.BufferAttribute(flow.pos,3)); flowGeo.setAttribute('color', new THREE.BufferAttribute(flow.col,3));
+const flowMat=new THREE.PointsMaterial({size:1.1, map:DOT, transparent:true, depthWrite:false, vertexColors:true, sizeAttenuation:true, fog:false});
+const flowPts=new THREE.Points(flowGeo, flowMat); flowPts.frustumCulled=false; flowPts.renderOrder=6; scene.add(flowPts);
+
+// Étoiles (la nuit seulement)
+const starGeo=new THREE.BufferGeometry();
+{ const p=[]; for(let i=0;i<520;i++){ const a=rand()*6.283, y=.08+rand()*.9, r=Math.sqrt(1-y*y); p.push(Math.cos(a)*r*800, y*800, Math.sin(a)*r*800); }
+  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(p,3)); }
+const starMat=new THREE.PointsMaterial({size:1.6*PX, sizeAttenuation:false, transparent:true, depthWrite:false, fog:false});
+const stars=new THREE.Points(starGeo, starMat); stars.renderOrder=-9; scene.add(stars);
+
+// Ondes au sol, déclenchées sur le temps
+const rings=[];
+for(let i=0;i<5;i++){ const g=new THREE.RingGeometry(.975,1,96); g.rotateX(-Math.PI/2);
+  const m=new THREE.Mesh(g, new THREE.MeshBasicMaterial({transparent:true, opacity:0, depthWrite:false, side:THREE.DoubleSide, fog:false}));
+  m.position.y=.06; m.visible=false; m.renderOrder=5; m.userData={age:9}; scene.add(m); rings.push(m); }
+const selRing=new THREE.Mesh((()=>{const g=new THREE.RingGeometry(.9,1,64); g.rotateX(-Math.PI/2); return g;})(),
+  new THREE.MeshBasicMaterial({transparent:true, opacity:.9, depthWrite:false, side:THREE.DoubleSide, fog:false}));
+selRing.position.y=.07; selRing.visible=false; selRing.renderOrder=5; scene.add(selRing);
+
+/* ───────────────────────── Thème : la scène lit les jetons CSS ───────────────────────── */
+const SHADE=[.74,.56,1,.4,.9,.66];   // +x, −x, dessus, dessous, +z, −z
+const tmp=C(0), tmp2=C(0);
+function paint(t){
+  const hue=P.hues[t.d.hue], col=t.body.geometry.attributes.color, pos=t.body.geometry.attributes.position;
+  for(let i=0;i<24;i++){
+    const f=Math.floor(i/4), y=pos.getY(i);
+    if(P.night){ const k=SHADE[f]*(f===2 ? 1 : .1+.9*Math.pow(y,1.6)); tmp.copy(P.base).lerp(hue, k); }
+    else { tmp.copy(hue).lerp(P.ink, (1-SHADE[f])*.55); if(f===2) tmp.lerp(WHITE,.3); else tmp.lerp(WHITE,.34*(1-y)); }
+    col.setXYZ(i,tmp.r,tmp.g,tmp.b);
+  }
+  col.needsUpdate=true;
+}
+function applyTheme(){
+  const cs=getComputedStyle(document.documentElement), v=n=>cs.getPropertyValue(n).trim();
+  P.night = v('--scene')!=='day';
+  P.top.set(v('--sky-top')); P.midCalm.set(v('--sky-mid-calm')); P.midHot.set(v('--sky-mid-hot'));
+  P.hzCalm.set(v('--sky-hz-calm')); P.hzHot.set(v('--sky-hz-hot'));
+  P.ground.set(v('--ground')); P.grid.set(v('--grid')); P.base.set(v('--tower-base')); P.wall.set(v('--wall')); P.ink.set(v('--ink'));
+  P.hues=[1,2,3,4,5,6].map(i=>C(v('--h'+i)));
+  const add = P.night ? THREE.AdditiveBlending : THREE.NormalBlending;
+  sky.material.uniforms.top.value.copy(P.top);
+  ground.material.color.copy(P.ground);
+  gridMat.color.copy(P.grid); gridMat.opacity = P.night ? .42 : .5;
+  pads.forEach(p=>{ const h=P.hues[p.d.hue];
+    p.pad.material.color.copy(h); p.pad.material.opacity = P.night ? .13 : .2;
+    p.line.material.color.copy(h); });
+  towers.forEach(t=>{ const h=P.hues[t.d.hue];
+    paint(t);
+    t.pool.material.blending=add; t.pool.material.color.copy(P.night ? h : P.ink); t.pool.material.needsUpdate=true;
+    t.beam.material.color.copy(h); t.beam.material.blending=add; t.beam.material.needsUpdate=true;
+    if(t.cage) t.cage.material.color.copy(P.wall);
+    if(t.arc){ t.arc.material.color.copy(h); }
+  });
+  flowMat.blending=add; flowMat.needsUpdate=true;
+  flow.p.forEach((p,i)=>{ const h=P.hues[p.hue]; tmp.copy(h); if(P.night) tmp.lerp(WHITE,.25);
+    flow.col[i*3]=tmp.r; flow.col[i*3+1]=tmp.g; flow.col[i*3+2]=tmp.b; });
+  flowGeo.attributes.color.needsUpdate=true;
+  starMat.color.set(P.night ? 0xffffff : 0x000000);
+  rings.forEach(r=>{ r.material.blending=add; r.material.needsUpdate=true; });
+  selRing.material.blending=add; selRing.material.needsUpdate=true;
+}
+applyTheme();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+new MutationObserver(applyTheme).observe(document.documentElement, {attributes:true, attributeFilter:['data-theme','class','style']});
+
+/* ───────────────────────── Caméra ───────────────────────── */
+const stage=$('#stage');
+const cam={th:.3, ph:1.2, r:92, x:0, y:6, z:0};
+const goal={th:.3, ph:1.2, r:92, x:0, y:6, z:0};
+let W=1, H=1, stageTop=0, stageLeft=0, overviewR=66, viewOff=0;
+let entered=false, selected=null, focusD=null, hovered=null;
+function aim(){
+  if(selected){ const t=selected; goal.x=t.x; goal.z=t.z; goal.r=clamp(t.h*2.1+11, 15, 40); goal.ph=1.14; goal.y=Math.min(t.h*.6, 7); }
+  else if(focusD){ goal.x=focusD.col*PITCH; goal.z=focusD.row*PITCH/2; goal.y=3.5; goal.r=30*Math.max(1, 1.25/camera.aspect); goal.ph=1.16; }
+  else { goal.x=0; goal.z=0; goal.y=5; goal.r=overviewR; goal.ph=1.3; }
+}
+function resize(){
+  const r=stage.getBoundingClientRect(); W=Math.max(1,r.width); H=Math.max(1,r.height); stageTop=r.top; stageLeft=r.left;
+  renderer.setSize(W,H,false); camera.aspect=W/H; camera.setViewOffset(W,H,0,viewOff/2,W,H);
+  overviewR = 62*Math.max(1, 1.5/camera.aspect);
+  if(entered) aim();
+}
+window.addEventListener('resize', resize);
+
+/* ───────────────────────── Terminal ───────────────────────── */
+const term=$('#term'), scroller=$('#scroll'), out=$('#out'), ps=$('#ps'), q=$('#q'), titleEl=$('#title'), tag=$('#tag');
+const ORDER=['home','etc','log','srv','proc','net'].map(id=>DISTRICTS.find(d=>d.id===id));
+const esc=s=>String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const slug=s=>s.replace(/ /g,'-');
+const addr=t=>t.d.label+'/'+t.name;
+const hueOf=d=>'var(--h'+(d.hue+1)+')';
+const link=(text,go,d)=>'<button class="nm" tabindex="-1" data-go="'+esc(go)+'" style="--c:'+hueOf(d)+'">'+esc(text)+'</button>';
+const nmT=t=>link(t.name, addr(t), t.d);
+const nmD=d=>link(d.label, d.label, d);
+const gap=(s,n)=>' '.repeat(Math.max(1, n-s.length));
+const gauge=v=>{ const n=Math.round(clamp(v,0,1)*10); return '['+'#'.repeat(n)+'.'.repeat(10-n)+']'; };
+const total=d=>d.items.reduce((s,it)=>s+it[1],0);
+function print(html){
+  const el=document.createElement('div'); el.className='line'; el.innerHTML=html; out.appendChild(el);
+  while(out.childElementCount>400) out.firstElementChild.remove();
+}
+const say=text=>print(esc(text));
+const toBottom=()=>{ scroller.scrollTop=scroller.scrollHeight; };
+const promptText=()=>'Trame|'+(focusD ? slug(focusD.label) : 'tout')+':/'+(selected ? selected.name : '')+'>';
+
+// Étiquettes des quartiers, posées dans le décor
+const tags=DISTRICTS.map(d=>{
+  const el=document.createElement('button'); el.textContent=d.label; el.tabIndex=-1; el.hidden=true; el.style.setProperty('--c', hueOf(d));
+  el.addEventListener('click', ()=>run('va '+d.label)); $('#places').appendChild(el); return {d, el, on:false};
+});
+
+// Ce qui est allumé : la frappe en cours (live) passe avant une recherche posée (found)
+let live=null, found=null;
+function refreshDim(){
+  const lit=live||found;
+  towers.forEach(t=>{ const m=!!lit && lit.indexOf(t)>=0; t.match=m; t.beam.visible=m;
+    t.dimGoal = lit ? (m ? 1 : .16) : (focusD && t.d!==focusD ? .4 : 1); });
+}
+const matchesFor=a=>{ const s=norm(a.trim()); return s ? towers.filter(t=>t.key.indexOf(s)>=0) : []; };
+
+function setPlace(d,t){
+  focusD=d; selected=t; aim();
+  if(d) term.style.setProperty('--hue', hueOf(d)); else term.style.removeProperty('--hue'); term.classList.toggle('tinted', !!d);
+  titleEl.textContent = t ? d.label+' / '+t.name : d ? d.label : 'Vue d’ensemble';
+  ps.textContent=promptText(); refreshDim();
+}
+function stateOf(t){
+  if(t.d.kind==='proc') return 'charge '+Math.round(t.load*100)+' %';
+  if(t.d.kind==='net') return t.locked ? 'injoignable' : t.ms+' ms';
+  return t.locked ? 'fermé' : t.opened ? 'ouvert pour cette session' : 'ouvert';
+}
+function describe(t){
+  print('<span style="color:'+hueOf(t.d)+'">'+esc(t.path)+'</span>');
+  const rows = t.d.kind==='proc' ? [['Mémoire', fmtSize(t.size)], ['Charge', Math.round(t.load*100)+' %'], ['État', 'en marche']]
+    : t.d.kind==='net' ? [['Volume', fmtSize(t.size)], ['Distance', t.locked ? 'injoignable' : t.ms+' ms'], ['Accès', t.locked ? 'fermé, la porte ne répond pas' : 'ouvert']]
+    : [['Taille', fmtSize(t.size)], ['Propriétaire', t.d.owner], ['Accès', t.locked ? 'fermé, réservé à root' : t.opened ? 'ouvert pour cette session' : 'ouvert']];
+  rows.unshift(['Type', t.o.type]);
+  rows.forEach(r=>say('   '+r[0]+gap(r[0],15)+r[1]));
+  say('   '+t.detail);
+  if(!t.locked && (t.o.data || t.o.type==='agent' || t.o.type==='journal')) say('[Entrée] sur une ligne vide l’ouvre.');
+  if(t.locked && t.d.kind==='file') say('Tape cle pour demander la clé.');
+}
+function goBlock(t){
+  setPlace(t.d, t); nudge(.1); describe(t);
+  if(t.locked){ Sound.deny(); if(t.cage) t.cage.userData.flash=1; } else Sound.chime(t.h/13);
+  Sound.whoosh();
+}
+function goDistrict(d){
+  setPlace(d, null); nudge(.08); Sound.chime(.25); Sound.whoosh();
+  print(nmD(d)+' : '+d.items.length+' objets, '+esc(fmtSize(total(d)))+'. Tape liste pour les voir.');
+}
+function goTop(){ setPlace(null, null); Sound.whoosh(); say('Vue d’ensemble.'); }
+
+// Retrouver un lieu depuis ce qui est tapé : quartier, bloc, « quartier/bloc » ou chemin Unix
+function resolve(raw){
+  const a=norm(raw.trim()).replace(/\/+$/,'');
+  if(!a) return null;
+  if(a==='tout') return {top:true};
+  const dFind=s=>DISTRICTS.find(d=>norm(d.label)===s || slug(norm(d.label))===s || d.id===s || norm(d.prefix).replace(/\/$/,'')===s);
+  const d=dFind(a); if(d) return {d};
+  const pick=list=>{
+    if(list.length===1) return {t:list[0]};
+    if(list.length>1){ const here=list.filter(t=>t.d===focusD); return here.length===1 ? {t:here[0]} : {many:list}; }
+    return null; };
+  const i=a.indexOf('/');
+  if(i>0){ const dd=dFind(a.slice(0,i)), n=a.slice(i+1);
+    if(dd){ const r=pick(towers.filter(t=>t.d===dd && norm(t.name)===n)) || pick(towers.filter(t=>t.d===dd && norm(t.name).indexOf(n)===0)); if(r) return r; } }
+  const byPath=towers.filter(t=>norm(t.path)===a); if(byPath.length===1) return {t:byPath[0]};
+  const dp=DISTRICTS.filter(x=>norm(x.label).indexOf(a)===0);
+  return pick(towers.filter(t=>norm(t.name)===a)) || (dp.length===1 ? {d:dp[0]} : null)
+      || pick(towers.filter(t=>norm(t.name).indexOf(a)===0)) || pick(towers.filter(t=>norm(t.name).indexOf(a)>=0));
+}
+function ambiguous(list){
+  say(list.length+' blocs portent ce nom. Précise le quartier :');
+  list.slice(0,10).forEach(t=>print('   '+link(addr(t), addr(t), t.d)));
+}
+
+const HELP_C=['Commandes de Trame :','Tape-les directement à l’invite. Les noms soulignés se cliquent.',
+  '   liste              - Montre ce qu’il y a ici.',
+  '   va [nom]           - Va à un quartier ou à un bloc. Sans nom : vue d’ensemble.',
+  '   retour             - Remonte d’un cran.',
+  '   info [nom]         - Décrit un bloc.',
+  '   cle [nom]          - Demande la clé d’un bloc fermé.',
+  '   cherche [texte]    - Allume ce qui répond. Sans texte : éteint.',
+  '   charge             - Classe les programmes en marche par charge.',
+  '   ambiance [c|a|i]   - Calme, auto (suit ton rythme) ou intense.',
+  '   son [oui|non]      - Coupe ou remet le son.',
+  '   efface             - Vide le terminal.',
+  'Les habitudes Unix passent aussi : ls, cd, find, top, clear.'];
+const HELP_K=['Touches de Trame :',
+  '   [Alt]+[0]            - Vue d’ensemble.',
+  '   [Alt]+[1] à [6]      - Va au quartier de ce numéro.',
+  '   [Tab]                - Complète la commande ou le nom.',
+  '   [haut] [bas]         - Rappelle les commandes déjà tapées.',
+  '   [PgPréc] [PgSuiv]    - Fait défiler le terminal.',
+  '   [Échap]              - Remonte d’un cran.',
+  '   Souris               - Glisse pour tourner, molette pour approcher, clique un bloc.'];
+
+let soundOn=true;
+const MOODS={calme:'calme', c:'calme', auto:'auto', a:'auto', intense:'intense', i:'intense'};
+function setKnobs(){ $('#m-mood-v').textContent=mood.mode; $('#m-sound-v').textContent=soundOn ? Sound.style : 'non'; $('#m-irc-v').textContent=unreadAll(); }
+const CMD={
+  aide(a){ const k=norm(a);
+    if(k==='c') HELP_C.forEach(say); else if(k==='k') HELP_K.forEach(say);
+    else ['Utilise aide avec ces paramètres :','   aide c   - Donne la liste des commandes.','   aide k   - Donne la liste des touches.'].forEach(say); },
+  liste(){
+    if(!focusD){
+      say('Six quartiers :');
+      ORDER.forEach((d,i)=>print('   '+(i+1)+'  '+nmD(d)+gap(d.label,12)+esc((d.items.length+' blocs').padStart(9)+fmtSize(total(d)).padStart(11))));
+      say('Tape va suivi d’un nom, ou clique-le.'); return; }
+    const list=towers.filter(t=>t.d===focusD).sort((a,b)=>b.size-a.size);
+    print(nmD(focusD)+' : '+list.length+' blocs, '+esc(fmtSize(total(focusD))));
+    list.forEach(t=>print('   '+nmT(t)+gap(t.name,21)+esc(fmtSize(t.size).padStart(8)+'   '+stateOf(t))));
+  },
+  va(a){
+    if(!a || a==='/'){ goTop(); return; }
+    const r=resolve(a);
+    if(!r) say('Rien ne porte ce nom ici : '+a);
+    else if(r.top) goTop(); else if(r.d) goDistrict(r.d); else if(r.t) goBlock(r.t); else ambiguous(r.many);
+  },
+  retour(){
+    if(selected){ const d=focusD; setPlace(d, null); Sound.whoosh(); print(nmD(d)+'.'); }
+    else if(focusD) goTop();
+    else say('Tu es déjà tout en haut.');
+  },
+  info(a){
+    const r=a ? resolve(a) : null, t=a ? (r && r.t) : selected;
+    if(t) describe(t);
+    else if(r && r.many) ambiguous(r.many);
+    else if(r && r.d) print(nmD(r.d)+' : '+r.d.items.length+' blocs, '+esc(fmtSize(total(r.d)))+'.');
+    else say(a ? 'Rien ne porte ce nom ici : '+a : 'Info sur quoi ? Tape info suivi d’un nom, ou va d’abord sur un bloc.');
+  },
+  cle(a){
+    const r=a ? resolve(a) : null, t=a ? (r && r.t) : selected;
+    if(!t){ if(r && r.many) ambiguous(r.many); else say(a ? 'Rien ne porte ce nom ici : '+a : 'La clé de quoi ? Tape cle suivi d’un nom, ou va d’abord sur un bloc fermé.'); return; }
+    if(!t.locked){ say('Ce bloc n’est pas fermé : '+t.path); return; }
+    if(t.d.kind!=='file'){ Sound.deny(); if(t.cage) t.cage.userData.flash=1; say('Cette porte ne s’ouvre pas d’ici : '+t.name+' ne répond pas.'); return; }
+    t.locked=false; t.opened=true; if(t.cage) t.cage.userData.melt=0; Sound.unlock(); nudge(.3);
+    say('Clé accordée pour cette session : '+t.path); lastKey=t.path; ircPost('#veille', 'portier', 'Clé accordée pour '+t.path+'.');
+  },
+  cherche(a){
+    live=null;
+    if(!a){ found=null; refreshDim(); say('Recherche éteinte.'); return; }
+    found=matchesFor(a); refreshDim();
+    if(!found.length){ say('Rien ne répond à « '+a+' ».'); return; }
+    say(found.length===1 ? 'Un bloc répond :' : found.length+' blocs répondent :');
+    found.slice(0,12).forEach(t=>print('   '+link(addr(t), addr(t), t.d)+gap(addr(t),30)+esc(fmtSize(t.size).padStart(8))));
+    if(found.length>12) say('   et '+(found.length-12)+' autres.');
+    say('Tape cherche seul pour éteindre.');
+  },
+  charge(){
+    say('Programmes en marche, du plus chargé au moins chargé :');
+    towers.filter(t=>t.d.kind==='proc').sort((a,b)=>b.load-a.load).forEach(t=>
+      print('   '+nmT(t)+gap(t.name,16)+esc(gauge(t.load)+(Math.round(t.load*100)+' %').padStart(6)+fmtSize(t.size).padStart(10))));
+  },
+  ambiance(a){
+    if(!a){ say('Ambiance : '+mood.mode+', niveau '+gauge(mood.I)+'. Choix : calme, auto, intense.'); return; }
+    const m=MOODS[norm(a)];
+    if(!m){ say('Ambiance inconnue : '+a+'. Choix : calme, auto, intense.'); return; }
+    mood.mode=m; setKnobs(); say('Ambiance : '+m+'.');
+  },
+  son(a){
+    const k=norm(a), on = k ? ['oui','on','1','o'].indexOf(k)>=0 : !soundOn;
+    if(k && !on && ['non','off','0','n'].indexOf(k)<0){ say('Son : oui ou non.'); return; }
+    soundOn=on; if(on && !Sound.ready) Sound.start(); Sound.mute(!on); setKnobs(); say(on ? 'Son remis.' : 'Son coupé.');
+  },
+  efface(){ out.innerHTML=''; }
+};
+const ALIAS={};
+[['aide','help','?','man'],['liste','ls','l','ll','dir'],['va','cd','go','aller'],['retour','..','back','haut'],['info','i','stat','cat'],
+ ['cle','key','sudo'],['cherche','find','grep','search'],['charge','top','ps','htop'],['ambiance','mood'],['son','sound'],['efface','clear','cls']]
+  .forEach(a=>a.forEach(w=>{ ALIAS[w]=a[0]; }));
+
+function exec(text){
+  const s=text.trim(); if(!s) return;
+  if(/^\d+$/.test(s)){ const c=lastList[+s-1]; if(c) exec(c); else say(lastList.length ? 'Cette ligne ne mène nulle part : '+s : 'Pas de liste à suivre pour l’instant.'); return; }
+  if(/^select\b/i.test(s)){ CMD.sql(s); return; }
+  const sp=s.search(/\s/), word=sp<0 ? s : s.slice(0,sp), arg=sp<0 ? '' : s.slice(sp+1).trim();
+  const c=ALIAS[norm(word)];
+  if(c){ if(c==='va' && norm(arg)==='..') CMD.retour(); else CMD[c](arg); return; }
+  const r=resolve(s);
+  say('Commande inconnue : '+word+(r && (r.t||r.d) ? '. Pour y aller : va '+s : ''));
+}
+// Tout passe par ici, que ce soit tapé ou cliqué : le clic s’écrit dans le terminal comme une commande
+function run(text){
+  if(!entered) return;
+  print('<span class="ps">'+esc(promptText())+'</span><span class="cmd">'+esc(text)+'</span>');
+  exec(text); ps.textContent=promptText(); nudge(.05); toBottom();
+}
+
+// Frappe : ce qu’on est en train de nommer s’allume déjà
+const NAMED={va:1, info:1, cle:1, cherche:1};
+function onType(){
+  const v=q.value, sp=v.search(/\s/), c=sp<0 ? null : ALIAS[norm(v.slice(0,sp))], a=sp<0 ? '' : v.slice(sp+1);
+  live = c && NAMED[c] && a.trim() ? matchesFor(a) : null; refreshDim();
+}
+function complete(){
+  const v=q.value, sp=v.search(/\s/);
+  const show=list=>{ print('<span class="ps">'+esc(promptText())+'</span><span class="cmd">'+esc(v)+'</span>'); say(list.slice(0,18).join('   ')+(list.length>18 ? '   …' : '')); toBottom(); };
+  if(sp<0){ const c=Object.keys(CMD).filter(k=>k.indexOf(norm(v))===0);
+    if(c.length===1) q.value=c[0]+' '; else if(c.length>1) show(c); return; }
+  const head=v.slice(0,sp+1), a=norm(v.slice(sp+1).trimStart()), names=[];
+  const add=n=>{ if(norm(n).indexOf(a)===0 && names.indexOf(n)<0) names.push(n); };
+  DISTRICTS.forEach(d=>add(d.label)); towers.forEach(t=>{ if(t.d===focusD) add(t.name); }); towers.forEach(t=>add(t.name));
+  if(names.length===1) q.value=head+names[0];
+  else if(names.length>1){
+    let p=names[0]; names.forEach(n=>{ while(p && norm(n).indexOf(norm(p))!==0) p=p.slice(0,-1); });
+    if(norm(p).length>a.length) q.value=head+p; else show(names); }
+  onType();
+}
+const hist=[]; let histAt=0;
+q.addEventListener('input', ()=>{ onType(); nudge(.03); Sound.key(q.value.length ? q.value.charCodeAt(q.value.length-1) : 0); });
+q.addEventListener('keydown', e=>{
+  if(e.altKey || e.metaKey || e.ctrlKey) return;
+  if(e.key==='Enter'){ const v=q.value; q.value=''; live=null; refreshDim();
+    if(v.trim()){ hist.push(v); if(hist.length>60) hist.shift(); run(v); } else if(selected){ run('ouvre'); } else { print('<span class="ps">'+esc(promptText())+'</span>'); toBottom(); }
+    histAt=hist.length; e.preventDefault(); }
+  else if(e.key==='Tab'){ complete(); e.preventDefault(); }
+  else if(e.key==='ArrowUp'){ if(histAt>0){ histAt--; q.value=hist[histAt]; onType(); } e.preventDefault(); }
+  else if(e.key==='ArrowDown'){ if(histAt<hist.length){ histAt++; q.value=hist[histAt]||''; onType(); } e.preventDefault(); }
+  else if(e.key==='PageUp'){ scroller.scrollTop-=scroller.clientHeight*.8; e.preventDefault(); }
+  else if(e.key==='PageDown'){ scroller.scrollTop+=scroller.clientHeight*.8; e.preventDefault(); }
+  else if(e.key==='Escape'){ if(!menu.hidden) openMenu(false); else if(q.value){ q.value=''; onType(); } else if(found){ run('cherche'); } else if(selected||focusD) run('retour'); e.preventDefault(); }
+});
+term.addEventListener('click', e=>{
+  const b=e.target.closest && e.target.closest('[data-go]');
+  if(b){ run('va '+b.dataset.go); }
+  if(entered && !window.getSelection().toString()) q.focus({preventScroll:true});
+});
+
+// Bandeau : les deux réglages sont du texte cliquable, et s’écrivent eux aussi dans le terminal
+$('#m-mood').addEventListener('click', ()=>{ const o=['calme','auto','intense'], n=o[(o.indexOf(mood.mode)+1)%3]; if(entered) run('ambiance '+n); else { mood.mode=n; setKnobs(); } });
+$('#m-sound').addEventListener('click', ()=>{ if(entered) SHORT.s(); });
+let meterTick=0;
+function setMeter(I){ $('#meter').textContent=gauge(I); }
+
+// Menu des écrans
+const menu=$('#menu'), menuBtn=$('#menu-btn');
+function openMenu(o){ menu.hidden=!o; menuBtn.setAttribute('aria-expanded', String(o)); }
+[{label:'vue d’ensemble', go:'tout'}].concat(ORDER.map(d=>({label:d.label, go:d.label, d}))).forEach((it,i)=>{
+  const b=document.createElement('button'); b.textContent='[Alt]+['+i+']  '+it.label; if(it.d) b.style.setProperty('--c', hueOf(it.d));
+  b.addEventListener('click', ()=>{ openMenu(false); run('va '+it.go); if(entered) q.focus({preventScroll:true}); }); menu.appendChild(b);
+});
+menuBtn.addEventListener('click', e=>{ e.stopPropagation(); if(entered) openMenu(menu.hidden); });
+document.addEventListener('click', e=>{ if(!menu.hidden && !menu.contains(e.target)) openMenu(false); });
+
+// Démarrage : un écran vert qui s’écrit ligne à ligne, puis on entre
+function enter(withSound){
+  if(entered) return; entered=true;
+  term.classList.remove('boot'); out.innerHTML=''; $('#boot-go').hidden=true; $('#prompt').hidden=false;
+  soundOn=withSound; if(withSound) Sound.start(); setKnobs();
+  setPlace(null, null); if(reduce) Object.assign(cam, goal);
+  say('Trame 0.3. Tape aide pour commencer. [Alt]+[E] ouvre le menu des écrans et des applications.');
+  Sound.whoosh(); toBottom();
+  if(!window.matchMedia('(pointer: coarse)').matches) q.focus({preventScroll:true});
+}
+$('#enter').addEventListener('click', ()=>enter(true));
+$('#enter-mute').addEventListener('click', ()=>enter(false));
+function boot(){
+  const lines=['Trame 0.3, maquette','',
+    'Base interne ........ '+OBJ.length+' objets, '+new Set(OBJ.map(o=>o.type)).size+' types',
+    'Bibliothèques ....... '+DISTRICTS.length+', dont '+towers.filter(t=>t.locked).length+' objets fermés',
+    'Agents .............. '+AGENTS.map(a=>a.nom).join(', '),
+    'Circulation ......... '+NP+' grains de lumière',
+    'Son ................. en attente d’un geste',
+    'Système prêt.'];
+  const done=()=>{ if(!entered) $('#boot-go').hidden=false; };
+  if(reduce){ lines.forEach(say); done(); return; }
+  lines.forEach((l,i)=>setTimeout(()=>{ if(!entered){ say(l); if(i===lines.length-1) done(); } }, 250+i*150));
+}
+
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden) Sound.pause(); else Sound.resume(); });
+
+// Pointeur dans le décor : glisser pour tourner, pincer ou molette pour approcher, cliquer pour y aller
+const ptrs=new Map(); let moved=0, pinch=0;
+const ray=new THREE.Raycaster(), ndc=new THREE.Vector2(); let lastPtr=null;
+function pickAt(x,y){
+  ndc.set((x-stageLeft)/W*2-1, -((y-stageTop)/H)*2+1); ray.setFromCamera(ndc, camera);
+  const hit=ray.intersectObjects(bodies, false)[0]; return hit ? hit.object.userData.t : null;
+}
+canvas.addEventListener('pointerdown', e=>{
+  if(!entered) return; Sound.resume();
+  canvas.setPointerCapture(e.pointerId); ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY}); moved=0;
+  if(ptrs.size===2){ const a=[...ptrs.values()]; pinch=Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y); }
+  canvas.classList.add('drag');
+});
+canvas.addEventListener('pointermove', e=>{
+  lastPtr={x:e.clientX,y:e.clientY, touch:e.pointerType==='touch'};
+  const p=ptrs.get(e.pointerId); if(!p) return;
+  const dx=e.clientX-p.x, dy=e.clientY-p.y; p.x=e.clientX; p.y=e.clientY;
+  if(ptrs.size===2){
+    const a=[...ptrs.values()], d=Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y);
+    if(pinch>0) goal.r=clamp(goal.r*pinch/d, 9, 130); pinch=d; moved+=10; return;
+  }
+  moved+=Math.abs(dx)+Math.abs(dy);
+  goal.th-=dx*.0052; goal.ph=clamp(goal.ph-dy*.0042, .3, 1.5);
+  nudge((Math.abs(dx)+Math.abs(dy))*.00045);
+});
+function release(e){
+  if(!ptrs.has(e.pointerId)) return;
+  ptrs.delete(e.pointerId); if(ptrs.size<2) pinch=0;
+  if(!ptrs.size) canvas.classList.remove('drag');
+  if(e.type==='pointerup' && moved<6){ const t=pickAt(e.clientX,e.clientY); if(t) run('va '+addr(t)); else if(selected) run('retour'); }
+  if(e.pointerType!=='touch') q.focus({preventScroll:true});
+}
+canvas.addEventListener('pointerup', release); canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('pointerleave', ()=>{ lastPtr=null; });
+canvas.addEventListener('wheel', e=>{ if(!entered) return; e.preventDefault(); goal.r=clamp(goal.r*Math.exp(e.deltaY*.0011), 9, 130); nudge(.02); }, {passive:false});
+
+/* ═══════════════════════ Base interne : tout est objet ═══════════════════════ */
+const TYPE_BY_LIB={etc:'réglage', srv:'base', log:'journal', proc:'programme', net:'porte', home:'dossier'};
+const OBJ=towers.map(t=>{
+  const it=t.d.items.find(i=>i[0]===t.name);
+  const o={nom:t.name, type:it[5]||TYPE_BY_LIB[t.d.id], bib:t.d.label, taille:t.size, proprio:t.d.owner||'système', chemin:t.path, t, data:null};
+  if(it[5] && SEED[t.name]) o.data=JSON.parse(JSON.stringify(SEED[t.name]));
+  t.o=o; return o;
+});
+const byType=ty=>OBJ.filter(o=>o.type===ty);
+const COLS={nom:o=>o.nom, type:o=>o.type, bib:o=>o.bib, taille:o=>o.taille, proprio:o=>o.proprio, chemin:o=>o.chemin,
+  acces:o=>o.t.locked ? 'fermé' : 'ouvert', charge:o=>o.t.d.kind==='proc' ? Math.round(o.t.load*100) : 0};
+// Ce que tu modifies (feuilles, piles, textes, salons) reste dans ce navigateur
+const STORE='trame-0.3', KEEP={feuille:1, pile:1, texte:1, salon:1};
+function saveDB(){ clearTimeout(saveDB.h); saveDB.h=setTimeout(()=>{ try{ const d={}; OBJ.forEach(o=>{ if(o.data && KEEP[o.type]) d[o.chemin]=o.data; }); localStorage.setItem(STORE, JSON.stringify(d)); }catch(e){} }, 400); }
+try{ const d=JSON.parse(localStorage.getItem(STORE)||'null'); if(d) OBJ.forEach(o=>{ if(o.data && KEEP[o.type] && d[o.chemin]) o.data=d[o.chemin]; }); }catch(e){}
+
+const SIZEU={ko:1/1024, mo:1, go:1000, to:1e6};
+function agg(expr, objs){
+  const k=/^(count|sum|avg|max|min)\((\*|\w+)\)$/.exec(expr); if(!k) return undefined;
+  if(k[1]==='count') return objs.length;
+  const f=COLS[k[2]]; if(!f) throw new Error('Colonne inconnue : '+k[2]);
+  const xs=objs.map(f).filter(x=>typeof x==='number'); if(!xs.length) return 0;
+  const sum=xs.reduce((a,b)=>a+b,0);
+  return k[1]==='sum' ? sum : k[1]==='avg' ? sum/xs.length : k[1]==='max' ? Math.max.apply(null,xs) : Math.min.apply(null,xs);
+}
+function sqlRun(q){
+  const m=/^select\s+(.+?)\s+from\s+objets(?:\s+where\s+(.+?))?(?:\s+group\s+by\s+(\w+))?(?:\s+order\s+by\s+([\w(*)]+)(?:\s+(asc|desc))?)?(?:\s+limit\s+(\d+))?\s*;?\s*$/i.exec(q.trim());
+  if(!m) throw new Error('Requête non comprise. Forme : select colonnes from objets [where …] [group by colonne] [order by colonne [desc]] [limit n]');
+  let rows=OBJ.slice();
+  if(m[2]) m[2].split(/\s+and\s+/i).forEach(c=>{
+    const k=/^(\w+)\s*(=|!=|<>|>=|<=|>|<|like)\s*(.+)$/i.exec(c.trim()), col=k && COLS[k[1].toLowerCase()];
+    if(!col) throw new Error('Condition non comprise : '+c);
+    const op=k[2].toLowerCase(), raw=k[3].trim().replace(/^['"]|['"]$/g,'');
+    if(typeof col(OBJ[0])==='number'){
+      const n=/^([\d.,]+)\s*(ko|mo|go|to)?$/i.exec(raw); if(!n) throw new Error('Il faut un nombre dans : '+c);
+      const v=parseFloat(n[1].replace(',','.'))*(n[2] ? SIZEU[n[2].toLowerCase()] : 1);
+      rows=rows.filter(o=>{ const x=col(o); return op==='=' ? x===v : op==='!='||op==='<>' ? x!==v : op==='>' ? x>v : op==='<' ? x<v : op==='>=' ? x>=v : op==='<=' ? x<=v : false; });
+    } else {
+      const v=norm(raw), re=op==='like' ? new RegExp('^'+v.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/%/g,'.*')+'$') : null;
+      rows=rows.filter(o=>{ const x=norm(String(col(o))); return op==='=' ? x===v : op==='!='||op==='<>' ? x!==v : op==='like' ? re.test(x) : op==='>' ? x>v : op==='<' ? x<v : false; });
+    }
+  });
+  let cols=m[1].split(',').map(s=>s.trim().toLowerCase()), out;
+  const isAgg=c=>/^\w+\(/.test(c);
+  if(m[3]){
+    const g=m[3].toLowerCase(), f=COLS[g]; if(!f) throw new Error('Colonne inconnue : '+g);
+    cols.forEach(c=>{ if(c!==g && agg(c,[])===undefined) throw new Error('Avec group by, garde la colonne groupée et des agrégats. En trop : '+c); });
+    const map=new Map(); rows.forEach(o=>{ const k=String(f(o)); if(!map.has(k)) map.set(k,[]); map.get(k).push(o); });
+    out=[...map].map(e=>({v:cols.map(c=>c===g ? e[0] : agg(c,e[1])), objs:e[1]}));
+  } else if(cols.every(isAgg)){
+    cols.forEach(c=>{ if(agg(c,[])===undefined) throw new Error('Agrégat non compris : '+c); });
+    out=[{v:cols.map(c=>agg(c,rows)), objs:rows}];
+  } else {
+    if(cols.length===1 && cols[0]==='*') cols=['nom','type','bib','taille','acces'];
+    cols.forEach(c=>{ if(!COLS[c]) throw new Error('Colonne inconnue : '+c+'. Colonnes : '+Object.keys(COLS).join(', ')); });
+    out=rows.map(o=>({v:cols.map(c=>COLS[c](o)), o}));
+  }
+  if(m[4]){
+    const oc=m[4].toLowerCase(), i=cols.indexOf(oc), dir=(m[5]||'asc').toLowerCase()==='desc' ? -1 : 1;
+    const key=i>=0 ? r=>r.v[i] : COLS[oc] ? r=>r.o ? COLS[oc](r.o) : 0 : null; if(!key) throw new Error('Tri impossible sur '+oc);
+    out.sort((a,b)=>{ const x=key(a), y=key(b); return (typeof x==='number' && typeof y==='number' ? x-y : String(x).localeCompare(String(y),'fr'))*dir; });
+  }
+  if(m[6]) out=out.slice(0,+m[6]);
+  return {cols, rows:out};
+}
+const fmtCell=(c,v)=>typeof v!=='number' ? String(v) : /taille/.test(c) ? fmtSize(v) : /charge/.test(c) ? Math.round(v)+' %' : v.toLocaleString('fr-FR',{maximumFractionDigits:1});
+function table(r, max){
+  const rows=r.rows.slice(0,max).map(x=>x.v.map((v,i)=>fmtCell(r.cols[i],v)));
+  const w=r.cols.map((c,i)=>rows.reduce((a,x)=>Math.max(a,x[i].length), c.length));
+  const num=r.cols.map((c,i)=>r.rows.length>0 && typeof r.rows[0].v[i]==='number');
+  const fmt=x=>x.map((s,i)=>num[i] ? s.padStart(w[i]) : s.padEnd(w[i])).join('  ');
+  return {head:fmt(r.cols), lines:rows.map(fmt)};
+}
+const sqlText=q=>{ const r=sqlRun(String(q)), t=table(r,40); return [t.head].concat(t.lines).join('\n')+(r.rows.length>40 ? '\n… '+(r.rows.length-40)+' lignes de plus' : ''); };
+
+// Listes numérotées : taper le numéro d’une ligne suit cette ligne
+let lastList=[];
+function numbered(items){ lastList=items.map(i=>i.cmd); items.forEach((it,i)=>print(esc(('['+(i+1)+']').padStart(4)+' ')+it.html)); }
+
+/* ═══════════════════════ Applications ═══════════════════════ */
+const appEl=$('#app'), amain=$('#app-main'), abody=$('#app-body'), acv=$('#app-cv'), akeys=$('#app-keys'), askRow=$('#app-ask'), askL=$('#app-ask-l'), askIn=$('#app-in');
+const actx=acv.getContext('2d');
+const APPS={}; let cur=null, askCb=null, askKeep=false, lastOpened=null, lastKey=null;
+function metrics(){ const s=document.createElement('span'); s.textContent='M'.repeat(40); s.style.cssText='visibility:hidden;position:absolute'; abody.appendChild(s);
+  const r=s.getBoundingClientRect(); s.remove(); return {cw:r.width/40||10, lh:r.height||22}; }
+function hideAsk(){ askRow.hidden=true; askCb=null; askIn.type='text'; askIn.blur(); }
+function ask(label, init, cb, keep){ askRow.hidden=false; askL.textContent=label; askIn.value=init||''; askCb=cb; askKeep=!!keep; askIn.focus({preventScroll:true}); }
+function setAppTitle(extra){ titleEl.textContent=cur.titre+(extra ? ' / '+extra : ''); }
+function openApp(id, o){
+  if(!entered) return;
+  if(cur && cur.close) cur.close();
+  cur=APPS[id]; appEl.hidden=false; hideAsk(); q.blur(); openMenu(false);
+  acv.hidden=!cur.canvas; abody.hidden=!!cur.canvas; abody.innerHTML=''; akeys.textContent=cur.keys; amain.scrollTop=0;
+  if(o && o.t) lastOpened=o;
+  setAppTitle(); cur.open(o); nudge(.1); Sound.chime(.5);
+}
+function closeApp(){
+  if(!cur){ if(entered) q.focus({preventScroll:true}); return; }
+  if(cur.close) cur.close(); cur=null; appEl.hidden=true; hideAsk();
+  titleEl.textContent = selected ? focusD.label+' / '+selected.name : focusD ? focusD.label : 'Vue d’ensemble';
+  q.focus({preventScroll:true});
+}
+askIn.addEventListener('keydown', e=>{
+  if(e.altKey || e.metaKey || e.ctrlKey) return;
+  e.stopPropagation();
+  if(e.key==='Enter'){ const v=askIn.value, cb=askCb; if(askKeep) askIn.value=''; else hideAsk(); if(cb) cb(v); e.preventDefault(); }
+  else if(e.key==='Escape'){ if(askKeep) closeApp(); else { hideAsk(); if(cur && cur.draw) cur.draw(); } e.preventDefault(); }
+  else if(cur && cur.inKey && cur.inKey(e)) e.preventDefault();
+});
+askIn.addEventListener('input', ()=>{ nudge(.03); if(askIn.type==='text') Sound.key(askIn.value.length ? askIn.value.charCodeAt(askIn.value.length-1) : 0); });
+
+/* ── Tableur ── */
+(function(){
+  const NC=8, NR=40, CW=11, L='ABCDEFGH'; let o, cx=0, cy=0, top=0;
+  const id=(x,y)=>L[x]+(y+1), isRef=s=>/^[A-Ha-h]\d+$/.test(s||'');
+  function tok(src){ const out=[], re=/\s*([A-Za-z]\d+|[A-Za-zÀ-ÿ]+|\d+(?:[.,]\d+)?|[-+*\/():;])/y; let m;
+    while(re.lastIndex<src.length && (m=re.exec(src))) out.push(m[1]);
+    if(src.slice(re.lastIndex).trim()) throw 0; return out; }
+  function calc(src, depth){
+    const t=tok(src); let p=0;
+    const cell=r=>{ const v=value(r.toUpperCase(), depth+1); return typeof v==='number' ? v : v==='' ? 0 : NaN; };
+    function range(a,b){ const x0=L.indexOf(a[0].toUpperCase()), x1=L.indexOf(b[0].toUpperCase()), y0=+a.slice(1), y1=+b.slice(1), xs=[];
+      for(let x=Math.min(x0,x1);x<=Math.max(x0,x1);x++) for(let y=Math.min(y0,y1);y<=Math.max(y0,y1);y++){ const v=value(L[x]+y, depth+1); if(typeof v==='number') xs.push(v); }
+      return xs; }
+    function atom(){
+      const k=t[p++]; if(k===undefined) throw 0;
+      if(k==='('){ const v=expr(); if(t[p++]!==')') throw 0; return v; }
+      if(k==='-') return -atom();
+      if(k==='+') return atom();
+      if(/^\d/.test(k)) return parseFloat(k.replace(',','.'));
+      if(isRef(k)) return cell(k);
+      const f=norm(k); if(t[p++]!=='(') throw 0; let xs=[];
+      while(t[p]!==')'){
+        if(isRef(t[p]) && t[p+1]===':' && isRef(t[p+2])){ xs=xs.concat(range(t[p],t[p+2])); p+=3; } else xs.push(expr());
+        if(t[p]===';') p++; else if(t[p]!==')') throw 0;
+      }
+      p++;
+      const sum=xs.reduce((a,b)=>a+b,0);
+      if(f==='somme'||f==='sum') return sum;
+      if(f==='moyenne'||f==='moy'||f==='avg') return xs.length ? sum/xs.length : 0;
+      if(f==='min') return Math.min.apply(null,xs);
+      if(f==='max') return Math.max.apply(null,xs);
+      if(f==='nb') return xs.length;
+      throw 0;
+    }
+    function term(){ let v=atom(); while(t[p]==='*'||t[p]==='/'){ const op=t[p++], w=atom(); v=op==='*' ? v*w : v/w; } return v; }
+    function expr(){ let v=term(); while(t[p]==='+'||t[p]==='-'){ const op=t[p++], w=term(); v=op==='+' ? v+w : v-w; } return v; }
+    const v=expr(); if(p<t.length) throw 0; return v;
+  }
+  function value(k, depth){
+    const raw=(o.data.c[k]||'').trim(); if(!raw) return '';
+    if(raw[0]!=='=') return /^-?\d+(?:[.,]\d+)?$/.test(raw) ? parseFloat(raw.replace(',','.')) : raw;
+    if(depth>24) return '#CYCLE';
+    try{ const v=calc(raw.slice(1), depth); return isFinite(v) ? v : '#ERR'; }catch(e){ return '#ERR'; }
+  }
+  const show=v=>typeof v==='number' ? v.toLocaleString('fr-FR',{maximumFractionDigits:2}) : String(v);
+  function draw(){
+    const rows=Math.max(5, Math.floor((amain.clientHeight-12)/metrics().lh)-3);
+    if(cy<top) top=cy; if(cy>=top+rows) top=cy-rows+1;
+    let out=esc((id(cx,cy)+' :').padEnd(6)+(o.data.c[id(cx,cy)]||''))+'\n\n'+esc('    '+L.split('').map(c=>c.padStart(6).padEnd(CW)).join(''));
+    for(let y=top;y<top+rows && y<NR;y++){
+      let ln=esc(String(y+1).padStart(3)+' ');
+      for(let x=0;x<NC;x++){
+        const v=value(id(x,y),0); let s=show(v); if(s.length>CW-1) s=s.slice(0,CW-2)+'…';
+        s=typeof v==='number' ? s.padStart(CW-1)+' ' : s.padEnd(CW);
+        ln+= x===cx && y===cy ? '<span class="inv">'+esc(s)+'</span>' : esc(s);
+      }
+      out+='\n'+ln;
+    }
+    abody.innerHTML=out;
+  }
+  APPS.tableur={titre:'Tableur', keys:'[flèches] bouger   [Entrée] modifier   [Suppr] vider   formules : =B2*12  =SOMME(B2:B6)  =MOYENNE(…)   [Échap] quitter',
+    open(x){ o=x && x.type==='feuille' ? x : byType('feuille')[0]; cx=cy=top=0; setAppTitle(o.nom); draw(); }, draw,
+    key(e){ const k=e.key;
+      if(k==='ArrowLeft') cx=Math.max(0,cx-1); else if(k==='ArrowRight') cx=Math.min(NC-1,cx+1);
+      else if(k==='ArrowUp') cy=Math.max(0,cy-1); else if(k==='ArrowDown') cy=Math.min(NR-1,cy+1);
+      else if(k==='Home') cx=0; else if(k==='PageDown') cy=Math.min(NR-1,cy+10); else if(k==='PageUp') cy=Math.max(0,cy-10);
+      else if(k==='Delete'||k==='Backspace'){ delete o.data.c[id(cx,cy)]; saveDB(); }
+      else if(k==='Enter'||k==='F2'||k.length===1){
+        const c=id(cx,cy);
+        ask(c+' = ', k.length===1 ? k : (o.data.c[c]||''), v=>{ if(v.trim()) o.data.c[c]=v.trim(); else delete o.data.c[c]; saveDB(); cy=Math.min(NR-1,cy+1); draw(); });
+        return true; }
+      else return false;
+      draw(); return true; } };
+})();
+
+/* ── Piles (cartes reliées) ── */
+(function(){
+  let o, i=0; const W=58;
+  function wrap(s,w){ const out=[]; s.split('|').forEach(p=>{ let ln=''; p.trim().split(/\s+/).forEach(wd=>{ if(ln && (ln+' '+wd).length>w){ out.push(ln); ln=wd; } else ln=ln ? ln+' '+wd : wd; }); out.push(ln); }); return out; }
+  function draw(){
+    const c=o.data.cartes[i], bar='+'+'-'.repeat(W+2)+'+', row=s=>'| '+s.padEnd(W)+' |';
+    const L=[bar,row(c.t.toUpperCase()),bar,row('')].concat(wrap(c.x,W).map(row), [row('')], c.l.map((l,k)=>row('['+(k+1)+'] '+l[0])), [bar,'','carte '+(i+1)+' sur '+o.data.cartes.length]);
+    abody.innerHTML=esc(L.join('\n')); setAppTitle(o.nom+' / '+c.t);
+  }
+  APPS.piles={titre:'Piles', keys:'[←][→] carte   [1-9] suivre un lien   [E] texte   [T] titre   [N] nouvelle carte   [L] lien   [Suppr] retirer   [Échap] quitter',
+    open(x){ o=x && x.type==='pile' ? x : byType('pile')[0]; i=0; draw(); }, draw,
+    key(e){ const k=e.key.toLowerCase(), cs=o.data.cartes, c=cs[i];
+      if(k==='arrowleft'||k==='pageup') i=(i+cs.length-1)%cs.length;
+      else if(k==='arrowright'||k==='pagedown'||k===' ') i=(i+1)%cs.length;
+      else if(/^[1-9]$/.test(k)){ const l=c.l[+k-1]; if(l) i=Math.min(cs.length-1, l[1]); }
+      else if(k==='e'){ ask('Texte (| pour aller à la ligne) : ', c.x, v=>{ c.x=v; saveDB(); draw(); }); return true; }
+      else if(k==='t'){ ask('Titre : ', c.t, v=>{ if(v.trim()) c.t=v.trim(); saveDB(); draw(); }); return true; }
+      else if(k==='n'){ ask('Titre de la nouvelle carte : ', '', v=>{ if(v.trim()){ cs.push({t:v.trim(), x:'', l:[['Retour à la première carte',0]]}); i=cs.length-1; saveDB(); } draw(); }); return true; }
+      else if(k==='l'){ ask('Lien, sous la forme « libellé > numéro de carte » : ', '', v=>{ const m=/^(.+?)\s*>\s*(\d+)$/.exec(v.trim()); if(m && +m[2]>=1 && +m[2]<=cs.length){ c.l.push([m[1], +m[2]-1]); saveDB(); } draw(); }); return true; }
+      else if(k==='delete'){ if(cs.length>1){ cs.splice(i,1); cs.forEach(x=>{ x.l=x.l.filter(l=>l[1]!==i).map(l=>[l[0], l[1]>i ? l[1]-1 : l[1]]); }); i=Math.min(i,cs.length-1); saveDB(); } }
+      else return false;
+      draw(); return true; } };
+})();
+
+/* ── Jeu : un couloir en vue subjective, dessiné rayon par rayon ── */
+(function(){
+  const Wd=320, Hd=200, zb=new Float32Array(Wd);
+  let o, map, px, py, dx, dy, plx, ply, mons, hp, cool, flash, state, raf, last, down={};
+  const wall=c=>c==='#'||c==='%'||c===undefined;
+  const solid=(x,y)=>wall((map[Math.floor(y)]||'')[Math.floor(x)]);
+  function reset(){
+    map=o.data.m; mons=[];
+    map.forEach((r,y)=>{ for(let x=0;x<r.length;x++){ if(r[x]==='P'){ px=x+.5; py=y+.5; } if(r[x]==='M') mons.push({x:x+.5, y:y+.5, hp:2, hit:0}); } });
+    dx=1; dy=0; plx=0; ply=.66; hp=100; cool=0; flash=0; state='play';
+  }
+  function los(ax,ay,bx,by){ const n=Math.ceil(Math.hypot(bx-ax,by-ay)/.15); for(let i=1;i<n;i++) if(solid(ax+(bx-ax)*i/n, ay+(by-ay)*i/n)) return false; return true; }
+  function step(dt){
+    if(state!=='play') return;
+    const rot=((down.ArrowRight?1:0)-(down.ArrowLeft?1:0))*2.6*dt;
+    if(rot){ const c=Math.cos(rot), s=Math.sin(rot), ox=dx, op=plx; dx=dx*c-dy*s; dy=ox*s+dy*c; plx=plx*c-ply*s; ply=op*s+ply*c; }
+    const f=((down.ArrowUp||down.KeyW?1:0)-(down.ArrowDown||down.KeyS?1:0))*3.2*dt, sd=((down.KeyD?1:0)-(down.KeyA?1:0))*2.6*dt;
+    const mx=dx*f+plx/.66*sd, my=dy*f+ply/.66*sd;
+    if(mx && !solid(px+mx+Math.sign(mx)*.22, py)) px+=mx;
+    if(my && !solid(px, py+my+Math.sign(my)*.22)) py+=my;
+    if(f||sd||rot) nudge(dt*.06);
+    cool-=dt; flash-=dt;
+    if(down.Space && cool<=0){
+      cool=.38; flash=.09; Sound.shot(); nudge(.05);
+      let best=null;
+      mons.forEach(m=>{ const vx=m.x-px, vy=m.y-py, d=Math.hypot(vx,vy); if(vx*dx+vy*dy>0 && Math.abs(vx*dy-vy*dx)<.4 && los(px,py,m.x,m.y) && (!best||d<best.d)) best={m,d}; });
+      if(best){ best.m.hp--; best.m.hit=.15; if(best.m.hp<=0){ mons.splice(mons.indexOf(best.m),1); Sound.chime(.8); if(!mons.length) state='won'; } }
+    }
+    mons.forEach(m=>{ m.hit-=dt; const vx=px-m.x, vy=py-m.y, d=Math.hypot(vx,vy);
+      if(d<9 && los(m.x,m.y,px,py)){
+        if(d>.75){ const sx=vx/d*1.25*dt, sy=vy/d*1.25*dt; if(!solid(m.x+sx+Math.sign(sx)*.25, m.y)) m.x+=sx; if(!solid(m.x, m.y+sy+Math.sign(sy)*.25)) m.y+=sy; }
+        else { hp-=15*dt; if(hp<=0){ hp=0; state='lost'; Sound.deny(); } } } });
+  }
+  function render(){
+    const c=actx;
+    for(let i=0;i<10;i++){ const k=i/9; c.fillStyle='rgb('+(70-40*k|0)+','+(42-24*k|0)+','+(16-8*k|0)+')'; c.fillRect(0,i*10,Wd,10);
+      c.fillStyle='rgb('+(60+110*k|0)+','+(38+70*k|0)+','+(14+28*k|0)+')'; c.fillRect(0,Hd/2+i*10,Wd,10); }
+    for(let x=0;x<Wd;x++){
+      const cam=2*x/Wd-1, rx=dx+plx*cam||1e-9, ry=dy+ply*cam||1e-9; let mx=Math.floor(px), my=Math.floor(py);
+      const ddx=Math.abs(1/rx), ddy=Math.abs(1/ry); let sx, sy, sdx, sdy, side=0, ch='.', n=0;
+      if(rx<0){ sx=-1; sdx=(px-mx)*ddx; } else { sx=1; sdx=(mx+1-px)*ddx; }
+      if(ry<0){ sy=-1; sdy=(py-my)*ddy; } else { sy=1; sdy=(my+1-py)*ddy; }
+      while(n++<64){ if(sdx<sdy){ sdx+=ddx; mx+=sx; side=0; } else { sdy+=ddy; my+=sy; side=1; } ch=(map[my]||'')[mx]; if(wall(ch)) break; }
+      const dist=Math.max(.05, side===0 ? sdx-ddx : sdy-ddy); zb[x]=dist;
+      const h=Math.min(Hd*3, Hd/dist), base=ch==='%' ? [255,226,140] : [255,176,104], k=(side ? .7 : 1)*Math.max(.16, 1-dist/11);
+      c.fillStyle='rgb('+(base[0]*k|0)+','+(base[1]*k|0)+','+(base[2]*k|0)+')'; c.fillRect(x,(Hd-h)/2,1,h);
+    }
+    mons.map(m=>({m, d:(m.x-px)*(m.x-px)+(m.y-py)*(m.y-py)})).sort((a,b)=>b.d-a.d).forEach(e=>{
+      const m=e.m, sxp=m.x-px, syp=m.y-py, inv=1/(plx*dy-dx*ply), tx=inv*(dy*sxp-dx*syp), ty=inv*(-ply*sxp+plx*syp);
+      if(ty<=.15) return;
+      const scr=(Wd/2)*(1+tx/ty), sz=Hd/ty*.8, x0=Math.round(scr-sz/2), yb=Hd/2+Hd/ty/2, k=Math.max(.3, 1-ty/10);
+      for(let x=Math.max(0,x0); x<Math.min(Wd,x0+sz); x++){
+        if(ty>=zb[x]) continue;
+        const u=(x-x0)/sz*2-1, hh=sz*Math.sqrt(Math.max(0,1-u*u));
+        c.fillStyle=m.hit>0 ? '#fff6dc' : 'rgb('+(130*k|0)+','+(80*k|0)+','+(210*k|0)+')'; c.fillRect(x, yb-hh, 1, hh);
+        if(m.hit<=0 && Math.abs(Math.abs(u)-.36)<.13){ c.fillStyle='#fff6dc'; c.fillRect(x, yb-hh*.66, 1, Math.max(1,sz*.11)); }
+      }
+    });
+    c.fillStyle='#fff6dc'; c.fillRect(Wd/2-1,Hd/2-4,2,8); c.fillRect(Wd/2-4,Hd/2-1,8,2);
+    c.fillStyle='#2a1706'; c.fillRect(Wd/2-9,Hd-30,18,30); c.fillStyle=flash>0 ? '#ffef7a' : '#8a5c26'; c.fillRect(Wd/2-5,Hd-40,10,12);
+    c.fillStyle='rgba(20,10,0,.62)'; c.fillRect(0,0,Wd,14); c.fillStyle='#ffe19a'; c.font='13px VT323, monospace'; c.textBaseline='top'; c.textAlign='left';
+    c.fillText('santé '+Math.ceil(hp)+'     intrus '+mons.length, 5, 1, 310);
+    if(hp<35 && state==='play'){ c.fillStyle='rgba(255,60,40,'+(.28*(1-hp/35)).toFixed(2)+')'; c.fillRect(0,0,Wd,Hd); }
+    if(state!=='play'){ c.fillStyle='rgba(20,10,0,.74)'; c.fillRect(0,78,Wd,44); c.fillStyle='#ffef7a'; c.textAlign='center'; c.font='18px VT323, monospace';
+      c.fillText(state==='won' ? 'Entrepôt nettoyé.  [R] rejouer' : 'Tu es tombé.  [R] recommencer', Wd/2, 91, 300); }
+  }
+  function loop(tm){ raf=requestAnimationFrame(loop); const dt=Math.min(.05, (tm-last)/1000||0); last=tm; step(dt); render(); }
+  APPS.jeu={titre:'Jeu', canvas:true, keys:'[↑][↓] avancer, reculer   [←][→] tourner   [Q][D] pas de côté   [Espace] tirer   [R] recommencer   [Échap] quitter',
+    open(x){ o=x && x.type==='niveau' ? x : byType('niveau')[0]; setAppTitle(o.nom); down={}; reset(); last=performance.now(); raf=requestAnimationFrame(loop); },
+    close(){ cancelAnimationFrame(raf); down={}; },
+    key(e){ if(e.code==='KeyR'){ reset(); return true; } if(/^(Arrow|Key[WASD]$|Space)/.test(e.code)){ down[e.code]=true; return true; } return false; },
+    keyup(e){ down[e.code]=false; } };
+})();
+
+/* ── Vidéo : les films sont des recettes calculées, pas des fichiers ── */
+(function(){
+  const w=160, h=100; let films, fi=0, t=0, play=true, raf, last, off, octx, img, pal, tun;
+  function init(){
+    off=document.createElement('canvas'); off.width=w; off.height=h; octx=off.getContext('2d'); img=octx.createImageData(w,h);
+    pal=[]; for(let i=0;i<256;i++){ const u=i/255; pal.push([(40+215*Math.min(1,u*1.6))|0, (16+224*Math.pow(u,1.4))|0, (6+190*Math.pow(u,3))|0]); }
+    tun=new Float32Array(w*h*2);
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++){ const ax=x-w/2, ay=y-h/2; tun[(y*w+x)*2]=24/(Math.hypot(ax,ay)+1); tun[(y*w+x)*2+1]=Math.atan2(ay,ax)/Math.PI; }
+  }
+  function render(){
+    const d=img.data, f=films[fi].data.f; let p=0;
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+      let v;
+      if(f==='tunnel'){ const i=(y*w+x)*2, z=tun[i]; v=(((Math.floor(z*5+t*3)^Math.floor(tun[i+1]*8+t*.5+8))&1) ? .85 : .4)*Math.min(1, 1.3/(z+.3)); }
+      else v=(Math.sin(x*.06+t)+Math.sin(y*.08-t*1.3)+Math.sin((x+y)*.05+t*.7)+Math.sin(Math.hypot(x-80-30*Math.sin(t*.5), y-50)*.09-t*2))/8+.5;
+      const c=pal[Math.max(0, Math.min(255, v*255|0))]; d[p++]=c[0]; d[p++]=c[1]; d[p++]=c[2]; d[p++]=255;
+    }
+    octx.putImageData(img,0,0); actx.imageSmoothingEnabled=false; actx.drawImage(off,0,0,320,200);
+    const D=films[fi].data.d, mm=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0'), n=Math.round(t/D*26);
+    actx.fillStyle='rgba(20,10,0,.66)'; actx.fillRect(0,185,320,15); actx.fillStyle='#ffe19a'; actx.font='13px VT323, monospace'; actx.textBaseline='top'; actx.textAlign='left';
+    actx.fillText((play ? '> ' : '= ')+films[fi].nom+'  ['+'#'.repeat(n)+'.'.repeat(26-n)+']  '+mm(t)+' / '+mm(D), 5, 186, 310);
+  }
+  function loop(tm){ raf=requestAnimationFrame(loop); const dt=Math.min(.1, (tm-last)/1000||0); last=tm; if(play){ t+=dt; if(t>=films[fi].data.d) t=0; } render(); }
+  APPS.video={titre:'Vidéo', canvas:true, keys:'[Espace] pause   [←][→] reculer, avancer de 5 s   [N] film suivant   [Début] revenir au début   [Échap] quitter',
+    open(x){ if(!off) init(); films=byType('film'); fi=Math.max(0, films.indexOf(x)); t=0; play=true; setAppTitle(films[fi].nom); last=performance.now(); raf=requestAnimationFrame(loop); },
+    close(){ cancelAnimationFrame(raf); },
+    key(e){ const k=e.key.toLowerCase(), D=films[fi].data.d;
+      if(k===' ') play=!play; else if(k==='arrowleft') t=Math.max(0,t-5); else if(k==='arrowright') t=Math.min(D-.01,t+5);
+      else if(k==='home') t=0; else if(k==='n'){ fi=(fi+1)%films.length; t=0; setAppTitle(films[fi].nom); } else return false;
+      return true; } };
+})();
+
+/* ── Musique ── */
+function applySound(m){
+  if(m==='non'){ soundOn=false; Sound.mute(true); }
+  else { soundOn=true; if(!Sound.ready) Sound.start(); Sound.mute(false); if(m==='musique' && !Sound.song) Sound.setSong(byType('morceau')[0].data); Sound.setStyle(m); }
+  setKnobs();
+}
+function playSong(o){ Sound.setSong(o.data); applySound('musique'); lastOpened=o; }
+const songName=()=>{ const o=byType('morceau').find(x=>x.data===Sound.song); return o ? o.nom : ''; };
+(function(){
+  let songs, si=0, tm;
+  function draw(){
+    const pos=Sound.songPos(), sp=soundOn ? Sound.spectrum(26) : null;
+    const L=[' '+songs.length+' morceaux dans la base. Ce sont des partitions : une gamme, une grille, une mélodie.',''];
+    songs.forEach((o,i)=>L.push((i===si ? ' > ' : '   ')+o.nom.padEnd(12)+(o.data.bpm+' à la noire').padEnd(17)+o.data.mood.padEnd(8)+(Sound.song===o.data && pos ? 'en lecture' : '')));
+    L.push('', pos ? ' mesure '+(pos.bar+1)+' sur '+pos.bars+'   ['+'#'.repeat(pos.step+1)+'.'.repeat(15-pos.step)+']' : ' Rien ne joue : [Entrée] lance le morceau choisi.', '');
+    if(sp){ for(let r=7;r>=0;r--) L.push(' '+sp.map(v=>v*8>r ? '##' : '  ').join(' ')); L.push(' '+'-'.repeat(26*3-1)); }
+    else L.push(' Le son est coupé : pas de spectre à montrer.');
+    L.push('', ' Son actuel : '+(soundOn ? (Sound.style==='musique' ? 'musique' : 'ambiance générative') : 'coupé')+'.');
+    abody.innerHTML=L.map((l,i)=>i-2===si && i-2<songs.length ? '<span class="inv">'+esc(l.padEnd(52))+'</span>' : esc(l)).join('\n');
+  }
+  APPS.musique={titre:'Musique', keys:'[↑][↓] choisir   [Entrée] jouer   [N] suivant   [Espace] couper, remettre   [A] revenir à l’ambiance générative   [Échap] quitter',
+    open(x){ songs=byType('morceau'); const k=songs.indexOf(x); if(k>=0){ si=k; playSong(x); } Sound.setFull(true); draw(); tm=setInterval(draw,100); }, draw,
+    close(){ clearInterval(tm); Sound.setFull(false); },
+    key(e){ const k=e.key.toLowerCase();
+      if(k==='arrowup') si=(si+songs.length-1)%songs.length; else if(k==='arrowdown') si=(si+1)%songs.length;
+      else if(k==='enter') playSong(songs[si]); else if(k==='n'){ si=(si+1)%songs.length; playSong(songs[si]); }
+      else if(k===' ') applySound(soundOn ? 'non' : Sound.style); else if(k==='a') applySound('ambiance'); else return false;
+      draw(); return true; } };
+})();
+
+/* ── Web : des pages de la base, texte et images, liens numérotés ── */
+const GEN={
+  phare(c,w,h){ const g=c.createLinearGradient(0,0,0,h*.62); g.addColorStop(0,'#ffe9a8'); g.addColorStop(1,'#ffb37a'); c.fillStyle=g; c.fillRect(0,0,w,h);
+    c.fillStyle='#fff6dc'; c.beginPath(); c.arc(70,22,9,0,7); c.fill();
+    ['#d9824a','#c96f3e','#b65e36','#9c4f30','#84422b','#6b3626'].forEach((col,i)=>{ c.fillStyle=col; c.fillRect(0,40+i*4,w,4); });
+    c.fillStyle='#5a3410'; c.beginPath(); c.moveTo(0,46); c.lineTo(34,42); c.lineTo(46,50); c.lineTo(0,58); c.fill();
+    for(let i=0;i<6;i++){ c.fillStyle=i%2 ? '#d1366f' : '#fff6dc'; c.fillRect(20,14+i*5,7,5); }
+    c.fillStyle='#2f1a06'; c.fillRect(19,9,9,5); c.fillStyle='#ffef7a'; c.fillRect(21,10,5,3);
+    c.fillStyle='rgba(255,239,122,.5)'; c.beginPath(); c.moveTo(26,11); c.lineTo(96,1); c.lineTo(96,19); c.fill(); },
+  dunes(c,w,h){ c.fillStyle='#ffe9a8'; c.fillRect(0,0,w,h); c.fillStyle='#ffb36b'; c.beginPath(); c.arc(24,17,8,0,7); c.fill();
+    ['#ffd27a','#ffbe6a','#f0a052','#d98442','#b96a36'].forEach((col,i)=>{ c.fillStyle=col; c.beginPath(); c.moveTo(0,h);
+      for(let x=0;x<=w;x++) c.lineTo(x, 26+i*8+6*Math.sin(x*.07+i*1.9)+3*Math.sin(x*.19+i)); c.lineTo(w,h); c.fill(); }); },
+  circuit(c,w,h){ c.fillStyle='#2a1706'; c.fillRect(0,0,w,h); const r=rng(303);
+    for(let n=0;n<14;n++){ let x=(r()*w/4|0)*4, y=(r()*h/4|0)*4; c.fillStyle=n%3 ? '#ffb443' : '#ffe9a8';
+      for(let k=0;k<26;k++){ c.fillRect(x,y,2,2); const d=r(); if(d<.45) x+=2; else if(d<.6) x-=2; else if(d<.8) y+=2; else y-=2; x=(x+w)%w; y=(y+h)%h; }
+      c.fillStyle='#fff6dc'; c.fillRect(x-1,y-1,4,4); }
+    c.fillStyle='#6b4416'; c.fillRect(36,22,24,20); c.fillStyle='#ffe9a8'; for(let i=0;i<6;i++){ c.fillRect(38+i*4,20,2,2); c.fillRect(38+i*4,42,2,2); } }
+};
+(function(){
+  let hist=[], page=null, links=[];
+  function image(nom){ const o=OBJ.find(x=>x.type==='image' && x.nom===nom), cv=document.createElement('canvas'); cv.width=96; cv.height=64; cv.className='img';
+    if(o && GEN[o.data.g]) GEN[o.data.g](cv.getContext('2d'),96,64); return cv; }
+  const add=html=>{ const d=document.createElement('div'); d.className='line'; d.innerHTML=html||' '; abody.appendChild(d); };
+  function show(p, push){
+    if(push && page) hist.push(page); page=p; links=[]; abody.innerHTML=''; amain.scrollTop=0; setAppTitle(p.nom);
+    p.src.forEach(l=>{ let m;
+      if((m=/^\{\{image:(.+)\}\}$/.exec(l))){ abody.appendChild(image(m[1])); return; }
+      if((m=/^\{\{liste:(.+)\}\}$/.exec(l))){ byType(m[1]).forEach(o=>{ links.push('objet:'+o.nom); add(esc('  '+o.nom+', '+fmtSize(o.taille)+' ['+links.length+']')); if(o.type==='image') abody.appendChild(image(o.nom)); }); return; }
+      if(l.indexOf('# ')===0){ add('<span class="inv">'+esc(' '+l.slice(2)+' ')+'</span>'); add(''); return; }
+      add(esc(l).replace(/\[\[(.+?)\|(.+?)\]\]/g, (_,to,lab)=>{ links.push(to.replace(/&amp;/g,'&')); return '<u>'+lab+'</u> ['+links.length+']'; }));
+    });
+  }
+  function go(name){
+    const n=norm(name.trim().replace(/^trame:\/\//,''));
+    if(/^https?:/.test(n)){ add(''); add(esc('Le vrai web n’est pas joignable depuis la maquette : '+name.trim())); amain.scrollTop=amain.scrollHeight; return; }
+    const o=OBJ.find(x=>(x.type==='page'||x.type==='image') && norm(x.nom)===n);
+    if(!o){ add(''); add(esc('Page introuvable : '+name.trim())); amain.scrollTop=amain.scrollHeight; return; }
+    show(o.type==='image' ? imgPage(o) : {nom:o.nom, src:o.data.src}, true);
+  }
+  const imgPage=o=>({nom:o.nom, src:['# '+o.nom, '{{image:'+o.nom+'}}', o.t.detail+', '+fmtSize(o.taille)+', rangée dans « '+o.bib+' ».', '', '  [[galerie|Toute la galerie]]']});
+  APPS.web={titre:'Web', keys:'[1-9] suivre un lien   [↑][↓] défiler   [←] page précédente   [G] aller à une adresse   [Échap] quitter',
+    open(x){ hist=[]; page=null; const o=x && (x.type==='page'||x.type==='image') ? x : OBJ.find(p=>p.type==='page' && p.nom==='accueil'); show(o.type==='image' ? imgPage(o) : {nom:o.nom, src:o.data.src}); },
+    key(e){ const k=e.key.toLowerCase(), lh=metrics().lh;
+      if(/^[1-9]$/.test(k)){ const to=links[+k-1]; if(to){ if(to.indexOf('objet:')===0){ const o=OBJ.find(x=>x.nom===to.slice(6) && x.data); if(o) openObj(o); } else go(to); } }
+      else if(k==='arrowdown') amain.scrollTop+=lh*2; else if(k==='arrowup') amain.scrollTop-=lh*2;
+      else if(k==='pagedown'||k===' ') amain.scrollTop+=amain.clientHeight*.8; else if(k==='pageup') amain.scrollTop-=amain.clientHeight*.8;
+      else if(k==='arrowleft'||k==='backspace'){ if(hist.length) show(hist.pop()); }
+      else if(k==='g'){ ask('Adresse : ', 'trame://', v=>{ if(v.trim()) go(v); }); }
+      else return false;
+      return true; } };
+})();
+
+/* ═══════════════════════ Agents : ils vivent dans la base ═══════════════════════ */
+const AGENTS=[
+  {nom:'vigie', role:'surveiller les charges et les journaux', salon:'#veille', zone:['proc','log'], hue:4},
+  {nom:'archiviste', role:'connaître la base interne et retrouver n’importe quel objet', salon:'#trame', zone:['home','srv','etc','log','proc','net'], hue:0},
+  {nom:'luthier', role:'régler l’ambiance sonore et les morceaux', salon:'#atelier', zone:['home'], hue:2},
+  {nom:'portier', role:'garder les clés des blocs fermés', salon:'#veille', zone:['etc','srv'], hue:1}];
+let engine='local', sampleFn=null, orKey='', orModel='openrouter/auto';
+const HOSTED=location.protocol!=='file:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+if(window.claude && window.claude.use) window.claude.use('sample').then(s=>{ if(s){ sampleFn=s; if(engine==='local') engine='claude'; } }).catch(()=>{});
+const engineLabel=()=>engine==='claude' ? 'Claude, sur le compte de la personne qui regarde la page (il tient ici la place d’OpenRouter)'
+  : engine==='openrouter' ? 'OpenRouter, modèle '+orModel : 'local (réponses écrites à la main à partir de la base)';
+const rules=a=>'Tu es '+a.nom+', un agent qui vit à l’intérieur de Trame, un système expérimental où tout est un objet d’une base interne. Ton rôle : '+a.role+'. '
+  +'Réponds en français, en une à trois phrases courtes, sur un ton direct, sans liste ni mise en forme. '
+  +'Pour tout chiffre ou tout nom d’objet, interroge la base avec l’outil sql au lieu de deviner. Table unique : objets(nom, type, bib, taille en Mo, proprio, acces, charge en %, chemin). '
+  +'Types : '+Array.from(new Set(OBJ.map(o=>o.type))).join(', ')+'. Bibliothèques : '+DISTRICTS.map(d=>d.label).join(', ')+'. '
+  +'En ce moment : l’utilisateur regarde '+(selected ? selected.path : focusD ? focusD.label : 'la vue d’ensemble')+', ambiance '+mood.mode+' à '+Math.round(mood.I*100)+' %, son '+(soundOn ? Sound.style : 'coupé')+'.';
+const SQL_HELP='Exécute une requête SELECT sur la base interne de Trame et renvoie les lignes en texte. Forme : select colonnes from objets [where colonne op valeur and …] [group by colonne] [order by colonne desc] [limit n]. Agrégats : count(*), sum(taille), avg(charge), max(taille), min(taille).';
+function scripted(a, text){
+  const s=norm(text), top=byType('programme').concat(byType('agent')).sort((x,y)=>y.t.load-x.t.load);
+  if(/charge|cpu|lent|rame|processus|programme/.test(s)) return top.slice(0,3).map(o=>o.nom+' à '+Math.round(o.t.load*100)+' %').join(', ')+'. Le reste est tranquille.';
+  if(/gros|lourd|taille|place|pese/.test(s)) return 'Les plus lourds : '+OBJ.slice().sort((x,y)=>y.taille-x.taille).slice(0,3).map(o=>o.chemin+' ('+fmtSize(o.taille)+')').join(', ')+'.';
+  if(/ferme|cle|droit|verrou|acces/.test(s)){ const l=OBJ.filter(o=>o.t.locked); return l.length+' blocs sont fermés : '+l.slice(0,6).map(o=>o.nom).join(', ')+(l.length>6 ? ', et d’autres' : '')+'. Va sur l’un d’eux et tape cle.'; }
+  if(/combien|compte|objets|base|types?/.test(s)){ const m={}; OBJ.forEach(o=>{ m[o.type]=(m[o.type]||0)+1; }); return 'La base tient '+OBJ.length+' objets : '+Object.keys(m).map(k=>m[k]+' '+k).join(', ')+'.'; }
+  if(/musique|morceau|son|ambiance|tempo/.test(s)) return 'Ambiance '+mood.mode+' à '+Math.round(mood.I*100)+' %, son '+(soundOn ? Sound.style : 'coupé')+'. Morceaux de la base : '+byType('morceau').map(o=>o.nom).join(', ')+'.';
+  if(/bonjour|salut|qui es|aide|que sais|quoi/.test(s)) return 'Je suis '+a.nom+'. Mon rôle : '+a.role+'. Demande-moi les charges, les plus gros objets, ce qui est fermé, ou ce que contient la base.';
+  const r=resolve(text.replace(/^.*?(ou est|où est|cherche|trouve|montre)\s+/i,'').replace(/[?!.]+$/,''));
+  if(r && r.t) return r.t.path+' : '+r.t.o.type+', '+fmtSize(r.t.size)+', '+(r.t.locked ? 'fermé' : 'ouvert')+'.';
+  return 'Sans modèle de langage branché, je ne réponds qu’à quelques sujets : charges, tailles, clés, contenu de la base, musique.';
+}
+async function openrouter(a, text, turns){
+  const msgs=[{role:'system',content:rules(a)}].concat(turns,[{role:'user',content:text}]);
+  const tools=[{type:'function', function:{name:'sql', description:SQL_HELP, parameters:{type:'object', properties:{requete:{type:'string'}}, required:['requete']}}}];
+  for(let round=0; round<4; round++){
+    const res=await fetch('https://openrouter.ai/api/v1/chat/completions', {method:'POST',
+      headers:{'Authorization':'Bearer '+orKey, 'Content-Type':'application/json', 'X-Title':'Trame'},
+      body:JSON.stringify({model:orModel, messages:msgs, tools, max_tokens:400})});
+    if(!res.ok) throw new Error('réponse '+res.status);
+    const m=(await res.json()).choices[0].message;
+    if(!m.tool_calls || !m.tool_calls.length) return (m.content||'').trim();
+    msgs.push(m);
+    m.tool_calls.forEach(c=>{ let out; try{ out=sqlText(JSON.parse(c.function.arguments||'{}').requete); }catch(e){ out='Erreur : '+e.message; } msgs.push({role:'tool', tool_call_id:c.id, content:out}); });
+  }
+  return 'Je tourne en rond dans la base. Repose-moi la question plus simplement.';
+}
+async function think(a, text){
+  const turns=a.hist.slice(-8); let r;
+  if(engine==='claude' && sampleFn){
+    try{
+      const res=await sampleFn([{role:'user',content:rules(a)},{role:'assistant',content:'Compris.'}].concat(turns,[{role:'user',content:text}]),
+        {cache:false, modelTier:'quick', tools:[{name:'sql', description:SQL_HELP, inputSchema:{type:'object', properties:{requete:{type:'string', description:'La requête SELECT'}}, required:['requete']}, execute:i=>sqlText(i.requete)}]});
+      r=(res.text||'').trim()||scripted(a,text);
+    }catch(e){ if(e && e.code==='not_granted') engine='local'; r=scripted(a,text)+(e && e.code==='not_granted' ? ' (Modèle refusé pour cette page : je réponds à la main.)' : ' (Modèle injoignable : réponse écrite à la main.)'); }
+  } else if(engine==='openrouter' && orKey){
+    try{ r=await openrouter(a,text,turns)||scripted(a,text); }catch(e){ r=scripted(a,text)+' (OpenRouter : '+String(e.message||e).slice(0,80)+'.)'; }
+  } else r=scripted(a,text);
+  a.hist.push({role:'user',content:text},{role:'assistant',content:r}); if(a.hist.length>16) a.hist.splice(0,2);
+  return r;
+}
+
+/* ── IRC : les salons sont des objets, les agents y écrivent ── */
+const irc={chans:byType('salon').map(o=>({nom:o.nom, o, unread:0})), ci:0, nick:'toi'};
+const hhmm=()=>{ const d=new Date(); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
+const unreadAll=()=>irc.chans.reduce((s,c)=>s+c.unread,0);
+function chan(nom){ let c=irc.chans.find(x=>x.nom===nom); if(!c){ c={nom, o:{data:{l:[]}}, unread:0, pv:true}; irc.chans.push(c); } return c; }
+function ircPost(nom, who, text){
+  const c=chan(nom); c.o.data.l.push([hhmm(), who, text]); if(c.o.data.l.length>200) c.o.data.l.shift();
+  if(!(cur===APPS.irc && irc.chans[irc.ci]===c)) c.unread++;
+  saveDB(); setKnobs(); if(cur===APPS.irc) APPS.irc.draw(); return c;
+}
+function ircAnswer(c, a, text){
+  const row=[hhmm(), '*', a.nom+' réfléchit…']; c.o.data.l.push(row); if(cur===APPS.irc) APPS.irc.draw();
+  think(a, text).then(r=>{ row[1]=a.nom; row[2]=r; if(!(cur===APPS.irc && irc.chans[irc.ci]===c)) c.unread++; saveDB(); setKnobs(); if(cur===APPS.irc) APPS.irc.draw(); });
+}
+APPS.irc={titre:'IRC', keys:'[Entrée] envoyer   [Tab] salon suivant   /msg agent texte   /who   /nick nom   /clear   [Échap] quitter',
+  open(x){
+    if(x && x.type==='salon') irc.ci=Math.max(0, irc.chans.findIndex(c=>c.nom===x.nom));
+    else if(x && x.type==='agent') irc.ci=irc.chans.indexOf(chan('@'+x.nom));
+    this.draw(); this.prompt(); },
+  prompt(){ ask('['+irc.chans[irc.ci].nom+'] ', '', v=>this.send(v), true); },
+  draw(){
+    const c=irc.chans[irc.ci], m=metrics(), W=Math.max(30, Math.floor(abody.clientWidth/m.cw)-2), rows=Math.max(4, Math.floor(amain.clientHeight/m.lh)-3);
+    c.unread=0; setKnobs(); setAppTitle(c.nom);
+    const tabs=irc.chans.map((x,i)=>{ const s=' '+(i+1)+':'+x.nom+(x.unread ? '('+x.unread+')' : '')+' '; return i===irc.ci ? '<span class="inv">'+esc(s)+'</span>' : esc(s); }).join('');
+    const out=[];
+    c.o.data.l.forEach(r=>{
+      const a=AGENTS.find(g=>g.nom===r[1]), pre=r[0]+(r[1]==='*' ? '  * ' : ' <'+r[1]+'> '), w=Math.max(12, W-pre.length), words=String(r[2]).split(/\s+/); let ln='', first=true;
+      const flush=()=>{ out.push((first ? (a ? esc(r[0]+' <')+'<span style="color:var(--h'+(a.hue+1)+')">'+esc(r[1])+'</span>'+esc('> ') : esc(pre)) : ' '.repeat(pre.length))+esc(ln)); first=false; ln=''; };
+      words.forEach(wd=>{ if(ln && (ln+' '+wd).length>w) flush(); ln=ln ? ln+' '+wd : wd; }); flush();
+    });
+    if(!out.length) out.push(esc(c.pv ? '  Conversation privée. Écris, '+c.nom.slice(1)+' répondra.' : '  Salon vide pour l’instant. Les agents y passent de temps en temps.'));
+    abody.innerHTML=tabs+'\n'+esc('-'.repeat(W))+'\n'+out.slice(-rows).join('\n');
+  },
+  send(v){
+    const c=irc.chans[irc.ci], s=v.trim(); if(!s) return;
+    if(s[0]!=='/'){
+      ircPost(c.nom, irc.nick, s); nudge(.08);
+      const a=c.pv ? AGENTS.find(g=>'@'+g.nom===c.nom) : (AGENTS.find(g=>norm(s).indexOf(g.nom)>=0) || AGENTS.find(g=>g.salon===c.nom));
+      if(a) ircAnswer(c, a, s); return; }
+    const sp=s.search(/\s/), cmd=(sp<0 ? s : s.slice(0,sp)).toLowerCase(), arg=sp<0 ? '' : s.slice(sp+1).trim(), note=t=>{ c.o.data.l.push([hhmm(),'*',t]); this.draw(); };
+    if(cmd==='/msg'){ const k=arg.search(/\s/), n=norm(k<0 ? arg : arg.slice(0,k)).replace(/^@/,''), a=AGENTS.find(g=>g.nom===n);
+      if(!a){ note('Personne ne répond à ce nom. Présents : '+AGENTS.map(g=>g.nom).join(', ')+'.'); return; }
+      irc.ci=irc.chans.indexOf(chan('@'+a.nom)); this.draw(); askL.textContent='['+irc.chans[irc.ci].nom+'] '; if(k>=0) this.send(arg.slice(k+1)); }
+    else if(cmd==='/who') note('Présents : '+irc.nick+', '+AGENTS.map(g=>g.nom).join(', ')+'.');
+    else if(cmd==='/nick'){ if(arg) irc.nick=arg.replace(/\s+/g,'_').slice(0,16); note('Tu es maintenant '+irc.nick+'.'); }
+    else if(cmd==='/clear'){ c.o.data.l.length=0; saveDB(); this.draw(); }
+    else if(cmd==='/join'){ const k=irc.chans.findIndex(x=>x.nom===arg); if(k>=0){ irc.ci=k; this.draw(); askL.textContent='['+arg+'] '; } else note('Ce salon n’existe pas dans la base. Salons : '+irc.chans.filter(x=>!x.pv).map(x=>x.nom).join(', ')+'.'); }
+    else if(cmd==='/quit') closeApp();
+    else note('Commande inconnue : '+cmd+'. Essaie /msg, /who, /nick, /clear, /join.');
+  },
+  inKey(e){ if(e.key==='Tab'){ irc.ci=(irc.ci+(e.shiftKey ? irc.chans.length-1 : 1))%irc.chans.length; this.draw(); askL.textContent='['+irc.chans[irc.ci].nom+'] '; return true; } return false; }
+};
+
+/* ── Agents : la liste, et le choix du moteur ── */
+APPS.agents={titre:'Agents', i:0, keys:'[↑][↓] choisir   [Entrée] lui parler   [M] changer de moteur   [K] clé OpenRouter   [O] modèle   [Échap] quitter',
+  open(x){ if(x && x.type==='agent') this.i=Math.max(0, AGENTS.findIndex(a=>a.nom===x.nom)); this.draw(); this.tm=setInterval(()=>{ if(askRow.hidden) this.draw(); }, 1000); },
+  close(){ clearInterval(this.tm); },
+  draw(){
+    const L=[' Quatre agents vivent dans la base. Ils se déplacent, observent, et écrivent dans les salons.','','   '+'nom'.padEnd(12)+'rôle'.padEnd(60)+'près de'];
+    AGENTS.forEach((a,i)=>L.push((i===this.i ? ' > ' : '   ')+a.nom.padEnd(12)+a.role.padEnd(60)+(a.near||'')));
+    L.push('', ' Moteur : '+engineLabel()+'.',
+      HOSTED ? ' OpenRouter : injoignable depuis une page publiée. Il se branche dans la version locale.' : ' OpenRouter : [K] pour donner ta clé. Elle reste en mémoire, jamais enregistrée.',
+      ' Avec un moteur branché, chaque agent lance ses propres select sur la base avant de répondre.');
+    abody.innerHTML=L.map((l,i)=>i-3===this.i && i<3+AGENTS.length ? '<span class="inv">'+esc(l)+'</span>' : esc(l)).join('\n');
+  },
+  key(e){ const k=e.key.toLowerCase();
+    if(k==='arrowup') this.i=(this.i+3)%4; else if(k==='arrowdown') this.i=(this.i+1)%4;
+    else if(k==='enter'){ openApp('irc', {type:'agent', nom:AGENTS[this.i].nom}); return true; }
+    else if(k==='m'){ const l=['local'].concat(sampleFn ? ['claude'] : [], !HOSTED && orKey ? ['openrouter'] : []); engine=l[(l.indexOf(engine)+1)%l.length]; }
+    else if(k==='k'){ if(!HOSTED){ ask('Clé OpenRouter (non enregistrée) : ', '', v=>{ orKey=v.trim(); if(orKey) engine='openrouter'; this.draw(); }); askIn.type='password'; } return true; }
+    else if(k==='o'){ ask('Modèle OpenRouter : ', orModel, v=>{ if(v.trim()) orModel=v.trim(); this.draw(); }); return true; }
+    else return false;
+    this.draw(); return true; } };
+
+// Leur présence dans le décor, et ce qu’ils se disent
+function pickTarget(a){ const c=towers.filter(t=>a.zone.indexOf(t.d.id)>=0 && (a.nom!=='portier' || t.locked)), t=c[Math.floor(Math.random()*c.length)]||towers[0];
+  a.tt=t; a.tx=t.x+(Math.random()-.5); a.tz=t.z+(Math.random()-.5); }
+AGENTS.forEach(a=>{
+  a.hist=[]; a.mesh=new THREE.Mesh(new THREE.OctahedronGeometry(.55), new THREE.MeshBasicMaterial({transparent:true, opacity:.96}));
+  a.halo=new THREE.Mesh(FLAT, new THREE.MeshBasicMaterial({map:DOT, transparent:true, depthWrite:false, fog:false})); a.halo.scale.set(3.4,1,3.4); a.halo.position.y=.08; a.halo.renderOrder=4;
+  scene.add(a.mesh); scene.add(a.halo); pickTarget(a); a.x=a.tx; a.z=a.tz; a.y=14; a.wait=Math.random()*3; a.near=a.tt.path;
+});
+let chatter=12;
+function remark(a){
+  const procs=byType('programme').concat(byType('agent')).sort((x,y)=>y.t.load-x.t.load), nL=OBJ.filter(o=>o.t.locked).length;
+  if(a.nom==='vigie') return Math.random()<.55 ? procs[0].nom+' tient la tête avec '+Math.round(procs[0].t.load*100)+' % de charge.' : 'Rien d’anormal du côté de '+a.near+'.';
+  if(a.nom==='archiviste') return lastOpened && Math.random()<.6 ? 'Dernier objet ouvert : '+lastOpened.chemin+', de type '+lastOpened.type+'.' : 'La base compte '+OBJ.length+' objets, pour '+fmtSize(OBJ.reduce((s,o)=>s+o.taille,0))+'.';
+  if(a.nom==='luthier') return 'Ambiance à '+Math.round(mood.I*100)+' %. '+(mood.I>.55 ? 'Je serre le tempo.' : 'Je laisse respirer.')+(soundOn && Sound.style==='musique' ? ' On joue '+songName()+'.' : '');
+  return lastKey ? 'La clé de '+lastKey+' tient toujours. Il reste '+nL+' blocs fermés.' : nL+' blocs fermés, aucune clé demandée.';
+}
+function agentsTick(dt){
+  AGENTS.forEach((a,i)=>{
+    const ax=a.tx-a.x, az=a.tz-a.z, d=Math.hypot(ax,az);
+    if(d>.15){ const v=Math.min(d, (2.4+2.2*mood.I)*dt); a.x+=ax/d*v; a.z+=az/d*v; }
+    else { a.near=a.tt.path; a.wait-=dt; if(a.wait<=0){ a.wait=2+Math.random()*5; pickTarget(a); } }
+    a.y+=((d>3 ? 14.5 : a.tt.col.scale.y+1.1)-a.y)*(1-Math.exp(-dt*3));
+    a.mesh.position.set(a.x, a.y+(reduce ? 0 : .18*Math.sin(clock*2+i*1.7)), a.z); a.mesh.rotation.y+=dt*1.6;
+    a.mesh.material.color.copy(P.hues[a.hue]).lerp(P.night ? WHITE : P.ink, P.night ? .5 : .12);
+    a.halo.position.x=a.x; a.halo.position.z=a.z; a.halo.material.color.copy(P.night ? P.hues[a.hue] : P.ink);
+    a.halo.material.blending=P.night ? THREE.AdditiveBlending : THREE.NormalBlending; a.halo.material.opacity=P.night ? .6 : .22;
+  });
+  if(!entered) return;
+  chatter-=dt; if(chatter<=0){ chatter=22+Math.random()*24; const a=AGENTS[Math.floor(Math.random()*AGENTS.length)]; ircPost(a.salon, a.nom, remark(a)); }
+}
+
+/* ═══════════════════════ Ouvrir un objet : le type choisit l’application ═══════════════════════ */
+function tail(o){
+  const msgs=['connexion acceptée','requête servie en 12 ms','rotation du fichier','point de contrôle écrit','tâche planifiée terminée','délai dépassé, nouvel essai','compactage terminé'], r=rng(o.nom.length*977+(o.taille|0)), now=Date.now();
+  for(let i=5;i>=0;i--) say(new Date(now-i*37000-r()*20000).toTimeString().slice(0,8)+' '+o.nom+'['+(1000+(r()*8000|0))+'] '+msgs[r()*msgs.length|0]);
+}
+function openObj(o){
+  const ap={feuille:'tableur', pile:'piles', niveau:'jeu', film:'video', image:'web', page:'web', salon:'irc', agent:'agents'}[o.type];
+  if(o.t.locked){ if(cur) closeApp(); say('Fermé : '+o.chemin+'. Tape cle pour demander la clé.'); Sound.deny(); return; }
+  lastOpened=o;
+  if(ap){ openApp(ap, o); return; }
+  if(o.type==='morceau'){ playSong(o); if(cur!==APPS.musique){ if(cur) closeApp(); say('Lecture : '+o.nom+'. [Alt]+[M] ouvre le lecteur, « son ambiance » revient à l’ambiance générative.'); } return; }
+  if(cur) closeApp();
+  if(o.type==='texte'){ print('<span style="color:'+hueOf(o.t.d)+'">'+esc(o.chemin)+'</span>'); (o.data.x||'').split('|').forEach(l=>say('   '+l)); say('Pour y ajouter une ligne : note suivi de ton texte.'); }
+  else if(o.type==='journal'){ print('<span style="color:'+hueOf(o.t.d)+'">'+esc(o.chemin)+'</span>, dernières lignes :'); tail(o); }
+  else describe(o.t);
+}
+
+/* ═══════════════════════ Commandes du terminal ajoutées ou refaites ═══════════════════════ */
+CMD.liste=function(){
+  if(!focusD){
+    say('Six bibliothèques :');
+    numbered(ORDER.map(d=>({cmd:'va '+d.label, html:nmD(d)+gap(d.label,12)+esc((d.items.length+' objets').padStart(10)+fmtSize(total(d)).padStart(11))})));
+    say('Tape un numéro, ou va suivi d’un nom.'); return; }
+  const list=towers.filter(t=>t.d===focusD).sort((a,b)=>b.size-a.size);
+  print(nmD(focusD)+' : '+list.length+' objets, '+esc(fmtSize(total(focusD))));
+  numbered(list.map(t=>({cmd:'va '+addr(t), html:nmT(t)+gap(t.name,21)+esc(t.o.type.padEnd(11)+fmtSize(t.size).padStart(8)+'   '+stateOf(t))})));
+};
+CMD.cherche=function(a){
+  live=null;
+  if(!a){ found=null; refreshDim(); say('Recherche éteinte.'); return; }
+  found=matchesFor(a); refreshDim();
+  if(!found.length){ say('Rien ne répond à « '+a+' ».'); return; }
+  say(found.length===1 ? 'Un objet répond :' : found.length+' objets répondent :');
+  numbered(found.slice(0,14).map(t=>({cmd:'va '+addr(t), html:link(addr(t), addr(t), t.d)+gap(addr(t),30)+esc(fmtSize(t.size).padStart(8))})));
+  if(found.length>14) say('     et '+(found.length-14)+' autres.');
+  say('Tape un numéro pour y aller, cherche seul pour éteindre.');
+};
+CMD.sql=function(q){
+  let r; try{ r=sqlRun(q); }catch(e){ say(e.message); Sound.deny(); return; }
+  const t=table(r,24);
+  if(!r.rows.length){ say('Aucune ligne.'); found=[]; refreshDim(); return; }
+  say('     '+t.head);
+  numbered(r.rows.slice(0,24).map((x,i)=>({cmd:x.o ? 'va '+addr(x.o.t) : '', html:esc(t.lines[i])})));
+  if(r.rows.length>24) say('     … '+(r.rows.length-24)+' lignes de plus. Ajoute limit ou un where.');
+  const lit=[]; r.rows.forEach(x=>{ (x.o ? [x.o] : x.objs||[]).forEach(o=>{ if(lit.indexOf(o.t)<0) lit.push(o.t); }); });
+  live=null; found=lit.length<OBJ.length ? lit : null; refreshDim();
+  if(r.rows[0].o) say('Les objets trouvés sont allumés dans le décor. Tape un numéro pour y aller.');
+};
+CMD.base=function(a){
+  if(norm(a)==='oublie'){ try{ localStorage.removeItem(STORE); }catch(e){} OBJ.forEach(o=>{ if(KEEP[o.type] && SEED[o.nom]) o.data=JSON.parse(JSON.stringify(SEED[o.nom])); }); irc.chans.forEach(c=>{ c.unread=0; }); setKnobs(); say('Base remise dans son état d’origine.'); return; }
+  const m={}; OBJ.forEach(o=>{ m[o.type]=(m[o.type]||0)+1; });
+  say('Base interne : '+OBJ.length+' objets dans '+DISTRICTS.length+' bibliothèques. Une seule table :');
+  say('   objets(nom, type, bib, taille, proprio, acces, charge, chemin)');
+  numbered(Object.keys(m).sort((x,y)=>m[y]-m[x]).map(k=>({cmd:"select nom, bib, taille, acces from objets where type='"+k+"' order by taille desc", html:esc(k.padEnd(11)+String(m[k]).padStart(3))})));
+  say('Tape un numéro pour voir ces objets, ou écris ta requête, par exemple :');
+  say("   select type, count(*), sum(taille) from objets group by type order by sum(taille) desc");
+  say('Ce que tu modifies reste dans ce navigateur. « base oublie » remet tout à zéro.');
+};
+CMD.ouvre=function(a){
+  const r=a ? resolve(a) : null, t=a ? (r && r.t) : selected;
+  if(t){ if(t!==selected){ setPlace(t.d, t); } openObj(t.o); }
+  else if(r && r.d) goDistrict(r.d);
+  else if(r && r.many) ambiguous(r.many);
+  else say(a ? 'Rien ne porte ce nom ici : '+a : 'Ouvrir quoi ? Va d’abord sur un objet, ou tape ouvre suivi d’un nom.');
+};
+CMD.note=function(a){ const o=OBJ.find(x=>x.type==='texte' && x.nom==='notes'); if(!a){ openObj(o); return; } o.data.x+=(o.data.x ? '|' : '')+a; saveDB(); lastOpened=o; say('Noté dans '+o.chemin+'.'); };
+CMD.dis=function(a){
+  const k=a.search(/\s/), n=norm(k<0 ? a : a.slice(0,k)), ag=AGENTS.find(g=>g.nom===n), text=k<0 ? '' : a.slice(k+1).trim();
+  if(!ag||!text){ say('Forme : dis suivi d’un nom d’agent et de ta phrase. Agents : '+AGENTS.map(g=>g.nom).join(', ')+'.'); return; }
+  print('<span style="color:var(--h'+(ag.hue+1)+')">'+esc(ag.nom)+'</span> réfléchit…'); const el=out.lastElementChild;
+  think(ag, text).then(r=>{ el.innerHTML='<span style="color:var(--h'+(ag.hue+1)+')">'+esc(ag.nom)+'</span>'+esc(' : '+r); toBottom(); });
+};
+CMD.moteur=function(a){
+  const k=norm(a);
+  if(!k){ say('Moteur des agents : '+engineLabel()+'.'); say('Choix : local'+(sampleFn ? ', claude' : '')+(HOSTED ? '' : ', openrouter (après [Alt]+[A] puis [K] pour la clé)')+'.'); return; }
+  if(k==='local' || (k==='claude' && sampleFn) || (k==='openrouter' && !HOSTED && orKey)){ engine=k; say('Moteur : '+engineLabel()+'.'); }
+  else if(k==='openrouter') say(HOSTED ? 'OpenRouter est injoignable depuis une page publiée. Il se branche dans la version locale.' : 'Donne d’abord ta clé : [Alt]+[A], puis [K].');
+  else say('Moteur indisponible ici : '+a+'.');
+};
+CMD.son=function(a){
+  const k=norm(a), m=!k ? (soundOn ? 'non' : Sound.style) : ['non','off','0','n'].indexOf(k)>=0 ? 'non' : ['oui','on','1','o'].indexOf(k)>=0 ? Sound.style : k==='musique'||k==='ambiance' ? k : null;
+  if(!m){ say('Son : ambiance, musique, ou non.'); return; }
+  applySound(m); say(m==='non' ? 'Son coupé.' : m==='musique' ? 'Son : musique. Le morceau « '+songName()+' » suit ton rythme.' : 'Son : ambiance générative.');
+};
+CMD.morceau=function(a){
+  const l=byType('morceau');
+  if(!a){ say('Morceaux de la base :'); numbered(l.map(o=>({cmd:'morceau '+o.nom, html:esc(o.nom.padEnd(12)+(o.data.bpm+' à la noire').padEnd(17)+o.data.mood)}))); return; }
+  const o=l.find(x=>norm(x.nom).indexOf(norm(a))===0); if(!o){ say('Pas de morceau de ce nom.'); return; }
+  playSong(o); say('Lecture : '+o.nom+'.');
+};
+const launch=(id,ty)=>a=>{ const r=a ? resolve(a) : null, o=r && r.t ? r.t.o : (selected && selected.o.type===ty ? selected.o : null); if(o && o.t.locked){ openObj(o); return; } openApp(id, o && o.type===ty ? o : null); };
+CMD.tableur=launch('tableur','feuille'); CMD.piles=launch('piles','pile'); CMD.jeu=launch('jeu','niveau'); CMD.video=launch('video','film');
+CMD.web=launch('web','page'); CMD.irc=launch('irc','salon'); CMD.musique=launch('musique','morceau'); CMD.agents=launch('agents','agent');
+CMD.aide=function(a){ const k=norm(a);
+  if(k==='c') HELP_C.forEach(say); else if(k==='k') HELP_K.forEach(say); else if(k==='a') HELP_A.forEach(say);
+  else ['Utilise aide avec ces paramètres :','   aide c   - Donne la liste des commandes.','   aide k   - Donne la liste des touches.','   aide a   - Donne la liste des applications.'].forEach(say); };
+[['sql'],['base','db','wrkobj'],['ouvre','open','o'],['note'],['dis','say'],['moteur'],['morceau'],['tableur','calc'],['piles','pile'],['jeu'],['video','vidéo'],['web'],['irc'],['musique'],['agents','agent']]
+  .forEach(a=>a.forEach(w=>{ ALIAS[norm(w)]=a[0]; }));
+HELP_C.length=0;
+['Commandes de Trame :','Tape-les directement à l’invite. Dans une liste, tape le numéro d’une ligne pour la suivre.',
+ '   liste               - Montre ce qu’il y a ici.',
+ '   va [nom]            - Va à une bibliothèque ou à un objet. Sans nom : vue d’ensemble.',
+ '   retour              - Remonte d’un cran.',
+ '   ouvre [nom]         - Ouvre l’objet avec l’application de son type.',
+ '   info [nom]          - Décrit un objet.',
+ '   cle [nom]           - Demande la clé d’un objet fermé.',
+ '   cherche [texte]     - Allume ce qui répond. Sans texte : éteint.',
+ '   base                - Présente la base interne.',
+ '   select …            - Interroge la base : select nom, taille from objets where type=\'image\'',
+ '   note [texte]        - Ajoute une ligne au carnet de bord.',
+ '   dis [agent] [texte] - Parle à un agent : vigie, archiviste, luthier, portier.',
+ '   moteur [nom]        - Choisit ce qui fait penser les agents.',
+ '   charge              - Classe les programmes en marche par charge.',
+ '   ambiance [c|a|i]    - Calme, auto (suit ton rythme) ou intense.',
+ '   son [mode]          - ambiance (générative), musique (un morceau qui suit ton rythme), non.',
+ '   morceau [nom]       - Choisit le morceau.',
+ '   efface              - Vide le terminal.',
+ 'Les habitudes Unix passent aussi : ls, cd, find, top, clear, open.'].forEach(l=>HELP_C.push(l));
+HELP_K.length=0;
+['Touches de Trame : tout se pilote au clavier.',
+ ' Applications',
+ '   [Alt]+[T] terminal       [Alt]+[C] tableur        [Alt]+[P] piles',
+ '   [Alt]+[J] jeu            [Alt]+[I] irc            [Alt]+[W] web',
+ '   [Alt]+[V] vidéo          [Alt]+[M] musique        [Alt]+[A] agents',
+ ' Décor et base',
+ '   [Alt]+[0] vue d’ensemble [Alt]+[1] à [6] bibliothèques   [Alt]+[E] menu des écrans',
+ '   [Alt]+[←][→] tourner     [Alt]+[↑][↓] approcher, reculer',
+ '   [Alt]+[L] objet suivant  [Alt]+[K] objet précédent       [Alt]+[O] ouvrir l’objet',
+ '   [Alt]+[D] la base        [Alt]+[S] son                   [Alt]+[X] ambiance',
+ ' Terminal',
+ '   [Tab] compléter          [haut][bas] historique          [PgPréc][PgSuiv] défiler',
+ '   [Entrée] sur une ligne vide ouvre l’objet choisi',
+ '   [Échap] remonte d’un cran, ou quitte l’application'].forEach(l=>HELP_K.push(l));
+const HELP_A=['Applications de Trame. Chacune ouvre un type d’objet de la base :',
+ '   tableur   [Alt]+[C]  feuilles     formules, sommes, moyennes',
+ '   piles     [Alt]+[P]  piles        des cartes reliées par des liens',
+ '   jeu       [Alt]+[J]  niveaux      un couloir en vue subjective',
+ '   web       [Alt]+[W]  pages        texte, images et liens numérotés',
+ '   video     [Alt]+[V]  films        des films calculés',
+ '   musique   [Alt]+[M]  morceaux     des partitions jouées par le synthétiseur',
+ '   irc       [Alt]+[I]  salons       là où les agents écrivent',
+ '   agents    [Alt]+[A]  agents       qui ils sont, et ce qui les fait penser'];
+
+/* ═══════════════════════ Clavier : tout passe par là ═══════════════════════ */
+const LAYOUT={}, AZERTY={KeyQ:'a', KeyA:'q', KeyW:'z', KeyZ:'w', Semicolon:'m', KeyM:','}, FR=/^fr/i.test(navigator.language||'');
+function letter(e){   // la lettre imprimée sur la touche, même quand Alt la transforme
+  if(e.key.length===1 && /[a-z]/i.test(e.key)) return e.key.toLowerCase();
+  if(LAYOUT[e.code]) return LAYOUT[e.code];
+  if(FR && AZERTY[e.code]) return AZERTY[e.code];
+  return /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : '';
+}
+function stepBlock(dir){
+  const l=(focusD ? towers.filter(t=>t.d===focusD) : towers.slice()).sort((a,b)=>ORDER.indexOf(a.d)-ORDER.indexOf(b.d) || b.size-a.size);
+  const i=l.indexOf(selected), t=l[(i<0 ? (dir>0 ? 0 : l.length-1) : i+dir+l.length)%l.length]; closeApp(); run('va '+addr(t));
+}
+const cycle=(list,curv)=>list[(list.indexOf(curv)+1)%list.length];
+const SHORT={
+  t:()=>closeApp(), c:()=>openApp('tableur'), p:()=>openApp('piles'), j:()=>openApp('jeu'), i:()=>openApp('irc'), w:()=>openApp('web'), v:()=>openApp('video'), m:()=>openApp('musique'), a:()=>openApp('agents'),
+  d:()=>{ closeApp(); run('base'); }, o:()=>{ if(!cur) run('ouvre'); },
+  e:()=>{ openMenu(menu.hidden); if(!menu.hidden) menu.querySelector('button').focus(); },
+  s:()=>{ const m=cycle(['ambiance','musique','non'], soundOn ? Sound.style : 'non'); if(cur){ applySound(m); if(cur.draw) cur.draw(); } else run('son '+m); },
+  x:()=>{ const m=cycle(['calme','auto','intense'], mood.mode); if(cur){ mood.mode=m; setKnobs(); } else run('ambiance '+m); },
+  l:()=>stepBlock(1), k:()=>stepBlock(-1)
+};
+window.addEventListener('keydown', e=>{
+  if(!e.altKey && !e.ctrlKey && !e.metaKey && e.key.length===1 && /[a-z]/i.test(e.key)) LAYOUT[e.code]=e.key.toLowerCase();
+  if(!entered){
+    if(e.target.closest && e.target.closest('button')) return;
+    if(e.key==='Enter'){ enter(true); e.preventDefault(); } else if(e.key==='s' || e.key==='S'){ enter(false); e.preventDefault(); }
+    return; }
+  if(e.altKey && !e.metaKey && !(e.getModifierState && e.getModifierState('AltGraph'))){
+    if(/^Digit[0-6]$/.test(e.code) && !e.shiftKey){ closeApp(); const n=+e.code.slice(5); run(n ? 'va '+ORDER[n-1].label : 'va tout'); e.preventDefault(); return; }
+    if(/^Arrow/.test(e.code) && !cur){
+      if(e.code==='ArrowLeft') goal.th+=.22; else if(e.code==='ArrowRight') goal.th-=.22;
+      else goal.r=clamp(goal.r*(e.code==='ArrowUp' ? .84 : 1/.84), 9, 130);
+      nudge(.03); e.preventDefault(); return; }
+    const f=!e.shiftKey && SHORT[letter(e)]; if(f){ f(); e.preventDefault(); }
+    return; }
+  if(e.metaKey || e.ctrlKey) return;
+  if(!menu.hidden){
+    const bs=Array.from(menu.querySelectorAll('button')), i=bs.indexOf(document.activeElement);
+    if(e.key==='ArrowDown'||e.key==='ArrowRight'){ bs[(i+1)%bs.length].focus(); e.preventDefault(); }
+    else if(e.key==='ArrowUp'||e.key==='ArrowLeft'){ bs[(i+bs.length-1)%bs.length].focus(); e.preventDefault(); }
+    else if(e.key==='Escape'){ openMenu(false); if(!cur) q.focus({preventScroll:true}); e.preventDefault(); }
+    return; }
+  if(cur){
+    if(cur.key && cur.key(e)){ e.preventDefault(); return; }
+    if(e.key==='Escape'){ closeApp(); e.preventDefault(); }
+    return; }
+  if(e.target===q) return;
+  if(e.key==='Escape'){ if(selected||focusD) run('retour'); return; }
+  if(e.target.closest && e.target.closest('button')) return;
+  if(e.key.length===1 || e.key==='ArrowUp' || e.key==='Backspace') q.focus({preventScroll:true});
+});
+window.addEventListener('keyup', e=>{ if(cur && cur.keyup) cur.keyup(e); });
+[['tableur','C'],['piles','P'],['jeu','J'],['irc','I'],['web','W'],['video','V'],['musique','M'],['agents','A']].forEach(x=>{
+  const b=document.createElement('button'); b.textContent='[Alt]+['+x[1]+']  '+APPS[x[0]].titre.toLowerCase();
+  b.addEventListener('click', ()=>{ openMenu(false); openApp(x[0]); }); menu.appendChild(b); });
+$('#m-irc').addEventListener('click', ()=>openApp('irc'));
+
+/* ───────────────────────── Boucle ───────────────────────── */
+const hz=C(0), mid=C(0), v3=new THREE.Vector3();
+let last=performance.now()/1000, beatPulse=0, clock=0, loadTick=0;
+function onBeat(b){
+  if(reduce || mood.I<.3) return;
+  beatPulse = b.strong ? 1 : .6;
+  const r=rings.find(x=>x.userData.age>1.7); if(!r) return;
+  r.userData.age=0; r.userData.gain = clamp((mood.I-.3)/.5,0,1)*(b.strong?1:.55);
+  r.position.x = selected ? selected.x : focusD ? focusD.col*PITCH : 0; r.position.z = selected ? selected.z : focusD ? focusD.row*PITCH/2 : 0;
+  r.material.color.copy(focusD ? P.hues[focusD.hue] : hz); if(!P.night) r.material.color.lerp(P.ink,.35);
+  r.visible=true;
+}
+function frame(){
+  requestAnimationFrame(frame);
+  const tn=performance.now()/1000, dt=Math.min(.05, tn-last); last=tn; clock+=dt;
+
+  // Ambiance : l’énergie retombe d’elle-même, l’intensité la suit en douceur
+  mood.energy *= Math.exp(-dt/7);
+  const target = mood.mode==='calme' ? .04 : mood.mode==='intense' ? .94 : clamp(mood.energy,.04,1);
+  mood.I += (target-mood.I)*(1-Math.exp(-dt*(target>mood.I ? 1.6 : .55)));
+  const I=mood.I;
+  Sound.tick(I);
+  const tNow=Sound.now();
+  while(Sound.beats.length && Sound.beats[0].t<=tNow) onBeat(Sound.beats.shift());
+  if(Sound.beats.length>64) Sound.beats.splice(0, Sound.beats.length-8);
+  beatPulse *= Math.exp(-dt*5);
+  meterTick+=dt; if(meterTick>.12){ meterTick=0; setMeter(I); }
+
+  // Ciel et brume
+  hz.copy(P.hzCalm).lerp(P.hzHot, I); mid.copy(P.midCalm).lerp(P.midHot, I);
+  sky.material.uniforms.hz.value.copy(hz); sky.material.uniforms.mid.value.copy(mid);
+  scene.fog.color.copy(hz); if(P.night) scene.fog.color.lerp(P.ground,.5);
+  starMat.opacity = P.night ? .85*(1-.7*I)*(.8+.2*Math.sin(clock*.7)) : 0;
+
+  // Caméra
+  if(entered && !reduce && !ptrs.size) goal.th += dt*(.012+.03*I);
+  const k=1-Math.exp(-dt*(entered ? 3.6 : 1)), kr=1-Math.exp(-dt*(entered ? 2.2 : 1));
+  cam.th+=(goal.th-cam.th)*k; cam.ph+=(goal.ph-cam.ph)*kr; cam.r+=(goal.r-cam.r)*kr;
+  cam.x+=(goal.x-cam.x)*k; cam.y+=(goal.y-cam.y)*k; cam.z+=(goal.z-cam.z)*k;
+  if(!entered && !reduce) goal.th += dt*.03;
+  // Le terminal mange le bas de l’écran : on recentre le décor dans ce qui reste, et on recule un peu
+  const offGoal=term.offsetHeight;
+  if(Math.abs(offGoal-viewOff)>.5){ viewOff+=(offGoal-viewOff)*(reduce ? 1 : 1-Math.exp(-dt*6)); camera.setViewOffset(W,H,0,viewOff/2,W,H); }
+  const sp=Math.sin(cam.ph), rr=cam.r*(1+.9*viewOff/H);
+  camera.position.set(cam.x+rr*sp*Math.sin(cam.th), cam.y+rr*Math.cos(cam.ph), cam.z+rr*sp*Math.cos(cam.th));
+  camera.lookAt(cam.x, cam.y, cam.z);
+  sky.position.copy(camera.position); stars.position.copy(camera.position);
+
+  // Survol
+  let h=null;
+  if(entered && lastPtr && !lastPtr.touch && !ptrs.size) h=pickAt(lastPtr.x,lastPtr.y);
+  if(h!==hovered){ hovered=h; canvas.classList.toggle('pick', !!h);
+    if(h){ tag.textContent=h.name; const s=document.createElement('small'); s.textContent = h.locked ? 'fermé' : fmtSize(h.size); tag.appendChild(s); }
+    tag.hidden=!h; }
+
+  // Blocs
+  const amp = reduce ? 0 : .006+.02*I, rate=.5+2.4*I;
+  loadTick+=dt;
+  for(let i=0;i<towers.length;i++){
+    const t=towers[i], hue=P.hues[t.d.hue];
+    let hh=t.h*(1+amp*Math.sin(clock*rate+t.phase));
+    if(t.d.kind==='proc'){
+      const sp2=reduce ? .15 : .35+1.6*I;
+      t.load = clamp(.42+.3*Math.sin(clock*t.f1*sp2*4+t.phase)+.22*Math.sin(clock*t.f2*sp2*9+t.phase*2)+.1*I, .04, 1);
+      hh=t.h*(.62+.5*t.load);
+    }
+    t.col.scale.y=hh; t.beam.position.y=hh;
+    let gh=0;
+    if(selected && t!==selected){
+      const ax=camera.position.x, az=camera.position.z, bx=selected.x-ax, bz=selected.z-az, L=bx*bx+bz*bz;
+      const u=((t.x-ax)*bx+(t.z-az)*bz)/L;
+      if(u>.02 && u<.97){ const px=ax+bx*u-t.x, pz=az+bz*u-t.z; if(Math.hypot(px,pz) < Math.max(t.w,t.dp)*.5+selected.w*.5+1.4) gh=1; }
+    }
+    t.ghost += (gh-t.ghost)*(1-Math.exp(-dt*6));
+    t.dim += (t.dimGoal*(1-.9*t.ghost)-t.dim)*(1-Math.exp(-dt*7));
+    const hot = (t===selected || t===hovered) ? 1 : 0, pulse = reduce ? 0 : beatPulse*clamp((I-.3)/.5,0,1);
+    t.body.material.opacity = (P.night ? .93 : 1)*t.dim; t.body.material.depthWrite = t.dim>.6;
+    t.body.material.color.setScalar(P.night ? 1+.25*hot+.18*pulse : 1);
+    tmp.copy(hue); if(P.night) tmp.lerp(WHITE, .3+.6*hot+.25*pulse); else tmp.lerp(P.ink, .5+.4*hot);
+    t.edges.material.color.copy(tmp); t.edges.material.opacity=(P.night ? .95 : .7)*t.dim;
+    t.pool.material.opacity = (P.night ? .5+.25*pulse+.2*hot : .2)*t.dim*(t.d.kind==='proc' && P.night ? .6+.8*t.load : 1);
+    if(t.arc) t.arc.material.opacity=(t.locked ? .15 : .65)*t.dim;
+    if(t.cage){
+      const u=t.cage.userData; u.flash*=Math.exp(-dt*4);
+      tmp.copy(P.wall); if(u.flash>.01){ tmp2.set(0xff3b5c); tmp.lerp(tmp2, u.flash); }
+      t.cage.material.color.copy(tmp);
+      let o=(.5+.5*u.flash)*t.dim;
+      if(u.melt>=0){ u.melt+=dt/.9; const m=Math.min(1,u.melt); t.cage.scale.y=1-m*m; o*=1-m;
+        if(m>=1){ t.g.remove(t.cage); t.cage.geometry.dispose(); t.cage.material.dispose(); t.cage=null; continue; } }
+      t.cage.material.opacity=o;
+    }
+  }
+
+  // Anneau de sélection et ondes
+  selRing.visible=!!selected;
+  if(selected){ const s=Math.max(selected.w,selected.dp)*.95+.5+(reduce?0:.12*Math.sin(clock*3));
+    selRing.scale.set(s,1,s); selRing.position.x=selected.x; selRing.position.z=selected.z;
+    selRing.material.color.copy(P.night ? WHITE : P.ink); }
+  rings.forEach(r=>{ if(!r.visible) return; const u=r.userData; u.age+=dt; const a=u.age/1.7;
+    if(a>=1){ r.visible=false; return; }
+    const s=2+62*(1-Math.pow(1-a,2)); r.scale.set(s,1,s); r.material.opacity=(P.night ? .75 : .45)*u.gain*Math.pow(1-a,1.6); });
+
+  // Circulation
+  const speed = reduce ? .25 : .35+2.3*I, share=.3+.7*I;
+  for(let i=0;i<NP;i++){ const p=flow.p[i]; p.s+=p.v*speed*dt; if(p.s>46) p.s=-46; else if(p.s<-46) p.s=46;
+    const y = p.rank<share ? .22 : -50;
+    if(p.ln.ax==='x'){ flow.pos[i*3]=p.s; flow.pos[i*3+2]=p.ln.k+p.off; } else { flow.pos[i*3]=p.ln.k+p.off; flow.pos[i*3+2]=p.s; }
+    flow.pos[i*3+1]=y; }
+  flowGeo.attributes.position.needsUpdate=true;
+  flowMat.size=.95+.6*I; flowMat.opacity=P.night ? .95 : .85;
+
+  agentsTick(dt);
+  if(!cur) renderer.render(scene, camera);
+
+  if(hovered){ v3.set(hovered.x, hovered.col.scale.y, hovered.z).project(camera);
+    tag.style.transform='translate('+((v3.x+1)/2*W).toFixed(1)+'px,'+((1-v3.y)/2*H).toFixed(1)+'px) translate(-50%,-150%)'; }
+  for(let i=0;i<tags.length;i++){ const g=tags[i];
+    v3.set(g.d.col*PITCH, g.d.top+2.2, g.d.row*PITCH/2).project(camera);
+    const sx=(v3.x+1)/2*W, sy=(1-v3.y)/2*H, on=entered && v3.z<1 && g.d!==focusD && sx>-80 && sx<W+80 && sy>-20 && sy<H+20;
+    if(on) g.el.style.transform='translate('+sx.toFixed(1)+'px,'+sy.toFixed(1)+'px) translate(-50%,-50%)';
+    if(g.on!==on){ g.on=on; g.el.hidden=!on; } }
+}
+boot(); resize(); frame();
+
+})();
+</script>
+</body>
+</html>

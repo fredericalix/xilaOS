@@ -1,0 +1,9 @@
+[package]
+name = "xila-db"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "The storage engine of XilaOS: typed tables of records, changed in transactions"
+
+[lib]
+path = "src/lib.rs"

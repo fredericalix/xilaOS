@@ -1,0 +1,38 @@
+Trame 0.3 — maquette d'un système où tout est donnée
+=====================================================
+
+Ouvrir : double-clic sur index.html (Chrome, Safari, Firefox ou Edge récents).
+Tout est local. La seule sortie réseau possible est OpenRouter, et seulement si tu donnes une clé.
+
+Si le navigateur refuse la 3D ou les polices en ouverture directe, servir le dossier :
+    python3 -m http.server 8000
+puis ouvrir http://localhost:8000
+
+Prise en main (tout se fait au clavier)
+    Entrée              entrer avec le son (S : sans le son)
+    aide c / k / a      commandes, touches, applications
+    base                la base interne ; puis un numéro, ou un select
+    Alt+E               menu des écrans et des applications
+    Alt+C P J W V M I A tableur, piles, jeu, web, vidéo, musique, irc, agents
+    Alt+S / Alt+X       son (ambiance, musique, coupé) / ambiance (calme, auto, intense)
+    Échap               remonter d'un cran, quitter une application
+
+Brancher les agents sur OpenRouter
+    Alt+A, puis K : coller la clé (gardée en mémoire, jamais écrite sur disque).
+    O : choisir le modèle (par défaut openrouter/auto ; il faut un modèle qui accepte les outils).
+    Les agents reçoivent un outil « sql » : ils interrogent la base avant de répondre.
+    Cette branche n'a pas pu être essayée avec une vraie clé : à vérifier chez toi.
+
+Ce qui est vrai et ce qui est simulé
+    Vrai      la base et ses select, le tableur, les piles, le jeu, le synthétiseur,
+              les morceaux, la persistance dans le navigateur, le pilotage au clavier.
+    Simulé    IRC (salons internes, pas de réseau), web (pages de la base, pas d'internet),
+              vidéo et musique (recettes calculées, pas de fichiers mp3 ou mp4).
+
+Contenu
+    index.html              la maquette entière
+    vendor/three.min.js     three.js r128 (licence MIT)
+    fonts/                  VT323 et Silkscreen (licence SIL Open Font 1.1)
+    licences/               textes des licences
+
+Les données affichées sont fictives. L'habillage s'inspire de l'interface texte de V2_OS (V2_Lab, Rotterdam).
