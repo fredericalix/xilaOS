@@ -41,7 +41,7 @@ fn main() {
     let file = File::options().read(true).write(true).create(true).truncate(true).open(&arguments[2]).expect("the image can be made");
     file.set_len(megabytes << 20).expect("the image can be given its size");
     let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |since| since.as_nanos() as u64);
-    match whole(&mut Image(file), megabytes << 11, &system, seed) {
+    match whole(&mut Image(file), megabytes << 11, &system, seed, &mut |_, _| {}) {
         Ok(_) => println!("{}", arguments[2]),
         Err(failed) => {
             eprintln!("the image could not be made: {failed:?}");

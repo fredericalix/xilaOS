@@ -59,7 +59,7 @@ XilaOS|all:/>net
    missed, no room       0
 ```
 
-Without a cable the `cable` row says `not plugged in, or the other end is silent` and the address `none: no cable`; with a cable and no answer yet from the network, `none yet: asking the network for one`. The card's own counters are read once per second, so `frames sent` can be a second late.
+Without a cable the `cable` row says `not plugged in, or the other end is silent` and the address `none: no cable`; with a cable and no answer yet from the network, `none yet: asking the network for one`. The card's own counters are read before every command, and once per second for the city.
 
 ### net ping
 

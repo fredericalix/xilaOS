@@ -831,9 +831,9 @@ pub struct System {
     /// then how it went and the start of what was said.
     pub asked_path: FixedStr<200>,
     pub got: Option<(crate::net::Ip, u16, Result<(u16, FixedStr<640>), crate::ask::Failed>)>,
-    /// Commands of the last numbered table.
-    pub last: [Text; TABLE_ROWS],
-    pub last_len: usize,
+    /// Commands of the last numbered table each session was shown.
+    pub last: [[Text; TABLE_ROWS]; crate::events::SESSIONS],
+    pub last_len: [usize; crate::events::SESSIONS],
     /// The characters on the screen at the last redraw, for `peek`.
     pub peek: [[u8; COLS]; MAX_ROWS],
     pub peek_rows: usize,
@@ -919,8 +919,8 @@ impl System {
             fetched: None,
             asked_path: FixedStr::new(),
             got: None,
-            last: [Text::new(); TABLE_ROWS],
-            last_len: 0,
+            last: [[Text::new(); TABLE_ROWS]; crate::events::SESSIONS],
+            last_len: [0; crate::events::SESSIONS],
             peek: [[b' '; COLS]; MAX_ROWS],
             peek_rows: 0,
         }
@@ -1028,7 +1028,7 @@ const HELP_COMMANDS: [&[u8]; 34] = [
     b"   about                      - What this system is and what it runs on.",
     b"   mem                        - Memory, as reported by the firmware.",
     b"   devices                    - The parts of the machine, and which are driven.",
-    b"   disk [erase]               - Where the tables are kept; erase takes a disk.",
+    b"   disk [check|erase]         - Where the tables are; reads all; takes a disk.",
     b"   install [n|system|from a]  - Puts XilaOS on a disk; from: fetches it first.",
     b"   net [ping a|get place]     - The network: card, cable, address. Pings; asks.",
     b"   remote [on|off]            - Opens this prompt to the local network.",
@@ -1099,11 +1099,14 @@ pub fn exec(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
         return true;
     }
     if let Some(n) = parse_number(line) {
-        if n >= 1 && n <= sys.last_len {
-            let command = sys.last[n - 1];
+        // a list belongs to the session it was shown to; a program that
+        // runs by itself has none
+        let listed = sys.last_len.get(sys.session).copied().unwrap_or(0);
+        if n >= 1 && n <= listed {
+            let command = sys.last[sys.session][n - 1];
             return command_line(sys, command.bytes(), out);
         }
-        let why: &[u8] = if sys.last_len == 0 { b"There is no list to follow yet." } else { b"That line leads nowhere." };
+        let why: &[u8] = if listed == 0 { b"There is no list to follow yet." } else { b"That line leads nowhere." };
         out.line(Style::Error, why);
         return false;
     }
@@ -1176,9 +1179,9 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
 
 /// Shows a table and remembers where its numbered rows lead.
 pub(crate) fn show(sys: &mut System, out: &mut dyn Out, table: &Table) {
-    if table.numbered {
-        sys.last = table.follow;
-        sys.last_len = table.rows;
+    if table.numbered && sys.session < crate::events::SESSIONS {
+        sys.last[sys.session] = table.follow;
+        sys.last_len[sys.session] = table.rows;
     }
     out.table(table);
     if table.more > 0 {
@@ -1458,6 +1461,27 @@ fn disk(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
             }
             true
         }
+        b"check" => {
+            // every page of every tree is read, and its checksum with it
+            let storage = sys.db.storage();
+            if storage.used == 0 {
+                out.line(Style::Out, b"There are no stored tables yet: nothing to read.");
+                return true;
+            }
+            match sys.db.verify() {
+                Ok(()) => {
+                    let mut line = FixedStr::<COLS>::new();
+                    let _ = write!(line, "The tables were read whole: {} pages ({} KB), every one is right.", storage.used, storage.used * 4);
+                    out.line(Style::Out, line.bytes());
+                    true
+                }
+                Err(error) => {
+                    out.line(Style::Error, crate::change::engine_error(error, None).bytes());
+                    out.line(Style::Error, b"The check stopped there. Nothing was changed.");
+                    false
+                }
+            }
+        }
         b"erase" if sys.session == crate::events::NETWORK => {
             out.line(Style::Error, b"disk erase takes a disk: it is typed at the machine itself.");
             false
@@ -1503,7 +1527,7 @@ fn disk(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
             }
         }
         _ => {
-            out.line(Style::Error, b"Usage: disk, or disk erase");
+            out.line(Style::Error, b"Usage: disk, disk check, or disk erase");
             false
         }
     }
@@ -1805,10 +1829,40 @@ fn qr(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     ok
 }
 
+/// Tells whether something that was said is an error, on its way to
+/// where it is shown.
+struct Watched<'a> {
+    out: &'a mut dyn Out,
+    failed: bool,
+}
+
+impl Out for Watched<'_> {
+    fn line(&mut self, style: Style, text: &[u8]) {
+        self.failed |= style == Style::Error;
+        self.out.line(style, text);
+    }
+
+    fn table(&mut self, table: &Table) {
+        self.out.table(table);
+    }
+
+    fn clear(&mut self) {
+        self.out.clear();
+    }
+}
+
 /// Shows what the kernel answered to the request of the last command, if
 /// it asked for something that has an answer. Whoever calls `exec` calls
-/// this once the kernel has served the request.
-pub fn served(sys: &mut System, out: &mut dyn Out) {
+/// this once the kernel has served the request. Returns false if the
+/// answer is a failure: the command then failed, whatever `exec` said
+/// when it left its request.
+pub fn served(sys: &mut System, out: &mut dyn Out) -> bool {
+    let mut watched = Watched { out, failed: false };
+    answer(sys, &mut watched);
+    !watched.failed
+}
+
+fn answer(sys: &mut System, out: &mut dyn Out) {
     if !sys.noting {
         return answers(sys, out);
     }
@@ -2249,6 +2303,67 @@ pub mod tests {
         }
     }
 
+    /// A disk in memory of which one page can be made to come back changed.
+    struct Rots {
+        disk: xila_db::Memory,
+        rotten: std::rc::Rc<std::cell::Cell<Option<u64>>>,
+    }
+
+    impl xila_db::Disk for Rots {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+        fn pages(&self) -> u64 {
+            self.disk.pages()
+        }
+        fn read(&mut self, page: u64, into: &mut xila_db::Page) -> Result<(), xila_db::DiskError> {
+            self.disk.read(page, into)?;
+            if self.rotten.get() == Some(page) {
+                into[100] ^= 1;
+            }
+            Ok(())
+        }
+        fn write(&mut self, page: u64, from: &xila_db::Page) -> Result<(), xila_db::DiskError> {
+            self.disk.write(page, from)
+        }
+        fn flush(&mut self) -> Result<(), xila_db::DiskError> {
+            self.disk.flush()
+        }
+    }
+
+    #[test]
+    fn disk_check_reads_every_page() {
+        let mut sys = System::new();
+        let (ok, out) = run_line(&mut sys, "disk check");
+        assert_eq!((ok, out.lines), (true, vec!["There are no stored tables yet: nothing to read.".to_string()]));
+        let rotten = std::rc::Rc::new(std::cell::Cell::new(None));
+        let disk = Rots { disk: xila_db::Memory::new(256), rotten: rotten.clone() };
+        let Ok(db) = xila_db::Database::open(xila_db::Volume::single(Box::new(disk))) else {
+            panic!("an empty disk was refused");
+        };
+        sys.db = db;
+        assert!(run_line(&mut sys, "create table notes (title text)").0);
+        assert!(run_line(&mut sys, "insert into notes values ('one'), ('two')").0);
+        let used = sys.db.storage().used;
+        let (ok, out) = run_line(&mut sys, "disk check");
+        assert_eq!((ok, out.lines), (true, vec![format!("The tables were read whole: {used} pages ({} KB), every one is right.", used * 4)]));
+        // one page after the other comes back changed: each time the check says which
+        let mut found = 0;
+        for page in 0..256 {
+            rotten.set(Some(page));
+            let (ok, out) = run_line(&mut sys, "disk check");
+            if !ok {
+                assert_eq!(out.lines, [format!("The database is damaged: page {page} cannot be read."), "The check stopped there. Nothing was changed.".to_string()]);
+                found += 1;
+            }
+        }
+        // the two headers are not pages of the trees
+        assert_eq!(found, used - 2);
+        rotten.set(None);
+        assert!(run_line(&mut sys, "disk check").0);
+        assert_eq!(run_line(&mut sys, "disk nonsense").1.lines, ["Usage: disk, disk check, or disk erase"]);
+    }
+
     #[test]
     fn unknown_command_fails() {
         let mut sys = System::new();
@@ -2279,6 +2394,26 @@ pub mod tests {
         let (ok, out) = run_line(&mut sys, "7");
         assert!(!ok);
         assert_eq!(out.lines, ["That line leads nowhere."]);
+    }
+
+    #[test]
+    fn a_numbered_list_belongs_to_who_was_shown_it() {
+        let mut sys = System::new();
+        // the screen is shown a list, then the serial port another one
+        assert!(run_line(&mut sys, "help").0);
+        sys.session = crate::events::SERIAL;
+        assert_eq!(run_line(&mut sys, "1").1.lines, ["There is no list to follow yet."]);
+        assert!(run_line(&mut sys, "screen").0);
+        assert!(run_line(&mut sys, "2").0);
+        assert_eq!(sys.screen, 1);
+        // the screen still follows its own
+        sys.session = crate::events::SCREEN;
+        assert_eq!(run_line(&mut sys, "3").1.lines[0], "XilaOS keys:");
+        // a program that runs by itself has no list, and leaves the others alone
+        sys.session = crate::events::BACKGROUND;
+        assert!(crate::lang::line(&mut sys, b"screen", &mut Lines::default()));
+        sys.session = crate::events::SCREEN;
+        assert_eq!(run_line(&mut sys, "3").1.lines[0], "XilaOS keys:");
     }
 
     #[test]
@@ -2342,7 +2477,8 @@ pub mod tests {
         assert!(sys.code.take().is_some() && out.errors == 0);
         run_line(&mut sys, "qr clear");
         let mut out = Lines::default();
-        served(&mut sys, &mut out);
+        // no code is a failure, though the command itself had nothing to say against it
+        assert!(!served(&mut sys, &mut out));
         assert_eq!(out.lines, ["That command said nothing: there is no code to show."]);
         assert!(sys.code.is_none() && !sys.noting);
 
@@ -2838,7 +2974,8 @@ pub mod tests {
         let said = |sys: &mut System, got| {
             sys.got = Some(([192, 168, 1, 20], 8000, got));
             let mut out = Lines::default();
-            served(sys, &mut out);
+            // an answer that is a failure makes the command one
+            assert_eq!(served(sys, &mut out), out.errors == 0);
             (out.errors, out.lines)
         };
         let text = FixedStr::from_bytes(b"first line\r\n\r\n<b>second</b> \x07\xe9\n3\n4\n5\n6\n7\n8\n9\n");
@@ -2854,11 +2991,13 @@ pub mod tests {
         assert_eq!(out.lines.len(), NET_REGISTERS + 1);
         sys.pinged = Some(([192, 168, 1, 1], Some(420)));
         let mut out = Lines::default();
-        served(&mut sys, &mut out);
+        assert!(served(&mut sys, &mut out));
         assert_eq!(out.lines, ["192.168.1.1 answered in 0.4 ms."]);
         sys.pinged = Some(([192, 168, 1, 9], None));
         let mut out = Lines::default();
-        served(&mut sys, &mut out);
+        assert!(!served(&mut sys, &mut out));
+        // nothing to answer: nothing failed
+        assert!(served(&mut sys, &mut Lines::default()));
         assert_eq!((out.errors, out.lines.concat()), (1, "192.168.1.9 did not answer within a second.".to_string()));
     }
 

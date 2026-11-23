@@ -240,7 +240,7 @@ pub fn look(disks: &mut Disks, sys: &mut System) {
 /// Puts the system, `file`, on a disk numbered from 1: on the whole disk,
 /// which is then where the tables are kept, or only in place of the system
 /// the disk holds.
-pub fn install(sys: &mut System, disks: &mut Disks, number: usize, whole: bool, file: &[u8]) -> Result<Installed, InstallError> {
+pub fn install(sys: &mut System, disks: &mut Disks, number: usize, whole: bool, file: &[u8], progress: install::Progress) -> Result<Installed, InstallError> {
     let index = number.wrapping_sub(1);
     let Some(disk) = disks.list.get_mut(index) else {
         return Err(InstallError::Disk(Failed::TooSmall));
@@ -252,7 +252,7 @@ pub fn install(sys: &mut System, disks: &mut Disks, number: usize, whole: bool, 
         let Holds::Partitions { system: Some((start, _)), .. } = gpt::describe(sectors, &mut |at, into| disk.read(at, into).is_ok()) else {
             return Err(InstallError::Disk(Failed::NoRoom));
         };
-        install::system(disk, start, file, seed).map_err(InstallError::Disk)?;
+        install::system(disk, start, file, seed, progress).map_err(InstallError::Disk)?;
         return Ok(Installed { disk: number, whole });
     }
 
@@ -270,7 +270,7 @@ pub fn install(sys: &mut System, disks: &mut Disks, number: usize, whole: bool, 
         }
         sys.machine.disk = Text::from_bytes(b"sata, installation not complete: not used");
     }
-    let layout = install::whole(disk, sectors, file, seed).map_err(InstallError::Disk)?;
+    let layout = install::whole(disk, sectors, file, seed, progress).map_err(InstallError::Disk)?;
 
     // The tables are kept on the new partition from now on.
     let pages = layout.data.sectors / SECTORS_PER_PAGE;

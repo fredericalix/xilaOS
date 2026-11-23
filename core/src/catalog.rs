@@ -21,11 +21,20 @@ pub const TABLES: [TableDef; 9] = [
     TableDef { name: b"tasks", columns: &[b"id", b"name", b"state", b"ran_ms", b"share"], kinds: b"ittii", about: b"what runs, and its share of the processor in %" },
     TableDef { name: b"settings", columns: &[b"name", b"value"], kinds: b"tt", about: b"mood, theme, keyboard, screen" },
     TableDef { name: b"screens", columns: &[b"id", b"name", b"shown"], kinds: b"itt", about: b"the virtual screens" },
-    TableDef { name: b"memory", columns: &[b"kind", b"kb"], kinds: b"ti", about: b"memory of the machine, of the kernel, of the database" },
+    TableDef { name: b"memory", columns: &[b"kind", b"kb"], kinds: b"ti", about: b"memory: the machine, the kernel, the database" },
     TableDef { name: b"city", columns: &[b"plot", b"block", b"height", b"lit"], kinds: b"ttit", about: b"what the city shows" },
     TableDef { name: b"commands", columns: &[b"name"], kinds: b"t", about: b"the commands of the prompt" },
     TableDef { name: b"machine", columns: &[b"item", b"value"], kinds: b"tt", about: b"processor, firmware, screen, disk" },
 ];
+
+// A cell of a result holds a `Text`: what says what a view is must fit.
+const _: () = {
+    let mut index = 0;
+    while index < TABLES.len() {
+        assert!(TABLES[index].about.len() <= crate::change::MAX_TEXT);
+        index += 1;
+    }
+};
 
 /// Index of a table of the system by name.
 pub fn find(name: &[u8]) -> Option<usize> {

@@ -41,9 +41,14 @@ pub enum Failed {
     Differs(u64),
 }
 
+/// Told how far an installation is, as it goes: sectors done, of how
+/// many. The start-up partition is written, then read back: twice its
+/// sectors in all. The rest is too little to count.
+pub type Progress<'a> = &'a mut dyn FnMut(u64, u64);
+
 /// Writes the start-up partition (`check` false), or compares what it
 /// holds with what should have been written.
-fn start_up(disk: &mut dyn Sectors, start: Partition, fat: &Fat, file: &[u8], check: bool) -> Result<(), Failed> {
+fn start_up(disk: &mut dyn Sectors, start: Partition, fat: &Fat, file: &[u8], check: bool, progress: Progress) -> Result<(), Failed> {
     let (mut wanted, mut held) = ([0u8; CHUNK * SECTOR], [0u8; CHUNK * SECTOR]);
     let mut at = 0;
     while at < fat.written() {
@@ -62,6 +67,7 @@ fn start_up(disk: &mut dyn Sectors, start: Partition, fat: &Fat, file: &[u8], ch
             return Err(Failed::Differs(start.first + at + (byte / SECTOR) as u64));
         }
         at += count as u64;
+        progress(at + if check { fat.written() } else { 0 }, 2 * fat.written());
     }
     Ok(())
 }
@@ -69,7 +75,7 @@ fn start_up(disk: &mut dyn Sectors, start: Partition, fat: &Fat, file: &[u8], ch
 /// Takes a whole disk of `sectors` sectors for XilaOS. `file` is the
 /// system as the firmware starts it; `seed` is a number that differs from
 /// one installation to the next. Returns where the partitions are.
-pub fn whole(disk: &mut dyn Sectors, sectors: u64, file: &[u8], seed: u64) -> Result<Layout, Failed> {
+pub fn whole(disk: &mut dyn Sectors, sectors: u64, file: &[u8], seed: u64, progress: Progress) -> Result<Layout, Failed> {
     let layout = Layout::new(sectors, seed).ok_or(Failed::TooSmall)?;
     let fat = Fat::new(layout.start, file.len(), (seed >> 32 ^ seed) as u32).ok_or(Failed::NoRoom)?;
     // From here on the disk is written. The place of the tables first: if
@@ -82,7 +88,7 @@ pub fn whole(disk: &mut dyn Sectors, sectors: u64, file: &[u8], seed: u64) -> Re
         }
     }
     layout.write(&mut |at, sector| disk.write(at, sector)).map_err(Failed::Write)?;
-    start_up(disk, layout.start, &fat, file, false)?;
+    start_up(disk, layout.start, &fat, file, false, progress)?;
     if !disk.flush() {
         return Err(Failed::Write(0));
     }
@@ -102,19 +108,19 @@ pub fn whole(disk: &mut dyn Sectors, sectors: u64, file: &[u8], seed: u64) -> Re
     if found != (Holds::Partitions { count: 2, system: Some((layout.start, layout.data)) }) {
         return Err(Failed::Differs(1));
     }
-    start_up(disk, layout.start, &fat, file, true)?;
+    start_up(disk, layout.start, &fat, file, true, progress)?;
     Ok(layout)
 }
 
 /// Replaces the system in the start-up partition of a disk XilaOS was
 /// installed on. Nothing else on the disk is written.
-pub fn system(disk: &mut dyn Sectors, start: Partition, file: &[u8], seed: u64) -> Result<(), Failed> {
+pub fn system(disk: &mut dyn Sectors, start: Partition, file: &[u8], seed: u64, progress: Progress) -> Result<(), Failed> {
     let fat = Fat::new(start, file.len(), (seed >> 32 ^ seed) as u32).ok_or(Failed::NoRoom)?;
-    start_up(disk, start, &fat, file, false)?;
+    start_up(disk, start, &fat, file, false, progress)?;
     if !disk.flush() {
         return Err(Failed::Write(0));
     }
-    start_up(disk, start, &fat, file, true)
+    start_up(disk, start, &fat, file, true, progress)
 }
 
 #[cfg(test)]
@@ -182,7 +188,7 @@ mod tests {
 
     fn take(disk: &mut Ram, file: &[u8], seed: u64) -> Result<Layout, Failed> {
         let sectors = disk.sectors;
-        whole(disk, sectors, file, seed)
+        whole(disk, sectors, file, seed, &mut |_, _| {})
     }
 
     fn xila() -> Vec<u8> {
@@ -223,6 +229,29 @@ mod tests {
                 || (layout.data.first..layout.data.first + EMPTIED).contains(&at)
         };
         assert!(disk.writes.iter().all(|at| expected(*at)));
+    }
+
+    #[test]
+    fn an_installation_tells_how_far_it_is() {
+        let system = xila();
+        let mut disk = Ram::new(500);
+        let sectors = disk.sectors;
+        let mut told = Vec::new();
+        let layout = whole(&mut disk, sectors, &system, 42, &mut |done, total| told.push((done, total))).unwrap();
+        // written, then read back: twice the sectors of the start-up partition that hold something
+        let written = Fat::new(layout.start, system.len(), 1).unwrap().written();
+        assert!(told.iter().all(|(_, total)| *total == 2 * written));
+        assert!(told.windows(2).all(|pair| pair[0].0 < pair[1].0 && pair[1].0 - pair[0].0 <= CHUNK as u64));
+        assert_eq!((told[0].0, told[told.len() - 1].0), (CHUNK as u64, 2 * written));
+        // the system alone: the same road
+        let mut again = Vec::new();
+        assert_eq!(super::system(&mut disk, layout.start, &system, 43, &mut |done, total| again.push((done, total))), Ok(()));
+        assert_eq!(again, told);
+        // a disk that fails stops it where it is
+        let mut failing = Ram { no_write: Some(layout.start.first + 80), ..Ram::new(500) };
+        let mut last = 0;
+        assert!(whole(&mut failing, sectors, &system, 42, &mut |done, _| last = done).is_err());
+        assert_eq!(last, 80);
     }
 
     #[test]
@@ -267,15 +296,15 @@ mod tests {
         disk.held.insert(layout.data.first, [7; SECTOR]);
         disk.writes.clear();
         let newer: Vec<u8> = xila().iter().rev().copied().chain([1, 2, 3]).collect();
-        assert_eq!(system(&mut disk, layout.start, &newer, 43), Ok(()));
+        assert_eq!(system(&mut disk, layout.start, &newer, 43, &mut |_, _| {}), Ok(()));
         assert!(started_from(&disk, layout.start).as_deref() == Some(&newer[..]));
         // nothing was written outside the start-up partition
         assert!(disk.writes.iter().all(|at| (layout.start.first..layout.start.first + layout.start.sectors).contains(at)));
         assert_eq!(disk.sector(layout.data.first), [7; SECTOR]);
         // a shorter system leaves nothing of the longer one in the file
-        assert_eq!(system(&mut disk, layout.start, &[9; 700], 44), Ok(()));
+        assert_eq!(system(&mut disk, layout.start, &[9; 700], 44, &mut |_, _| {}), Ok(()));
         assert!(started_from(&disk, layout.start).as_deref() == Some(&[9; 700][..]));
         let mut failing = Ram { forgets: Some(layout.start.first), ..Ram::new(500) };
-        assert_eq!(system(&mut failing, layout.start, &xila(), 1), Err(Failed::Differs(layout.start.first)));
+        assert_eq!(system(&mut failing, layout.start, &xila(), 1, &mut |_, _| {}), Err(Failed::Differs(layout.start.first)));
     }
 }

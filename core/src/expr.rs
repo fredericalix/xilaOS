@@ -529,8 +529,19 @@ impl Parser<'_, '_> {
         match self.lexer.next() {
             Token::Number(n) => self.add(Node::Value(Value::Int(n))),
             Token::Decimal(units, scale) => self.add(Node::Value(Value::Dec(units, scale))),
-            Token::String(text) if text.len() <= MAX_TEXT => self.add(Node::Value(Value::text(text))),
-            Token::String(_) => Err(Message::from_bytes(b"A text takes 48 characters at most, for now.")),
+            Token::String(written) => {
+                // between its quotes, a quote is written twice
+                let (mut text, mut length, mut at) = (Text::new(), 0, 0);
+                while at < written.len() {
+                    text.push(written[at]);
+                    length += 1;
+                    at += if written[at] == b'\'' { 2 } else { 1 };
+                }
+                if length > MAX_TEXT {
+                    return Err(Message::from_bytes(b"A text takes 48 characters at most, for now."));
+                }
+                self.add(Node::Value(Value::Text(text)))
+            }
             Token::Symbol(b"(") => {
                 self.depth += 1;
                 if self.depth > MAX_DEPTH {
@@ -613,6 +624,20 @@ mod tests {
             Ok(value) => String::from_utf8_lossy(value.shown().bytes()).into_owned(),
             Err(message) => format!("error: {}", String::from_utf8_lossy(message.bytes())),
         }
+    }
+
+    #[test]
+    fn a_quote_in_a_text_is_written_twice() {
+        assert_eq!(work("'it''s'"), "'it's'");
+        assert_eq!(work("length('it''s')"), "4");
+        assert_eq!(work("''''"), "'''");
+        assert_eq!(work("'' || 'a'"), "'a'");
+        assert_eq!(work("'l''' || 'eau'"), "'l'eau'");
+        // 48 characters once the quotes are counted once
+        assert_eq!(work("length('''23456789012345678901234567890123456789012345678')"), "48");
+        assert_eq!(work("'''234567890123456789012345678901234567890123456789'"), "error: A text takes 48 characters at most, for now.");
+        // a text that is not closed still ends where the line does
+        assert_eq!(work("'open"), "'open'");
     }
 
     #[test]

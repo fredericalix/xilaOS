@@ -150,8 +150,10 @@ XilaOS keys:
 The tables with numbered rows are those of `help` (a topic), `tables` (a row
 leads to `select * from` that table), `screen` (shows the screen) and
 `programs` (shows the program). The numbers belong to the last such table
-shown. Before any list, a number answers `There is no list to follow yet.`;
-past the last row, `That line leads nowhere.`
+shown at that prompt: the screen, the serial port and the prompt over the
+network each follow their own list. Before any list, a number answers
+`There is no list to follow yet.`; past the last row, `That line leads
+nowhere.`
 
 ### Help and mistakes
 
@@ -262,7 +264,13 @@ more grains of light. Nothing else depends on it.
 
 The system starts in `us`. `keymap fr` gives a French AZERTY keyboard, with
 the accented letters the font has and `AltGr` for ``~ # { [ | ` \ ^ @ ] }``.
-`Caps Lock` works on letters. There are no dead keys and no other layout.
+`Caps Lock` works on letters. The key right of `P` is a dead key, as on any
+French keyboard: the circumflex, or the diaeresis with `Shift`, goes on the
+letter typed next, for the letters the font has with that accent (`a e i o
+u` in small letters; with the diaeresis also `y`, `A`, `O`, `U`). Before a
+space the accent comes alone, before any other key it comes first, and
+`Backspace` takes it back. The font has no diaeresis alone: a double quote
+stands for it. There is no other layout.
 Only a PS/2 keyboard is read, which is what the internal keyboard of most
 laptops is.
 
@@ -389,6 +397,18 @@ On an unknown PC this is the first thing to look at.
    used           0 KB
 ```
 
+`disk check` reads every page of every stored table and checks it: its
+checksum, the order of its tree, the count of its rows. It changes nothing.
+
+```
+XilaOS|all:/>disk check
+The tables were read whole: 12 pages (48 KB), every one is right.
+```
+
+A page that cannot be read or does not hold what its checksum says stops
+the check, which names it: `The database is damaged: page 7 cannot be
+read.` The machine does nothing else while it reads.
+
 `disk erase` and `install` take a disk for XilaOS; both are described in
 [Disk layout and installation](09-disk-layout-and-install.md).
 
@@ -497,6 +517,7 @@ See [Disk layout and installation](09-disk-layout-and-install.md).
 | Command | What it does |
 |---|---|
 | `disk` | Where the stored tables are kept, and how full. |
+| `disk check` | Reads every page of the stored tables and says whether each is right. |
 | `disk erase [yes]` | Gives XilaOS a partition it found and refused because it held something else. |
 | `install [n [yes]]` | Lists the disks; with a number, puts XilaOS on that whole disk. |
 | `install system` | Rewrites the start-up partition only; the tables stay. |
@@ -548,10 +569,7 @@ See [XilaScript](05-xilascript.md).
 - The history holds 16 lines and the terminal 256 rows; neither is kept
   between starts.
 - `Tab` completes the first word only.
-- The numbered rows are remembered for the whole system, not per prompt: a
-  list shown on the serial port replaces the one the screen could follow.
-- A table shows 32 rows and 8 columns at most, and a text cell 48 characters:
-  the `about` column of `tables` is cut there.
+- A table shows 32 rows and 8 columns at most, and a text cell 48 characters.
 - A program that runs holds the interface until it ends: the screen does not
   answer to keys meanwhile.
 - No shutdown command, no mouse, no USB keyboard.

@@ -51,9 +51,9 @@ Notes on building:
 
 | Level | Where | What it proves |
 |---|---|---|
-| Unit tests of `xila-core` (205) | next to the code, `#[cfg(test)]` | The logic: parsing, SQL results, the language, the interface's grid after a key, TCP against a simulated peer, partition tables, the QR encoder... |
+| Unit tests of `xila-core` (more than 200) | next to the code, `#[cfg(test)]` | The logic: parsing, SQL results, the language, the interface's grid after a key, TCP against a simulated peer, partition tables, the QR encoder... |
 | Unit tests of `xila-db` (24) | `db/src/lib.rs`, `db/src/testing.rs` | The storage engine, with the power cut at every write. See [The storage engine](08-storage.md). |
-| System checks (about 300) | `tools/check.py` | The built kernel, in QEMU with a real firmware: boot, keyboard, screen, disks, power cuts, network, install. |
+| System checks (more than 300) | `tools/check.py` | The built kernel, in QEMU with a real firmware: boot, keyboard, screen, disks, power cuts, network, install. |
 
 The unit tests run in a few seconds on the host. They cover everything
 that does not need the machine, which by design is most of the system
@@ -65,7 +65,10 @@ The serial port (COM1, 115,200 baud) carries the same shell as the
 screen. What it writes is made for a program:
 
 - Every command ends with a status line, `#ok` or `#error`, then the
-  prompt `XilaOS|all:/>`.
+  prompt `XilaOS|all:/>`. A command whose work the kernel does (`net
+  ping`, `net get`, `install`, `qr`...) ends with `#error` when the
+  kernel's answer is a failure: no answer to a ping, a page that is not
+  there, a disk that refused.
 - A table is `#table name<TAB>column<TAB>column...`, then one line per
   row with tabs between cells, then `#end`.
 - Events the serial session listens to arrive as

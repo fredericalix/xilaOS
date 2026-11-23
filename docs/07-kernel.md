@@ -436,7 +436,8 @@ task that ran it calls `serve` (`main.rs`) right after:
 
 When the request has an answer, the kernel leaves it in `System` and
 the task calls `shell::served`, which words it where the command was
-typed. In the other direction, `observe` copies kernel state into
+typed and returns false when the answer is a failure: the command then
+ends with `#error`, whatever it said when it left its request. In the other direction, `observe` copies kernel state into
 `System` before each command, so that `tasks` or `select * from memory`
 read plain data.
 

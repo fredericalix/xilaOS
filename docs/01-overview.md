@@ -53,7 +53,7 @@ driven by the keyboard only.
 | Install | `install` partitions a disk, writes a FAT32 start-up partition with the kernel in it, and reads everything back. |
 | Network | Intel e1000-family cards; ARP, IPv4, ICMP, UDP, DHCP, TCP; a prompt over the network; read-only web pages of the tables; fetching a new kernel by TFTP. |
 | Graphics | Write-combined framebuffer with a prepared picture; on the Intel HD Graphics of 2011-2012, tear-free page flipping and panel brightness. |
-| Tooling | The same shell on the serial port, in a format a program can read; a Python driver for QEMU; 229 unit tests and about 300 whole-system checks. |
+| Tooling | The same shell on the serial port, in a format a program can read; a Python driver for QEMU; more than 200 unit tests and more than 300 whole-system checks. |
 
 ## What does not exist
 

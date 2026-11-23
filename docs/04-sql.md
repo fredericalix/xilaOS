@@ -116,8 +116,9 @@ XilaOS|all:/>insert into expenses values ('x', 'y', 'z')
 Column amount takes a number.
 ```
 
-A text is written between apostrophes: `'coffee'`. There is no way to write
-an apostrophe inside a text. Text is bytes in the character set of the
+A text is written between apostrophes: `'coffee'`. An apostrophe inside a
+text is written twice, as in SQL: `'l''eau'` is the five characters
+`l'eau`. Text is bytes in the character set of the
 system's font (ASCII below 128), not UTF-8.
 
 There is no date type. `today` and `now` (see below) are texts written so
@@ -421,7 +422,7 @@ follow from that, and from what is not built yet.
 | Groups of a `GROUP BY` | 32 |
 | Rows of one `INSERT` | 8 |
 | An expression | 16 values and operations; parentheses, signs and `not` nest 12 deep |
-| A text | 48 characters, no apostrophe inside |
+| A text | 48 characters |
 | A name of table or column | 24 characters |
 | Stored tables | 64 |
 | Digits after the point | 9 in a column, 6 from a division |

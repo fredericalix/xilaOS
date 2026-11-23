@@ -29,6 +29,8 @@ were also tried on the real machine.
 | SATA (AHCI), GPT partition of XilaOS's type | yes | yes |
 | `install`, `install system`, the USB stick image | yes | yes |
 | SQL: `SELECT`, `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`, expressions | yes | yes |
+| `disk check`: every page of the tables read and checked | yes | not tried |
+| `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | not tried |
 | LISTEN / NOTIFY | yes | yes |
 | XilaScript: variables, blocks, stored programs, `on` and `every` programs | yes | yes |
 | Clock, `now` and `today`, `every day at` | yes | yes |
@@ -80,21 +82,6 @@ sound, no Wi-Fi. Details in [Hardware and graphics](11-hardware.md).
 **Interface.** Two virtual screens (the overview and the boot log). The
 `sound` and `irc` labels of the header come from the mock-up and have
 nothing behind them.
-
-## Small things that are off
-
-Found while writing this documentation, and not fixed yet:
-
-- Network commands that fail after being served (`net ping` with no
-  answer, `net get` with a 404, `install from` a silent server) say so
-  in words but still end with `#ok` on the serial port.
-- `qr` with a command that says nothing prints a message and reports
-  success.
-- The rows that can be followed by typing their number are shared by
-  all sessions: a list shown on the serial port replaces the one the
-  screen could follow.
-- The `about` column of `tables` is cut at 48 characters.
-- The `frames sent` row of `net` can lag by up to a second.
 
 ## The larger plan
 
@@ -226,30 +213,24 @@ its checks in `tools/check.py` pass.
 
 | Phase | Content | State |
 |---|---|---|
-| 1. Loose ends | The small things that are off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing; `net ping` that does not hold the system | In progress |
-| 2. SQL | `IN`, `BETWEEN`, `NOT LIKE`, aggregates inside a calculation; a row reached by its `id` without reading the table; constraints and indexes; joins; a view of the log; `BEGIN` / `COMMIT` | Next |
-| 3. XilaScript | Parameters and names of a program's own; a task of its own for a program; an editor; `insert ... select`, the values of before, more rhythms | After 2 |
+| 1. Loose ends | The small things that were off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing | Done on 23 November 2026 |
+| 2. SQL | `IN`, `BETWEEN`, `NOT LIKE`, aggregates inside a calculation; a row reached by its `id` without reading the table; constraints and indexes; joins; a view of the log; `BEGIN` / `COMMIT` | In progress |
+| 3. XilaScript | Parameters and names of a program's own; a task of its own for a program, and for the commands that wait (`net ping`, `net get`, `install from`); an editor; `insert ... select`, the values of before, more rhythms | After 2 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design and on the first outside code |
 | 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
 
 **Waiting for the T430.** What these phases build is only verified in
-QEMU until it is tried there: the dead keys on the real keyboard, and
-`install` showing its progress on a real disk.
+QEMU until it is tried there: the dead keys on the real keyboard,
+`install` showing its progress on a real disk, and `disk check` on a
+real disk.
 
 ### Loose ends of what exists
 
-- The five small things that are off, listed above.
-- A command for the full read of the database: `Database::verify`
-  exists and nothing calls it.
-- Something that moves on the screen while `install` writes; today the
-  screen waits one to two seconds.
-- The dead keys of the `fr` layout (circumflex, diaeresis) give the
-  character alone.
-- A text cannot hold an apostrophe.
 - Characters outside ASCII leave as `?` on the serial port and in the
   web pages.
-- `net ping` holds the system for the second it waits.
+- `net ping`, `net get` and `install from` hold the system while they
+  wait: phase 3.
 - A development mode. The serial shell is always open and may do
   everything; it is meant to be open in QEMU, or on request at start,
   and closed otherwise.
@@ -320,7 +301,8 @@ ways the emulator never shows.
 ### Storage
 
 - The mirror on two disks, as designed above; then four.
-- A read of every page, on demand and at regular intervals.
+- A read of every page at regular intervals: `disk check` does it on
+  demand, and holds the system while it reads.
 - The checksum of a page kept in the page that points to it, against
   a write the disk loses silently.
 - Snapshots: a table as it was at a past date.

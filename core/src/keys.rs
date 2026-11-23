@@ -79,6 +79,21 @@ const US: Table = Table {
     altgr: [0; 0x58],
 };
 
+/// The key right of P on a French keyboard is a dead key: its accent
+/// (circumflex, or diaeresis with Shift) waits for the letter that comes
+/// next. The font has no diaeresis alone: a double quote stands for it.
+const DEAD: usize = 0x1a;
+
+/// A letter under the accent of a dead key, for the letters the font has
+/// (code page 437).
+fn accented(accent: u8, letter: u8) -> Option<u8> {
+    let (letters, with): (&[u8], &[u8]) = match accent {
+        b'^' => (b"aeiou", b"\x83\x88\x8c\x93\x96"),
+        _ => (b"aeiouyAOU", b"\x84\x89\x8b\x94\x81\x98\x8e\x99\x9a"),
+    };
+    letters.iter().position(|l| *l == letter).map(|at| with[at])
+}
+
 // French AZERTY (PC). Accented letters use the codes of the font (code page 437).
 const FR: Table = Table {
     plain: keys(b"&\x82\"'(-\x8a_\x87\x85)=", b"azertyuiop^$", b"qsdfghjklm\x97\xfd", b"*wxcvbn,;:!", b'<'),
@@ -95,15 +110,59 @@ pub struct Decoder {
     altgr: bool,
     caps: bool,
     extended: bool,
+    /// The accent of a dead key that waits for its letter.
+    dead: Option<u8>,
+    /// A second event that the last scancode made: `rest` gives it.
+    second: Option<KeyEvent>,
 }
 
 impl Decoder {
     pub const fn new() -> Decoder {
-        Decoder { shift_left: false, shift_right: false, ctrl: false, alt: false, altgr: false, caps: false, extended: false }
+        Decoder { shift_left: false, shift_right: false, ctrl: false, alt: false, altgr: false, caps: false, extended: false, dead: None, second: None }
     }
 
-    /// Takes one scancode byte. Returns an event when a key was pressed.
+    /// The second event of the scancode `feed` just took, if it made two:
+    /// an accent that found no letter to go on, then the key itself.
+    pub fn rest(&mut self) -> Option<KeyEvent> {
+        self.second.take()
+    }
+
+    /// Takes one scancode byte. Returns an event when a key was pressed;
+    /// `rest` may then have one more.
     pub fn feed(&mut self, layout: Layout, code: u8) -> Option<KeyEvent> {
+        let dead_key = layout == Layout::Fr && code as usize == DEAD && !self.extended && !self.altgr;
+        let event = self.scan(layout, code)?;
+        let plain = !event.alt && !event.ctrl;
+        if dead_key && plain {
+            // a dead key says nothing by itself: it waits for the next key.
+            // Pressed twice, the first accent comes out alone.
+            let accent = if event.key == Key::Char(b'"') { b'"' } else { b'^' };
+            return self.dead.replace(accent).map(|before| KeyEvent { key: Key::Char(before), ..event });
+        }
+        let Some(accent) = self.dead.take() else {
+            return Some(event);
+        };
+        let alone = KeyEvent { key: Key::Char(accent), alt: false, ctrl: false, digit: None };
+        match event.key {
+            Key::Char(letter) if plain => match accented(accent, letter) {
+                Some(with) => Some(KeyEvent { key: Key::Char(with), ..event }),
+                // a space gives the accent alone
+                None if letter == b' ' => Some(alone),
+                None => {
+                    self.second = Some(event);
+                    Some(alone)
+                }
+            },
+            // the accent is taken back
+            Key::Backspace | Key::Esc => None,
+            _ => {
+                self.second = Some(event);
+                Some(alone)
+            }
+        }
+    }
+
+    fn scan(&mut self, layout: Layout, code: u8) -> Option<KeyEvent> {
         if code == 0xe0 {
             self.extended = true;
             return None;
@@ -213,6 +272,41 @@ mod tests {
         assert_eq!(chars(Layout::Fr, &[0x2a, 0x03, 0x83, 0xaa, 0x03]), b"2\x82");
         // AltGr (E0 38) + key 0 gives @ on a French keyboard
         assert_eq!(chars(Layout::Fr, &[0xe0, 0x38, 0x0b]), b"@");
+    }
+
+    #[test]
+    fn dead_keys_put_their_accent_on_the_next_letter() {
+        // the key right of P, then E (0x12), I (0x17), then the key marked A on it (0x10)
+        assert_eq!(chars(Layout::Fr, &[0x1a, 0x9a, 0x12, 0x92]), b"\x88");
+        assert_eq!(chars(Layout::Fr, &[0x1a, 0x17, 0x1a, 0x10]), b"\x8c\x83");
+        // with Shift it is a diaeresis; the letter may be a capital
+        assert_eq!(chars(Layout::Fr, &[0x2a, 0x1a, 0xaa, 0x12]), b"\x89");
+        assert_eq!(chars(Layout::Fr, &[0x2a, 0x1a, 0x16, 0xaa]), b"\x9a");
+        // a space gives the accent alone, and so does the key pressed twice
+        assert_eq!(chars(Layout::Fr, &[0x1a, 0x39]), b"^");
+        assert_eq!(chars(Layout::Fr, &[0x1a, 0x1a, 0x39]), b"^^");
+        // a letter that takes no such accent comes after it
+        let mut d = Decoder::new();
+        assert_eq!(d.feed(Layout::Fr, 0x1a), None);
+        assert_eq!(d.feed(Layout::Fr, 0x14).map(|e| e.key), Some(Key::Char(b'^')));
+        assert_eq!(d.rest().map(|e| e.key), Some(Key::Char(b't')));
+        assert_eq!(d.rest(), None);
+        // a capital has no circumflex in the font
+        assert_eq!(d.feed(Layout::Fr, 0x1a), None);
+        assert_eq!(d.feed(Layout::Fr, 0x2a), None);
+        assert_eq!(d.feed(Layout::Fr, 0x12).map(|e| e.key), Some(Key::Char(b'^')));
+        assert_eq!(d.rest().map(|e| e.key), Some(Key::Char(b'E')));
+        assert_eq!(d.feed(Layout::Fr, 0xaa), None);
+        // Enter comes after the accent; Backspace takes the accent back
+        assert_eq!(d.feed(Layout::Fr, 0x1a), None);
+        assert_eq!(d.feed(Layout::Fr, 0x1c).map(|e| e.key), Some(Key::Char(b'^')));
+        assert_eq!(d.rest().map(|e| e.key), Some(Key::Enter));
+        assert_eq!(d.feed(Layout::Fr, 0x1a), None);
+        assert_eq!(d.feed(Layout::Fr, 0x0e), None);
+        assert_eq!(d.feed(Layout::Fr, 0x12).map(|e| e.key), Some(Key::Char(b'e')));
+        // AltGr and 9 still give the circumflex at once, and the US layout has no dead key
+        assert_eq!(chars(Layout::Fr, &[0xe0, 0x38, 0x0a]), b"^");
+        assert_eq!(chars(Layout::Us, &[0x1a, 0x12]), b"[e");
     }
 
     #[test]

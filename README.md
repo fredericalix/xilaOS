@@ -81,8 +81,8 @@ prompt as the screen. `Ctrl+A` then `X` quits. Type `help` to begin;
 the steps for a real machine.
 
 ```sh
-cargo test -p xila-core -p xila-db          # 229 unit tests, on the host
-tools/build.sh && python3 tools/check.py    # about 300 checks of the whole system, in QEMU
+cargo test -p xila-core -p xila-db          # more than 200 unit tests, on the host
+tools/build.sh && python3 tools/check.py    # more than 300 checks of the whole system, in QEMU
 ```
 
 ## Architecture
@@ -101,7 +101,7 @@ About 25,000 lines of Rust in three crates, and nothing else linked in.
  │ core/   xila-core    all the logic         │     │
  │ interface, shell, SQL, XilaScript, events, │     │
  │ city, network stack, TCP, GPT, FAT, QR...  │     │
- │ no hardware, no heap, 205 unit tests       │     │
+ │ no hardware, no heap, tested on the host   │     │
  └───────────────┬────────────────────────────┘     │
                  │ tables, rows, transactions       │
                  ▼                                  ▼

@@ -254,7 +254,12 @@ impl<'a> Lexer<'a> {
             return Token::Word(&text[start..self.at]);
         }
         if first == b'\'' {
-            let end = text[start + 1..].iter().position(|&c| c == b'\'').map_or(text.len(), |i| start + 1 + i);
+            // a quote written twice is a quote inside the text, not its end
+            let mut end = start + 1;
+            while end < text.len() && (text[end] != b'\'' || text.get(end + 1) == Some(&b'\'')) {
+                end += if text[end] == b'\'' { 2 } else { 1 };
+            }
+            let end = end.min(text.len());
             self.at = (end + 1).min(text.len());
             return Token::String(&text[start + 1..end]);
         }

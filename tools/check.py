@@ -141,6 +141,12 @@ with Xila(disk=disk) as x:
     x.type("screen")
     x.key("ret")
     check("screen lists the screens with numbers", " [2] [Alt]+[1]  boot log" in body(x)[-3], body(x)[-4:])
+    # a list belongs to who was shown it: the serial port has its own
+    ok, lines = x.cmd("1")
+    check("a list shown on the screen is not the serial port's", not ok and lines == ["There is no list to follow yet."], lines)
+    x.cmd("help")
+    ok, lines = x.cmd("3")
+    check("the serial port follows its own list", ok and lines[0] == "XilaOS keys:", lines[:1])
     x.type("2")
     x.key("ret")
     check("typing the number follows the line", title(x) == "BOOT LOG", title(x))
@@ -180,6 +186,18 @@ with Xila(disk=disk) as x:
     x.key("q")
     x.key("w")
     check("French layout", body(x)[-1] == "XilaOS|all:/>az", body(x)[-1])
+    # the key right of P is a dead key: its accent goes on the next letter.
+    # A letter with an accent leaves the serial port as a question mark.
+    x.key("bracket_left")
+    check("French layout: a dead key shows nothing by itself", body(x)[-1] == "XilaOS|all:/>az", body(x)[-1])
+    x.key("e")
+    x.key("bracket_left")
+    x.key("t")
+    x.key("bracket_left")
+    x.key("spc")
+    check("French layout: the accent goes on a letter that takes it, before another, or alone", body(x)[-1] == "XilaOS|all:/>az?^t^", body(x)[-1])
+    for _ in range(4):
+        x.key("backspace", 0.05)
     x.key("alt-1")
     check("Alt+1 works with the French layout", title(x) == "BOOT LOG", title(x))
     x.key("alt-0")
@@ -297,6 +315,10 @@ with Xila(disk=disk) as x:
     x.type("select value from settings where name = 'keymap'")
     x.key("ret")
     check("select typed at the keyboard", body(x)[-2].strip() == "us", body(x)[-3:])
+    said = x.table("select 'it''s' as said, length('l''eau') as letters")
+    check("select: a quote inside a text is written twice", said == [{"said": "it's", "letters": "5"}], said)
+    about = x.table("select about from tables where name = 'memory'")
+    check("tables: what a view is about is not cut", about == [{"about": "memory: the machine, the kernel, the database"}], about)
     x.cmd("select * from memory")
     lit = {row["block"]: row["lit"] for row in x.table("select block, lit from city where plot = 'data'")}
     check("city: a table that was just read is lit", lit.get("memory") == "yes" and lit.get("screens") == "", lit)
@@ -536,6 +558,12 @@ with Xila(disk=disk) as x:
         x.cmd("insert into many values " + ", ".join("(%d, 'row %d')" % (n, n) for n in range(batch * 8, batch * 8 + 8)))
     total = x.table("select count(*), sum(n) from many")
     check("a table over several pages", total == [{"count": "320", "sum": str(sum(range(320)))}], total)
+    # every page of every table read back, with its checksum
+    ok, lines = x.cmd("disk check")
+    used = int({row["item"]: row["value"] for row in x.table("disk")}["used"].split()[0])
+    check("disk check: the tables are read whole", ok and lines == ["The tables were read whole: %d pages (%d KB), every one is right." % (used // 4, used)] and used >= 16, lines)
+    ok, lines = x.cmd("disk sideways")
+    check("disk: an unknown word is an error", not ok and lines == ["Usage: disk, disk check, or disk erase"], lines)
     x.cmd("delete from many where n >= 300")
 labels = [{"id": "1", "label": "first"}, {"id": "2", "label": "second"}, {"id": "4", "label": "third"}]
 
@@ -709,7 +737,12 @@ for card, name in (("e1000e", "Intel 82574L"), ("e1000", "Intel 82540EM")):
         ok, lines = x.cmd("net ping 10.0.2.2")
         check("net ping (%s): the gateway answers" % card, ok and re.fullmatch(r"10\.0\.2\.2 answered in [\d.]+ ms\.", lines[0]), lines)
         ok, lines = x.cmd("net ping 10.0.2.99")
-        check("net ping (%s): an address nobody has does not" % card, lines == ["10.0.2.99 did not answer within a second."], lines)
+        check("net ping (%s): an address nobody has does not, and that is a failure" % card, not ok and lines == ["10.0.2.99 did not answer within a second."], lines)
+        # what the card counted is what it counted until now, not until the last second
+        sent = int({row["item"]: row["value"] for row in x.table("net")}["frames sent"])
+        x.cmd("net ping 10.0.2.2")
+        now = int({row["item"]: row["value"] for row in x.table("net")}["frames sent"])
+        check("net (%s): a frame that was just sent is counted" % card, now == sent + 1, (sent, now))
         raw = {row["register"]: int(row["value"], 16) for row in x.table("net registers")}
         # as the driver set them: receiving and sending are on, the link is up, the address is the card's
         on = raw.get("RCTL", 0) & 2 and raw.get("TCTL", 0) & 2 and raw.get("STATUS", 0) & 2 and raw.get("TDBAL", 0) != 0
@@ -942,7 +975,7 @@ with Xila(net="e1000e") as x:
     check("net get: a page of another machine is asked for and shown", ok and lines == [there + " answered 200.", "hello from the host", "you asked for /some/page"], lines)
     check("net get: the machine was asked by its name, for that page", asked_of_us == [("/some/page", there)], asked_of_us)
     ok, lines = x.cmd("net get http://%s/missing" % there)
-    check("net get: what is not there is said so", lines == [there + " answered 404."], lines)
+    check("net get: what is not there is said so, and is a failure", not ok and lines == [there + " answered 404."], lines)
     ok, lines = x.cmd("net get %s/long" % there)
     check("net get: of a long page the start is shown", lines[:2] == [there + " answered 200.", "line 0 of a long page"] and lines[-1] == "(and more)" and len(lines) == 10, lines)
     start = time.time()
@@ -1150,7 +1183,7 @@ with Xila() as x:
     ok, lines = x.cmd("qr")
     check("qr: without a command it says how", not ok and lines == ["Type qr and a command, to read what it says with a phone: qr about"], lines)
     ok, lines = x.cmd("qr clear")
-    check("qr: a command that says nothing makes no code", lines == ["That command said nothing: there is no code to show."] and title(x) == "OVERVIEW", lines)
+    check("qr: a command that says nothing makes no code, and that is a failure", not ok and lines == ["That command said nothing: there is no code to show."] and title(x) == "OVERVIEW", lines)
 
 # Installing. The machine starts from a USB stick, which XilaOS has no
 # driver for: only the firmware reads it. Its disk holds another system,
@@ -1276,6 +1309,15 @@ with Xila(stick=stick, sata=target) as x:
     done = ["XilaOS is installed on disk 1. What was written was read back and is right.", "The tables are now kept on that disk.",
             "To start from it: take the USB stick out, then type reboot."]
     check("install 1 yes: the disk is taken", ok and lines == done, lines)
+    # while it wrote, a bar on the screen said how far it was: the log keeps the count
+    x.key("alt-1")
+    shown = [re.search(r"Install: disk 1, (\d+) sectors written and read back, shown in (\d+) steps\.", row) for row in x.peek()]
+    shown = [(int(found.group(1)), int(found.group(2))) for found in shown if found]
+    check("install: the screen showed how far the writing was", len(shown) == 1 and shown[0][0] * 512 > len(system) and shown[0][1] == 41, shown)
+    x.key("alt-0")
+    check("install: and the bar is gone when it is done", not any("Reading it back" in row or "Writing the disk" in row for row in x.peek()), x.peek()[-2:])
+    ok, lines = x.cmd("disk check")
+    check("disk check: a new place for the tables has nothing to read yet", ok and lines == ["There are no stored tables yet: nothing to read."], lines)
     about = {row["item"]: row["value"] for row in x.table("disk")}
     check("install: the tables are on the new partition", about.get("disk") == "sata, partition of 90 MB" and about.get("stored tables") == "on disk, transaction 1", about)
     check("install: which starts empty", x.table(stored) == [], x.cmd("tables"))
@@ -1364,14 +1406,14 @@ with Xila(bare=True, sata=target, net="e1000e", tftp=served) as x:
     with open(os.path.join(served, "BOOTX64.EFI"), "wb") as file:
         file.write(b"not a program at all. " * 400)
     ok, lines = x.cmd("install from 10.0.2.2", timeout=90)
-    check("install from: what is not a system is refused", lines == ["10.0.2.2 gave something that is not a system for this machine."], lines)
+    check("install from: what is not a system is refused", not ok and lines == ["10.0.2.2 gave something that is not a system for this machine."], lines)
     ok, lines = x.cmd("install system")
     check("install from: and install has nothing to put on a disk then", not ok and lines == no_system, lines)
     os.remove(os.path.join(served, "BOOTX64.EFI"))
     ok, lines = x.cmd("install from 10.0.2.2", timeout=90)
-    check("install from: a machine that has no system says so", lines == ["10.0.2.2 has no system to give."], lines)
+    check("install from: a machine that has no system says so", not ok and lines == ["10.0.2.2 has no system to give."], lines)
     ok, lines = x.cmd("install from 10.0.2.99", timeout=90)
-    check("install from: a machine that is not there does not answer", lines == ["10.0.2.99 does not answer. Is tools/netboot.py running there?"], lines)
+    check("install from: a machine that is not there does not answer", not ok and lines == ["10.0.2.99 does not answer. Is tools/netboot.py running there?"], lines)
     check("install from: the network still works after all that", x.cmd("net ping 10.0.2.2")[1][0].startswith("10.0.2.2 answered in "))
 disk = open(target, "rb").read()
 check("install from: a firmware finds the fetched system on the disk", started_file(start_up_of(target)) == newer)

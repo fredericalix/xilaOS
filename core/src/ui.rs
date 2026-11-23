@@ -280,6 +280,24 @@ impl Ui {
         self.dirty = true;
     }
 
+    /// Shows on the last row how far a long piece of work is, written
+    /// then read back, for the kernel to put on the screen while it works:
+    /// the next `render` takes the row back. Returns how much of the bar
+    /// is filled, so that only a bar that moved is shown.
+    pub fn progress(&mut self, screen: usize, done: u64, total: u64) -> usize {
+        const BAR: usize = 40;
+        let filled = if total == 0 { BAR } else { (done.min(total) * BAR as u64 / total) as usize };
+        let mut line = FixedStr::<COLS>::from_bytes(if done * 2 <= total && total > 0 { b" Writing the disk  [" } else { b" Reading it back   [" });
+        for cell in 0..BAR {
+            line.push(if cell < filled { b'#' } else { b'.' });
+        }
+        let _ = write!(line, "] {:3}%", filled * 100 / BAR);
+        let (row, bg) = (self.grid.rows.saturating_sub(1), self.terms[screen.min(SCREENS.len() - 1)].bg);
+        let end = self.grid.text(0, row, line.bytes(), role::TERM_OUT, bg);
+        self.grid.fill(row, end, COLS, Cell::new(b' ', role::TERM_OUT, bg));
+        filled
+    }
+
     /// Shows, where the last command was typed, what the kernel answered to
     /// its request.
     pub fn served(&mut self, sys: &mut System) {
@@ -529,6 +547,24 @@ mod tests {
         for c in text.bytes() {
             ui.key(sys, key(Key::Char(c)));
         }
+    }
+
+    #[test]
+    fn work_that_takes_time_shows_how_far_it_is() {
+        let (mut ui, mut sys) = start();
+        ui.render(&mut sys);
+        let last = ui.grid.rows - 1;
+        assert_eq!(ui.progress(0, 0, 4000), 0);
+        assert_eq!(row(&ui, last), " Writing the disk  [........................................]   0%");
+        assert_eq!(ui.progress(0, 1000, 4000), 10);
+        assert_eq!(row(&ui, last), " Writing the disk  [##########..............................]  25%");
+        assert_eq!(ui.progress(0, 3001, 4000), 30);
+        assert_eq!(row(&ui, last), " Reading it back   [##############################..........]  75%");
+        assert_eq!(ui.progress(0, 4000, 4000), 40);
+        assert_eq!(row(&ui, last), " Reading it back   [########################################] 100%");
+        // the next redraw takes the row back
+        ui.render(&mut sys);
+        assert!(!row(&ui, last).contains('['));
     }
 
     #[test]

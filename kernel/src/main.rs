@@ -354,11 +354,15 @@ extern "C" fn interface(boot: usize) -> ! {
             observe(sys);
 
             while let Some(code) = arch::keyboard_read() {
-                if let Some(event) = decoder.feed(sys.layout, code) {
+                // a dead key that found no letter gives two: its accent, then the key
+                let mut next = decoder.feed(sys.layout, code);
+                while let Some(event) = next {
                     observe(sys);
+                    counted(sys, nic.as_mut());
                     ui.key(sys, event);
-                    serve(sys, &mut ui.grid, Some(stage), disks, system, nic.as_mut());
+                    serve(sys, ui, Some(stage), disks, system, nic.as_mut());
                     ui.served(sys);
+                    next = decoder.rest();
                 }
             }
 
@@ -379,6 +383,7 @@ extern "C" fn interface(boot: usize) -> ! {
                     if let Some(line) = call.line {
                         answer.clear();
                         observe(sys);
+                        counted(sys, Some(nic));
                         sys.session = events::NETWORK;
                         // `peek` tells what the screen shows now
                         if ui.dirty {
@@ -386,8 +391,9 @@ extern "C" fn interface(boot: usize) -> ! {
                         }
                         let ok = shell::exec(sys, line.bytes(), answer);
                         answer.events(sys);
-                        serve(sys, &mut ui.grid, Some(stage), disks, system, Some(nic));
-                        shell::served(sys, answer);
+                        serve(sys, ui, Some(stage), disks, system, Some(nic));
+                        // a request the kernel could not meet makes the command a failure
+                        let ok = shell::served(sys, answer) && ok;
                         ui.dirty = true;
                         answer.end(sys.blocks[events::NETWORK].open(), ok);
                     }
@@ -455,13 +461,8 @@ extern "C" fn interface(boot: usize) -> ! {
             if ui.dirty {
                 ui.render(sys);
             }
-            // The rows a picture is shown over: a code, or the city.
-            let pictured = match (&sys.code, sys.screen) {
-                (Some(_), _) => (BODY_TOP, ui.grid.rows - 1),
-                (None, 0) => (BODY_TOP, BODY_TOP + CITY_ROWS),
-                _ => (0, 0),
-            };
-            stage.screen.compose(&mut ui.grid, THEMES[theme], pictured);
+            let over = pictured(sys, ui.grid.rows);
+            stage.screen.compose(&mut ui.grid, THEMES[theme], over);
             if let Some(code) = &sys.code {
                 if !painted {
                     painted = true;
@@ -514,8 +515,26 @@ fn observe(sys: &mut System) {
     sys.machine.heap_used = memory.heap_used;
 }
 
+/// Brings what `net` shows of the card up to date: a command reads what
+/// the card counted until now, not until the last second.
+fn counted(sys: &mut System, nic: Option<&mut e1000::Nic>) {
+    if let Some(nic) = nic {
+        nic.count();
+        sys.net_card = Some(card(nic));
+    }
+}
+
+/// The rows of the screen a picture is shown over: a code, or the city.
+fn pictured(sys: &System, rows: usize) -> (usize, usize) {
+    match (&sys.code, sys.screen) {
+        (Some(_), _) => (BODY_TOP, rows - 1),
+        (None, 0) => (BODY_TOP, BODY_TOP + CITY_ROWS),
+        _ => (0, 0),
+    }
+}
+
 /// Does what a command asked of the kernel.
-fn serve(sys: &mut System, grid: &mut Grid, stage: Option<&mut Stage>, disks: &mut disk::Disks, system: &mut &'static [u8], nic: Option<&mut e1000::Nic>) {
+fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &mut disk::Disks, system: &mut &'static [u8], nic: Option<&mut e1000::Nic>) {
     match sys.request.take() {
         Some(Request::NetRegisters) => sys.net_registers = nic.map(|nic| nic.registers()),
         Some(Request::NetRestart) => {
@@ -582,12 +601,35 @@ fn serve(sys: &mut System, grid: &mut Grid, stage: Option<&mut Stage>, disks: &m
             sys.fetched = Some((server, fetched));
         }
         Some(Request::Install { disk, whole }) => {
-            sys.installed = Some(disk::install(sys, disks, disk, whole, system));
+            // The machine does nothing else meanwhile, a second or two on a
+            // real disk: a bar on the last row of the screen says how far it is.
+            let (theme, screen, over) = (THEMES[sys.theme], sys.screen, pictured(sys, ui.grid.rows));
+            let (mut filled, mut steps, mut sectors) = (usize::MAX, 0u32, 0);
+            let mut progress = |done: u64, total: u64| {
+                sectors = total / 2;
+                let now = ui.progress(screen, done, total);
+                if now != filled {
+                    filled = now;
+                    if let Some(stage) = stage.as_deref_mut() {
+                        stage.screen.compose(&mut ui.grid, theme, over);
+                        stage.screen.show();
+                        steps += 1;
+                    }
+                }
+            };
+            let installed = disk::install(sys, disks, disk, whole, system, &mut progress);
+            if installed.is_ok() {
+                let mut line = FixedStr::<80>::new();
+                let _ = write!(line, "Install: disk {disk}, {sectors} sectors written and read back, shown in {steps} steps.");
+                ui.log(line.bytes());
+            }
+            sys.installed = Some(installed);
             disk::look(disks, sys);
+            ui.dirty = true;
         }
         Some(Request::Measure) => {
             if let Some(stage) = stage {
-                sys.measured = Some(measure(sys, grid, stage));
+                sys.measured = Some(measure(sys, &mut ui.grid, stage));
             }
         }
         Some(Request::Spin) => {
@@ -817,6 +859,7 @@ extern "C" fn serial_shell(_: usize) -> ! {
                         let mut shared = SHARED.lock();
                         let Shared { ui, sys, stage, disks, system, nic, .. } = &mut *shared;
                         observe(sys);
+                        counted(sys, nic.as_mut());
                         sys.serial_bytes += line.len() as u64 + 40;
                         sys.session = events::SERIAL;
                         // `peek` tells what the screen shows after the commands
@@ -841,8 +884,9 @@ extern "C" fn serial_shell(_: usize) -> ! {
                             let _ = write!(note, "#lost {lost}\n");
                             serial.write(note.bytes());
                         }
-                        serve(sys, &mut ui.grid, stage.as_mut(), disks, system, nic.as_mut());
-                        shell::served(sys, &mut SerialOut { serial: &serial });
+                        serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut());
+                        // a request the kernel could not meet makes the command a failure
+                        let ok = shell::served(sys, &mut SerialOut { serial: &serial }) && ok;
                         ui.dirty = true;
                         // a block is open: more lines are expected before anything runs
                         if sys.blocks[events::SERIAL].open() {

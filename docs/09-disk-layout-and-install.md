@@ -201,6 +201,15 @@ In `install::whole` (`core/src/install.rs`), the order of the writes is chosen s
 4. **A flush**: the command does not go on until the disk says everything is written.
 5. **The read back.** The partition table is read by `gpt::describe`, the same reading that will look for it at the next start, and must give exactly two partitions at the expected places. The start-up partition is then compared with what should have been written, sector by sector.
 
+While the start-up partition is written and then read back, a second or two on a real disk during which the machine does nothing else, the last row of the screen shows how far it is (`install::Progress`, `Ui::progress`):
+
+```
+ Writing the disk  [##########..............................]  25%
+ Reading it back   [##############################..........]  75%
+```
+
+The boot log keeps a line of it: `Install: disk 1, 1907 sectors written and read back, shown in 41 steps.`
+
 Only then does the command say `What was written was read back and is right.` A disk that does not keep what it is given must be found out now, not at the next start. What can go wrong is told with the sector:
 
 ```

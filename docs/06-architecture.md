@@ -29,8 +29,8 @@ C.
 | Crate | Builds for | Allocates | Tested by |
 |---|---|---|---|
 | `xila-db` | host and UEFI, `no_std` + `alloc` | yes: the only crate that does | 24 unit tests, power cuts included |
-| `xila-core` | host and UEFI, `no_std` outside tests | no: fixed-size buffers only (`System::db` aside) | 205 unit tests |
-| `xila-kernel` | UEFI only | yes, through its own allocator | `tools/check.py`: about 300 checks on the whole system in QEMU |
+| `xila-core` | host and UEFI, `no_std` outside tests | no: fixed-size buffers only (`System::db` aside) | more than 200 unit tests |
+| `xila-kernel` | UEFI only | yes, through its own allocator | `tools/check.py`: more than 300 checks on the whole system in QEMU |
 
 ## The rule that shapes everything
 
