@@ -2385,6 +2385,51 @@ pub mod tests {
     }
 
     #[test]
+    fn stored_tables_are_joined_and_the_second_is_found_by_its_id() {
+        let mut sys = System::new();
+        sys.db.set_limit(16 << 20);
+        assert!(run_line(&mut sys, "create table tags (name text)").0);
+        assert!(run_line(&mut sys, "create table spent (label text, tag int, amount decimal)").0);
+        for batch in 0..300 {
+            let rows: Vec<String> = (batch * 4..batch * 4 + 4).map(|n| format!("('tag {n} {}')", "x".repeat(30))).collect();
+            assert!(run_line(&mut sys, &format!("insert into tags values {}", rows.join(", "))).0);
+        }
+        assert!(run_line(&mut sys, "update tags set name = 'food' where id = 7").0);
+        assert!(run_line(&mut sys, "update tags set name = 'travel' where id = 390").0);
+        assert!(run_line(&mut sys, "insert into spent values ('coffee', 7, 3.5), ('train', 390, 42), ('bread', 7, 2.1), ('gift', null, 20), ('lost', 9999, 1)").0);
+        let said = |sys: &mut System, line: &str| {
+            let before = sys.db.storage().looked;
+            let (ok, out) = run_line(sys, line);
+            assert!(ok, "{line}: {:?}", out.lines);
+            (out.lines.iter().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>(), sys.db.storage().looked - before)
+        };
+        let (lines, cost) = said(&mut sys, "select s.label, t.name from spent s join tags t on t.id = s.tag order by s.id");
+        assert_eq!(lines, ["label name", "coffee food", "train travel", "bread food"]);
+        // each tag is found by its id: a few pages for each row of spent, not the pages of tags
+        let (_, whole) = said(&mut sys, "select count(*) from tags");
+        assert!(whole > 15 && cost <= whole, "{cost} {whole}");
+        let (lines, _) = said(&mut sys, "select s.label, t.name from spent s left join tags t on s.tag = t.id where s.amount > 10");
+        assert_eq!(lines, ["label name", "train travel", "gift"]);
+        let (lines, _) = said(&mut sys, "select t.name, sum(s.amount) as total, count(*) from spent s join tags t on t.id = s.tag group by t.name order by total desc");
+        assert_eq!(lines, ["name total count", "travel 42.00 1", "food 5.60 2"]);
+        // both ids are named after their table; a table is joined to itself, read while it is read
+        assert_eq!(run_line(&mut sys, "select id from spent s join tags t on t.id = s.tag").1.lines, ["Both tables have a column id: write its table before it, as in t.id"]);
+        let (lines, _) = said(&mut sys, "select a.label, b.label from spent a join spent b on a.tag = b.tag and a.id < b.id");
+        assert_eq!(lines, ["label label", "coffee bread"]);
+        let (lines, _) = said(&mut sys, "select count(*) from tags a join tags b on b.id = a.id + 1 where a.id > 1195");
+        assert_eq!(lines, ["count", "4"]);
+        // a view of the system beside a stored table, and the other way round
+        let (lines, _) = said(&mut sys, "select t.name, c.name from tables t join columns c on c.table_name = t.name where t.kind = 'stored' and c.position = 2");
+        assert_eq!(lines, ["name name", "tags name", "spent label"]);
+        let (lines, _) = said(&mut sys, "select s.label, k.name from spent s join tasks k on k.id = s.tag - 7 where s.id = 1");
+        assert_eq!(lines, ["label name"]);
+        // in a loop of the language, and as a value
+        let (lines, _) = said(&mut sys, "let most = select t.name from spent s join tags t on t.id = s.tag order by s.amount desc limit 1");
+        assert_eq!(lines, Vec::<String>::new());
+        assert_eq!(said(&mut sys, "say most").0, ["travel"]);
+    }
+
+    #[test]
     fn disk_check_reads_every_page() {
         let mut sys = System::new();
         let (ok, out) = run_line(&mut sys, "disk check");

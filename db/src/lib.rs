@@ -590,6 +590,38 @@ impl Database {
         })
     }
 
+    /// As `scan_ids`, for a `visit` that reads the database itself: the
+    /// table is read leaf by leaf, and nothing is held while `visit` is
+    /// called. It costs the way down to each leaf.
+    pub fn scan_apart(&self, table: usize, ids: Ids, visit: &mut dyn FnMut(&[Field])) -> Result<(), Error> {
+        let table = &self.tables[table];
+        let count = table.columns.len();
+        let mut next = ids.first;
+        loop {
+            let mut found = Vec::new();
+            {
+                let mut slot = self.store.try_borrow_mut().map_err(|_| Error::Busy)?;
+                let Some(store) = slot.as_mut() else {
+                    return Ok(());
+                };
+                tree::leaf(store, table.root, next, ids.last, &mut found)?;
+            }
+            let Some(&(last, _)) = found.last() else {
+                return Ok(());
+            };
+            for (id, record) in &found {
+                let mut fields = [Field::Null; MAX_COLUMNS];
+                fields[0] = Field::Int(*id as i64);
+                decode(record, &mut fields[1..count]);
+                visit(&fields[..count]);
+            }
+            if last >= ids.last {
+                return Ok(());
+            }
+            next = last + 1;
+        }
+    }
+
     /// Gives new values to some columns of the rows `pick` accepts. `set`
     /// holds column indexes and values. Returns how many rows changed.
     pub fn update(&mut self, table: usize, pick: &mut dyn FnMut(&[Field]) -> bool, set: &[(usize, Field)]) -> Result<usize, Error> {
@@ -1051,6 +1083,30 @@ mod tests {
         assert_eq!(texts, [100, 101, 102, 103, 104, 106, 107, 108, 109, 110]);
         assert_eq!(ids(&db, Ids { first: 199, last: 204 }), [199, 201, 204]);
         assert_eq!(db.verify(), Ok(()));
+
+        // read leaf by leaf, the rows are the same, and each one can read the database again
+        let all = ids(&db, Ids::ALL);
+        for among in [Ids::ALL, Ids::one(4321), Ids { first: 2990, last: 3010 }, Ids { first: 5999, last: u64::MAX }, Ids { first: 7, last: 7 }, Ids { first: 9, last: 2 }] {
+            let mut apart = Vec::new();
+            db.scan_apart(notes, among, &mut |fields| {
+                let Field::Int(id) = fields[0] else {
+                    panic!("not a row: {fields:?}");
+                };
+                // the row after this one, read while this one is visited
+                if apart.len() % 97 == 0 {
+                    let mut after = 0;
+                    db.scan_ids(notes, Ids { first: id as u64 + 1, last: id as u64 + 3 }, &mut |_| after += 1).unwrap();
+                    assert!(after <= 3);
+                }
+                apart.push(id as u64);
+            })
+            .unwrap();
+            assert_eq!(apart, ids(&db, among), "{among:?}");
+        }
+        // which the plain reading does not allow
+        let mut refused = None;
+        db.scan_ids(notes, Ids::one(all[0]), &mut |_| refused = db.scan(notes, &mut |_| {}).err()).unwrap();
+        assert_eq!(refused, Some(Error::Busy));
     }
 
     #[test]

@@ -36,7 +36,7 @@ use core::cmp::Ordering;
 use crate::change::MAX_TEXT;
 use crate::shell::Text;
 use crate::text::FixedStr;
-use crate::sql::{compare_numbers, error, like, unexpected, Lexer, Message, Row, Schema, Token, Value, MAX_COLUMNS, MAX_SCALE};
+use crate::sql::{compare_numbers, error, like, unexpected, Lexer, Message, Schema, Token, Value, MAX_COLUMNS, MAX_SCALE};
 
 /// Values and operations in one expression.
 const MAX_NODES: usize = 24;
@@ -332,7 +332,7 @@ impl Expr {
     }
 
     /// Works the expression out for a row.
-    pub fn eval(&self, row: &Row) -> Result<Value, Message> {
+    pub fn eval(&self, row: &[Value]) -> Result<Value, Message> {
         self.node(self.root, row)
     }
 
@@ -343,25 +343,44 @@ impl Expr {
     /// lets a query go straight to rows by their `id`: every row within
     /// is still given to `holds`.
     pub fn bounds(&self, column: usize) -> (i64, i64) {
-        self.bounds_at(self.root, column)
+        self.bounds_at(self.root, column, &[])
     }
 
-    fn bounds_at(&self, at: usize, column: usize) -> (i64, i64) {
+    /// As `bounds`, when the first columns of the row are known: those
+    /// of the first table of a join, while the rows of the second one
+    /// are looked for. `b.id = a.owner` then tells where `b.id` must be.
+    pub fn bounds_beside(&self, column: usize, known: &[Value]) -> (i64, i64) {
+        self.bounds_at(self.root, column, known)
+    }
+
+    fn bounds_at(&self, at: usize, column: usize, known: &[Value]) -> (i64, i64) {
         const ANY: (i64, i64) = (i64::MIN, i64::MAX);
         let is_column = |at: usize| matches!(self.nodes[at], Node::Column(found) if found == column);
-        let whole = |at: usize| match self.nodes[at] {
-            Node::Value(Value::Int(n)) => Some(n),
+        // what a side of a comparison is, when that is known before any row is read
+        let value = |at: usize| match self.nodes[at] {
+            Node::Value(value) => Some(value),
+            Node::Column(other) => known.get(other).copied(),
             _ => None,
         };
+        let whole = |at: usize| match value(at) {
+            Some(Value::Int(n)) => Some(n),
+            _ => None,
+        };
+        const NONE: (i64, i64) = (0, -1);
         match self.nodes[at] {
             // both sides must hold
             Node::Binary(Binary::And, a, b) => {
-                let (a, b) = (self.bounds_at(a, column), self.bounds_at(b, column));
+                let (a, b) = (self.bounds_at(a, column, known), self.bounds_at(b, column, known));
                 (a.0.max(b.0), a.1.min(b.1))
             }
             Node::Binary(operation, a, b) => {
                 use Binary::*;
                 // the column on the left of a number, or on its right
+                // compared with nothing, nothing holds
+                let compares = matches!(operation, Equal | NotEqual | Less | LessOrEqual | Greater | GreaterOrEqual);
+                if compares && ((is_column(a) && value(b) == Some(Value::Null)) || (is_column(b) && value(a) == Some(Value::Null))) {
+                    return NONE;
+                }
                 let (operation, n) = match (is_column(a), whole(b), is_column(b), whole(a)) {
                     (true, Some(n), ..) => (operation, n),
                     (_, _, true, Some(n)) => (
@@ -378,10 +397,10 @@ impl Expr {
                 };
                 match operation {
                     Equal => (n, n),
-                    Less if n == i64::MIN => (0, -1),
+                    Less if n == i64::MIN => NONE,
                     Less => (i64::MIN, n - 1),
                     LessOrEqual => (i64::MIN, n),
-                    Greater if n == i64::MAX => (0, -1),
+                    Greater if n == i64::MAX => NONE,
                     Greater => (n + 1, i64::MAX),
                     GreaterOrEqual => (n, i64::MAX),
                     _ => ANY,
@@ -406,14 +425,14 @@ impl Expr {
     }
 
     /// Whether the expression holds for a row, as a condition.
-    pub fn holds(&self, row: &Row) -> Result<bool, Message> {
+    pub fn holds(&self, row: &[Value]) -> Result<bool, Message> {
         Ok(truth(&self.eval(row)?)? == Some(true))
     }
 
-    fn node(&self, at: usize, row: &Row) -> Result<Value, Message> {
+    fn node(&self, at: usize, row: &[Value]) -> Result<Value, Message> {
         Ok(match self.nodes[at] {
             Node::Value(value) => value,
-            Node::Column(column) => row[column],
+            Node::Column(column) => row.get(column).copied().unwrap_or(Value::Null),
             Node::Negate(a) => binary(Binary::Subtract, Value::Int(0), self.node(a, row)?)?,
             Node::Not(a) => truth(&self.node(a, row)?)?.map_or(Value::Null, |holds| boolean(!holds)),
             Node::IsNull(a, wanted) => boolean((self.node(a, row)? == Value::Null) == wanted),
@@ -533,11 +552,20 @@ impl Default for Vars {
     }
 }
 
+/// Where the columns of the second table of a join are in a row: after
+/// all those a first table may have.
+pub(crate) const JOINED: usize = MAX_COLUMNS;
+
 /// What a name may be where an expression is read: a column of a table if
-/// there is one, then a variable.
+/// there is one, then a variable. With two tables joined, a column is
+/// named alone when only one of them has it, or after the name of its
+/// table: `expenses.label`.
 #[derive(Clone, Copy)]
 pub(crate) struct Names<'a> {
     columns: Option<&'a Schema>,
+    joined: Option<&'a Schema>,
+    /// Another name each table goes by in this query, or nothing.
+    alias: [&'a [u8]; 2],
     vars: &'a Vars,
     /// Without a table: what to say before a name that is unknown.
     unknown: &'static [u8],
@@ -545,11 +573,54 @@ pub(crate) struct Names<'a> {
 
 impl<'a> Names<'a> {
     pub fn of(columns: &'a Schema, vars: &'a Vars) -> Names<'a> {
-        Names { columns: Some(columns), vars, unknown: b"Unknown column: " }
+        Names { columns: Some(columns), joined: None, alias: [b"", b""], vars, unknown: b"Unknown column: " }
+    }
+
+    /// The names of a table, and of a second one joined to it if there
+    /// is one, each with the other name the query gives it.
+    pub fn of_tables(first: &'a Schema, joined: Option<&'a Schema>, alias: [&'a [u8]; 2], vars: &'a Vars) -> Names<'a> {
+        Names { columns: Some(first), joined, alias, vars, unknown: b"Unknown column: " }
     }
 
     pub fn without(vars: &'a Vars, unknown: &'static [u8]) -> Names<'a> {
-        Names { columns: None, vars, unknown }
+        Names { columns: None, joined: None, alias: [b"", b""], vars, unknown }
+    }
+
+    /// Where a column is in a row, by its name. None when no table has
+    /// it: the name may then be a variable.
+    pub fn column(&self, word: &[u8]) -> Result<Option<usize>, Message> {
+        let tables = [(self.columns, self.alias[0], 0), (self.joined, self.alias[1], JOINED)];
+        if let Some(dot) = word.iter().position(|byte| *byte == b'.') {
+            // after the name of its table, or the other name the query gives it
+            let (table, name) = (&word[..dot], &word[dot + 1..]);
+            for (schema, alias, at) in tables {
+                let Some(schema) = schema else {
+                    continue;
+                };
+                // a table that has another name here is called by that one
+                let called = if alias.is_empty() { schema.name.bytes() } else { alias };
+                if called.eq_ignore_ascii_case(table) {
+                    return schema.column(name).map(|column| Some(column + at));
+                }
+            }
+            return Ok(None);
+        }
+        let found = tables.map(|(schema, _, at)| schema.and_then(|schema| schema.column(word).ok()).map(|column| column + at));
+        match found {
+            [Some(_), Some(_)] => {
+                let mut message = error(b"Both tables have a column ", word);
+                message.push_bytes(b": write its table before it, as in t.");
+                message.push_bytes(word);
+                Err(message)
+            }
+            [first, second] => Ok(first.or(second)),
+        }
+    }
+
+    /// The name of the column at this place of a row.
+    pub fn name(&self, column: usize) -> crate::sql::Name {
+        let schema = if column >= JOINED { self.joined } else { self.columns };
+        schema.map_or(crate::sql::Name::new(), |schema| schema.columns[column % JOINED])
     }
 }
 
@@ -777,7 +848,7 @@ impl Parser<'_, '_> {
                 self.add(Node::Call(function, first, second))
             }
             Token::Word(word) => {
-                let column = self.names.columns.and_then(|schema| schema.column(word).ok());
+                let column = self.names.column(word)?;
                 match (column, self.names.vars.get(word)) {
                     (Some(column), _) => {
                         self.columns = true;
@@ -819,8 +890,13 @@ pub(crate) fn parse_item(lexer: &mut Lexer, names: Names, aggregates: &mut Aggre
 
 /// Reads `WHERE condition` if it is there.
 pub(crate) fn condition(lexer: &mut Lexer, schema: &Schema, vars: &Vars) -> Result<Option<Expr>, Message> {
+    condition_among(lexer, Names::of(schema, vars))
+}
+
+/// Reads `WHERE condition` if it is there, over these names.
+pub(crate) fn condition_among(lexer: &mut Lexer, names: Names) -> Result<Option<Expr>, Message> {
     if lexer.keyword(b"where") {
-        parse(lexer, Names::of(schema, vars)).map(Some)
+        parse(lexer, names).map(Some)
     } else {
         Ok(None)
     }
@@ -1000,6 +1076,8 @@ mod tests {
         let none = |(first, last): (i64, i64)| first > last;
         assert!(none(bounds("n = 1 and n = 2")) && none(bounds("n > 5 and n < 6")) && none(bounds("n in (null)")));
         assert!(none(bounds("n > 9223372036854775807")));
+        // compared with nothing, nothing holds
+        assert!(none(bounds("n = null")) && none(bounds("null < n")) && none(bounds("m = 1 and n != null")));
         // what cannot be told by looking is left to every row
         for open in ["m = 5", "n = 5 or m = 1", "not n = 5", "n != 5", "n = m", "n + 1 = 5", "n = 2.5", "n < 2.5", "n in (1, m)", "n not in (1, 2)", "n is null", "n = '5'", "m in (1, 2)", "n not between 1 and 5"] {
             assert_eq!(bounds(open), ANY, "{open}");

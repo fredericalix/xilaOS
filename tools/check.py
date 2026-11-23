@@ -586,6 +586,20 @@ with Xila(disk=disk) as x:
     check("update: a row is changed by its id", ok and lines == ["1 row changed in many."] and x.table("select label from many where id in (299, 300, 301)") == [{"label": "row 298"}, {"label": "changed"}, {"label": "row 300"}], lines)
     x.cmd("update many set label = 'row 299' where id = 300")
 
+    # two tables joined: beside each row of the first, the rows of the second the condition finds
+    found = x.table("select k.label as kept, m.label from kept k join many m on m.n = k.id order by k.id")
+    wanted = [{"kept": "first", "label": "row 1"}, {"kept": "second", "label": "row 2"}, {"kept": "third", "label": "row 4"}]
+    check("select: two tables are joined", found == wanted, found)
+    cost, found = pages("select m.n, k.label from many m left join kept k on k.id = m.n where m.id between 2 and 5")
+    wanted = [{"n": "1", "label": "first"}, {"n": "2", "label": "second"}, {"n": "3", "label": ""}, {"n": "4", "label": "third"}]
+    check("select: a left join keeps the rows that find nothing, and finds the others by their id", found == wanted and cost <= 8, (cost, found))
+    found = x.table("select count(*), sum(k.amount) from many m join kept k on k.id = m.n")
+    check("select: functions over the rows of a join", found == [{"count": "3", "sum": "4.375"}], found)
+    found = x.table("select t.name, count(*) from tables t join columns c on c.table_name = t.name where t.name in ('kept', 'many') group by t.name")
+    check("select: the views of the system are joined too", found == [{"name": "kept", "count": "3"}, {"name": "many", "count": "3"}], found)
+    ok, lines = x.cmd("select id from many m join kept k on k.id = m.n")
+    check("select: a column both tables have must be named with its table", not ok and lines == ["Both tables have a column id: write its table before it, as in t.id"], lines)
+
     # every page of every table read back, with its checksum
     ok, lines = x.cmd("disk check")
     used = int({row["item"]: row["value"] for row in x.table("disk")}["used"].split()[0])

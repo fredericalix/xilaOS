@@ -30,7 +30,7 @@ were also tried on the real machine.
 | `install`, `install system`, the USB stick image | yes | yes |
 | SQL: `SELECT`, `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`, expressions | yes | yes |
 | `disk check`: every page of the tables read and checked | yes | not tried |
-| SQL: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; rows reached by their `id` | yes | not tried |
+| SQL: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; rows reached by their `id`; `JOIN` and `LEFT JOIN` of two tables | yes | not tried |
 | `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | not tried |
 | LISTEN / NOTIFY | yes | yes |
 | XilaScript: variables, blocks, stored programs, `on` and `every` programs | yes | yes |
@@ -51,7 +51,7 @@ about 300 system checks.
 These are not bugs; they are where the first version stopped. What is
 meant to change is in the [work plan](#work-plan) below.
 
-**SQL.** No joins or subqueries. No indexes, keys or constraints: a
+**SQL.** Two tables in a join at most, no subqueries. No indexes, keys or constraints: a
 query reads the whole table unless it says where the `id` must be. No
 `ALTER TABLE`. No `BEGIN` / `COMMIT`: one statement is one transaction.
 Eight columns per table, 32 rows per result, 48 characters per text, no
@@ -214,7 +214,7 @@ its checks in `tools/check.py` pass.
 | Phase | Content | State |
 |---|---|---|
 | 1. Loose ends | The small things that were off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing | Done on 23 November 2026 |
-| 2. SQL | `IN`, `BETWEEN`, `NOT LIKE`, aggregates inside a calculation; a row reached by its `id` without reading the table; constraints and indexes; joins; a view of the log; `BEGIN` / `COMMIT` | In progress |
+| 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Left: constraints and indexes, which change what is written on the disk; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | In progress |
 | 3. XilaScript | Parameters and names of a program's own; a task of its own for a program, and for the commands that wait (`net ping`, `net get`, `install from`); an editor; `insert ... select`, the values of before, more rhythms | After 2 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design and on the first outside code |
 | 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
@@ -316,13 +316,14 @@ ways the emulator never shows.
 
 - Keys, indexes, constraints (`NOT NULL`, `UNIQUE`), `ALTER TABLE`.
   Only the `id` leads straight to a row today.
-- Joins and subqueries.
+- Joins of more than two tables, and subqueries.
 - `BEGIN`, `COMMIT`, `ROLLBACK` at the prompt.
 - Date and time types.
 - The fixed sizes: eight columns, 32 rows per result, 48 characters
   per text, 24 elements per calculation, one column in `GROUP BY`, one
   criterion in `ORDER BY`, eight rows per `INSERT`.
-- A system view of the log.
+- A system view of the log: a line of the log is 80 characters and a
+  text holds 48, so it waits for longer texts.
 - Changing a setting with `update settings`.
 
 ### XilaScript

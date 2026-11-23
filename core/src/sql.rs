@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! SELECT * | expression [AS name], COUNT(*), SUM(expression), SUM(a) / COUNT(*), ...
-//!   [FROM table]
+//!   [FROM table [name] [[LEFT] JOIN table [name] ON condition]]
 //!   [WHERE condition]
 //!   [GROUP BY column]
 //!   [ORDER BY expression | name or position in the result [DESC]]
@@ -18,12 +18,18 @@
 //! The functions over rows are COUNT, SUM, AVG, MIN and MAX. Without FROM
 //! a SELECT is a calculation: `select 7 / 2`.
 //!
+//! A join puts beside each row of the first table the rows of the second
+//! for which the condition holds; LEFT JOIN keeps a row of the first that
+//! has none, with nothing beside it. The second table is read once for
+//! each row of the first, straight to its rows when the condition says
+//! what their `id` is (`on t.id = e.tag`).
+//!
 //! Everything works in fixed size buffers, like the rest of this crate.
 
 use core::cmp::Ordering;
 use core::fmt::Write;
 
-use crate::expr::{self, Aggregates, Binary, Expr, Names, Over, Vars, NO_VARS};
+use crate::expr::{self, Aggregates, Binary, Expr, Names, Over, Vars, JOINED, NO_VARS};
 use crate::shell::{Table, Text, TABLE_COLS, TABLE_ROWS};
 use crate::text::FixedStr;
 
@@ -187,6 +193,11 @@ pub trait Source {
     /// not. A table that finds its rows by that column reads only those.
     fn scan_among(&self, table: usize, _first: i64, _last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
         self.scan(table, visit)
+    }
+    /// As `scan_among`, for the first table of a join: `visit` reads
+    /// other tables of the source, and the same one, while it is called.
+    fn scan_apart(&self, table: usize, first: i64, last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+        self.scan_among(table, first, last, visit)
     }
 }
 
@@ -431,29 +442,65 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
         return Err(Message::from_bytes(b"This is not a SELECT."));
     }
 
-    // The list of what to show is kept as text until the table is known.
+    // The list of what to show is kept as text until the tables are known.
     let list_at = lexer.at;
-    let mut schema = None;
+    let (mut schema, mut second) = (None, None);
+    let mut alias = [&b""[..]; 2];
+    // where the condition of a join is written, and whether the join is a LEFT one
+    let (mut on_at, mut keeps_all) = (None, false);
+    let table = |lexer: &mut Lexer<'_>| -> Result<Schema, Message> {
+        let name = lexer.word(b"a table")?;
+        source.schema(name).ok_or_else(|| {
+            let mut message = error(b"Unknown table: ", name);
+            message.push_bytes(b". Type tables to list them.");
+            message
+        })
+    };
+    // the other name a table is given, if a word follows that is not what comes next
+    fn other_name<'a>(lexer: &mut Lexer<'a>) -> &'a [u8] {
+        const NEXT: [&[u8]; 8] = [b"where", b"group", b"order", b"limit", b"join", b"inner", b"left", b"on"];
+        match lexer.peek() {
+            Token::Word(word) if !NEXT.iter().any(|next| next.eq_ignore_ascii_case(word)) => {
+                lexer.next();
+                word
+            }
+            _ => b"",
+        }
+    }
     loop {
         match lexer.next() {
             Token::End => break,
             Token::Word(word) if word.eq_ignore_ascii_case(b"from") => {
-                let table_name = lexer.word(b"a table")?;
-                schema = Some(source.schema(table_name).ok_or_else(|| {
-                    let mut message = error(b"Unknown table: ", table_name);
-                    message.push_bytes(b". Type tables to list them.");
-                    message
-                })?);
+                schema = Some(table(&mut lexer)?);
+                alias[0] = other_name(&mut lexer);
+                keeps_all = lexer.keyword(b"left");
+                let inner = !keeps_all && lexer.keyword(b"inner");
+                if lexer.keyword(b"join") {
+                    second = Some(table(&mut lexer)?);
+                    alias[1] = other_name(&mut lexer);
+                    if !lexer.keyword(b"on") {
+                        return Err(unexpected(b"ON and the condition that joins the tables", lexer.peek()));
+                    }
+                    on_at = Some(lexer.at);
+                } else if keeps_all || inner {
+                    return Err(unexpected(b"JOIN", lexer.peek()));
+                }
                 break;
             }
             _ => {}
         }
     }
-    let after_table = lexer.at;
+    let mut after_table = lexer.at;
     let names = match &schema {
-        Some(schema) => Names::of(schema, vars),
+        Some(schema) => Names::of_tables(schema, second.as_ref(), alias, vars),
         None => Names::without(vars, b"Without FROM and a table there is no column "),
     };
+    let mut on = None;
+    if let Some(at) = on_at {
+        lexer.at = at;
+        on = Some(expr::parse(&mut lexer, names)?);
+        after_table = lexer.at;
+    }
 
     // Now the list.
     let mut items = [Item { expr: Expr::NONE, over: false }; MAX_COLUMNS];
@@ -467,12 +514,14 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
             let Some(schema) = &schema else {
                 return Err(Message::from_bytes(b"* stands for the columns of a table: add FROM and a table."));
             };
-            for column in 0..schema.count {
+            // the columns of the table, then those of the one joined to it
+            let both = (0..schema.count).chain(second.iter().flat_map(|second| JOINED..JOINED + second.count));
+            for column in both {
                 if count == MAX_COLUMNS {
                     return Err(full());
                 }
                 items[count].expr = Expr::of_column(column);
-                headers[count] = schema.columns[column];
+                headers[count] = names.name(column);
                 count += 1;
             }
         } else {
@@ -486,7 +535,7 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
             match (item.over, item.expr.column(), &schema) {
                 // a function over the rows alone is named by its name
                 (true, Some(function), _) => header.push_bytes(aggregates.list[function].function.name()),
-                (false, Some(column), Some(schema)) => header = schema.columns[column],
+                (false, Some(column), Some(_)) => header = names.name(column),
                 // a calculation is named by what was typed
                 _ => {
                     for &byte in query[start..lexer.at].iter().filter(|byte| **byte != b' ') {
@@ -511,16 +560,17 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
     }
 
     let filter = match &schema {
-        Some(schema) => expr::condition(&mut lexer, schema, vars)?,
+        Some(_) => expr::condition_among(&mut lexer, names)?,
         None => None,
     };
 
     let mut group_by = None;
-    if let (Some(schema), true) = (&schema, lexer.keyword(b"group")) {
+    if let (Some(_), true) = (&schema, lexer.keyword(b"group")) {
         if !lexer.keyword(b"by") {
             return Err(unexpected(b"BY", lexer.peek()));
         }
-        group_by = Some(schema.column(lexer.word(b"a column")?)?);
+        let word = lexer.word(b"a column")?;
+        group_by = Some(names.column(word)?.ok_or_else(|| error(b"Unknown column: ", word))?);
     }
     let items = &items[..count];
     let grouped = group_by.is_some() || items.iter().any(|item| item.over);
@@ -602,7 +652,7 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
     let mut row_count = 0;
     let mut dropped = 0usize;
     let before = |a: &Value, b: &Value| a.compare(b) == if descending { Ordering::Greater } else { Ordering::Less };
-    let mut take = |row: &Row| -> Result<(), Message> {
+    let mut take = |row: &[Value]| -> Result<(), Message> {
         if let Some(filter) = &filter {
             if !filter.holds(row)? {
                 return Ok(());
@@ -638,7 +688,7 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
             (rows[place], sorts[place]) = (made, sort);
             return Ok(());
         }
-        let key = group_by.map_or(Value::Null, |column| row[column]);
+        let key = group_by.map_or(Value::Null, |column| row.get(column).copied().unwrap_or(Value::Null));
         let group = match sorts[..row_count].iter().position(|group| *group == key) {
             Some(group) => group,
             None if row_count < TABLE_ROWS => {
@@ -673,8 +723,52 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
         }
         Ok(())
     };
-    match &schema {
-        Some(schema) => {
+    match (&schema, &second, &on) {
+        (Some(schema), Some(second), Some(on)) => {
+            let mut failed = None;
+            let (first, last) = filter.as_ref().map_or((i64::MIN, i64::MAX), |filter| filter.bounds(0));
+            source.scan_apart(schema.table, first, last, &mut |left: &Row| {
+                if failed.is_some() {
+                    return;
+                }
+                // the two rows side by side
+                let mut both = [Value::Null; 2 * MAX_COLUMNS];
+                both[..JOINED].copy_from_slice(left);
+                // where the condition says the id of the second table must be, for this row of the first
+                let (mut low, mut high) = on.bounds_beside(JOINED, left);
+                if let (Some(filter), false) = (&filter, keeps_all) {
+                    let (first, last) = filter.bounds_beside(JOINED, left);
+                    (low, high) = (low.max(first), high.min(last));
+                }
+                let mut matched = false;
+                let scanned = source.scan_among(second.table, low, high, &mut |right: &Row| {
+                    if failed.is_some() {
+                        return;
+                    }
+                    both[JOINED..].copy_from_slice(right);
+                    match on.holds(&both) {
+                        Ok(true) => {
+                            matched = true;
+                            failed = take(&both).err();
+                        }
+                        Ok(false) => {}
+                        Err(message) => failed = Some(message),
+                    }
+                });
+                if let (Err(message), None) = (scanned, &failed) {
+                    failed = Some(message);
+                }
+                if keeps_all && !matched && failed.is_none() {
+                    // a row of the first table with nothing beside it
+                    both[JOINED..].fill(Value::Null);
+                    failed = take(&both).err();
+                }
+            })?;
+            if let Some(message) = failed {
+                return Err(message);
+            }
+        }
+        (Some(schema), ..) => {
             let mut failed = None;
             // what the condition says of the first column, the `id` of a
             // stored table, lets the source go straight to those rows
@@ -688,7 +782,7 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
                 return Err(message);
             }
         }
-        None => take(&[Value::Null; MAX_COLUMNS])?,
+        (None, ..) => take(&[Value::Null; MAX_COLUMNS])?,
     }
 
     if grouped {
@@ -736,9 +830,10 @@ mod tests {
 
     struct Shop;
 
-    const SHOP: [TableDef; 2] = [
+    const SHOP: [TableDef; 3] = [
         TableDef { name: b"fruit", columns: &[b"name", b"color", b"price", b"stock", b"kilo"], kinds: b"ttiii", about: b"what is for sale" },
         TableDef { name: b"empty", columns: &[b"x"], kinds: b"i", about: b"nothing" },
+        TableDef { name: b"colors", columns: &[b"name", b"warm"], kinds: b"ti", about: b"the colors, and whether they are warm" },
     ];
 
     impl Source for Shop {
@@ -747,6 +842,14 @@ mod tests {
         }
 
         fn scan(&self, table: usize, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+            if table == 2 {
+                // no fruit is blue, and purple is not among the colors
+                for (name, warm) in [(&b"red"[..], 1), (b"yellow", 1), (b"blue", 0)] {
+                    let mut row = [Value::Null; MAX_COLUMNS];
+                    (row[0], row[1]) = (Value::text(name), Value::Int(warm));
+                    visit(&row);
+                }
+            }
             if table != 0 {
                 return Ok(());
             }
@@ -779,6 +882,58 @@ mod tests {
             }
             Err(message) => vec![format!("error: {}", String::from_utf8_lossy(message.bytes()))],
         }
+    }
+
+    #[test]
+    fn two_tables_are_joined() {
+        // each row of the first with the rows of the second for which the condition holds
+        assert_eq!(
+            run("select fruit.name, warm from fruit join colors on fruit.color = colors.name"),
+            ["name|warm", "apple|1", "banana|1", "cherry|1", "lemon|1"]
+        );
+        // tables may be given another name; INNER says the same as nothing
+        assert_eq!(
+            run("select f.name, c.name, price from fruit f inner join colors c on f.color = c.name where c.warm = 1 and price > 25 order by price desc"),
+            ["name|name|price", "cherry|red|90", "apple|red|30"]
+        );
+        // LEFT JOIN keeps a row of the first table that found none, with nothing beside it
+        assert_eq!(
+            run("select f.name, c.warm from fruit f left join colors c on f.color = c.name where f.price > 40"),
+            ["name|warm", "cherry|1", "plum|"]
+        );
+        assert_eq!(run("select f.name from fruit f left join colors c on f.color = c.name where c.name is null"), ["name", "plum"]);
+        assert_eq!(run("select c.name, f.name from colors c left join fruit f on f.color = c.name and f.price < 30"), ["name|name", "red|", "yellow|banana", "yellow|lemon", "blue|"]);
+        // functions over the rows of a join, in groups of a column of either table
+        assert_eq!(
+            run("select c.name, count(*), sum(f.price * f.stock) as worth from fruit f join colors c on f.color = c.name group by c.name order by worth desc"),
+            ["name|count|worth", "yellow|2|1000", "red|2|810"]
+        );
+        assert_eq!(run("select count(*), count(warm) from fruit left join colors on color = colors.name"), ["count|count", "5|4"]);
+        // every column of both, while they fit
+        assert_eq!(
+            run("select * from colors join fruit on colors.name = color where stock = 0"),
+            ["name|warm|name|color|price|stock|kilo", "yellow|1|banana|yellow|20|0|2.45"]
+        );
+        // a table joined to itself, under two names; any condition joins
+        assert_eq!(
+            run("select a.name, b.name from fruit a join fruit b on a.color = b.color and a.name < b.name"),
+            ["name|name", "apple|cherry", "banana|lemon"]
+        );
+        assert_eq!(run("select count(*) from fruit join colors on 1 = 1"), ["count", "15"]);
+        assert_eq!(run("select count(*) from fruit join empty on x = price"), ["count", "0"]);
+        assert_eq!(run("select name, x from fruit left join empty on x = price limit 1"), ["name|x", "apple|"]);
+        // one table can still be named in full
+        assert_eq!(run("select fruit.name, f.price from fruit f"), ["error: Unknown column: fruit.name"]);
+        assert_eq!(run("select fruit.name, fruit.price from fruit where fruit.stock = 0"), ["name|price", "banana|20"]);
+
+        assert_eq!(run("select name from fruit join colors on color = colors.name"), ["error: Both tables have a column name: write its table before it, as in t.name"]);
+        assert_eq!(run("select 1 from fruit join colors"), ["error: Expected ON and the condition that joins the tables, but the query ends."]);
+        assert_eq!(run("select 1 from fruit left colors on 1 = 1"), ["error: Expected JOIN, found: colors"]);
+        assert_eq!(run("select 1 from fruit join shoes on 1 = 1"), ["error: Unknown table: shoes. Type tables to list them."]);
+        assert_eq!(run("select 1 from fruit join colors on fruit.taste = 1"), ["error: Unknown column: taste"]);
+        assert_eq!(run("select f.name from fruit f join colors c on f.color = c.name group by warmth"), ["error: Unknown column: warmth"]);
+        assert_eq!(run("select * from fruit a join fruit b on a.name = b.name"), ["error: Too many columns: eight at most."]);
+        assert_eq!(run("select f.name from fruit f join colors c on f.price / c.warm > 1"), ["error: Division by zero."]);
     }
 
     #[test]

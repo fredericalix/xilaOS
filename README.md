@@ -134,8 +134,8 @@ About 25,000 lines of Rust in three crates, and nothing else linked in.
 ## What it is not
 
 There are no programs outside the kernel, no memory protection, one
-processor core, no USB, no sound, no Wi-Fi, no encryption, no joins or
-indexes in SQL. The plan is larger: a virtual machine for programs,
+processor core, no USB, no sound, no Wi-Fi, no encryption, no indexes in
+SQL. The plan is larger: a virtual machine for programs,
 applications as isolated zones with access lists, a mirrored disk, an
 encrypted protocol between machines.
 [Status and roadmap](docs/13-status-and-roadmap.md) says what is built,

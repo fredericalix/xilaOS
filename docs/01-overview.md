@@ -66,7 +66,7 @@ yet:
 - DNS, TLS, or encryption of any kind: the network prompt and the web
   pages send everything in clear on the local network;
 - sound, USB, Wi-Fi, NVMe, ACPI (so no clean power-off);
-- joins, indexes, `BEGIN` / `COMMIT`, and values larger than 48
+- indexes, `BEGIN` / `COMMIT`, and values larger than 48
   characters in SQL;
 - more than one processor core.
 

@@ -40,7 +40,7 @@ What it promises:
 |---|---|---|
 | `db/src/disk.rs` | 127 | The `Disk` trait, `Memory`, and `Volume`. |
 | `db/src/store.rs` | 430 | Copy-on-write pages, checksums, headers, commit and rollback. |
-| `db/src/tree.rs` | 377 | The B-tree: `set`, `walk`, `range`, `pages`, `release`, `check`. |
+| `db/src/tree.rs` | 403 | The B-tree: `set`, `walk`, `range`, `leaf`, `pages`, `release`, `check`. |
 | `db/src/lib.rs` | 990 | `Database`: tables, records, the catalog, transactions. |
 | `db/src/testing.rs` | 674 | A disk whose power can be cut, and the tests that cut it. |
 
@@ -356,6 +356,7 @@ The `Database` API is small:
 | `insert(table, fields)` | Adds a row, returns its id. |
 | `scan(table, visit)` | Calls `visit` with every row, by id. |
 | `scan_ids(table, ids, visit)` | The same for the rows whose ids are in `ids` (an `Ids`: first and last), read through `tree::range`. `update_each_ids` and `delete_ids` change and remove among those rows only. |
+| `scan_apart(table, ids, visit)` | The same, read leaf by leaf (`tree::leaf`) with nothing held while `visit` is called, so that `visit` can read the database itself: the first table of a join. A plain `scan` inside a `scan` answers `Error::Busy`. |
 | `update(table, pick, set)` | Sets columns of the rows `pick` accepts. |
 | `update_each(table, each)` | Changes rows one by one, each with its own new values. |
 | `delete(table, pick)` | Removes the rows `pick` accepts. |

@@ -106,6 +106,18 @@ impl Source for System {
     }
 
     fn scan_among(&self, table: usize, first: i64, last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+        self.read(table, first, last, false, visit)
+    }
+
+    fn scan_apart(&self, table: usize, first: i64, last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+        self.read(table, first, last, true, visit)
+    }
+}
+
+impl System {
+    /// Calls `visit` with the rows of a table, a view or a stored one.
+    /// `apart` says that `visit` reads tables itself.
+    fn read(&self, table: usize, first: i64, last: i64, apart: bool, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
         let text = Value::text;
         let stored = self.db.tables();
         if let Some(index) = table.checked_sub(TABLES.len()) {
@@ -116,7 +128,9 @@ impl Source for System {
                 }
                 // the first column of a stored table is its id, which the engine finds rows by
                 if let Some(ids) = ids(first, last) {
-                    self.db.scan_ids(index, ids, &mut |fields| visit(&row_from(fields, &kinds))).map_err(|error| engine_error(error, None))?;
+                    let mut each = |fields: &[xila_db::Field]| visit(&row_from(fields, &kinds));
+                    let read = if apart { self.db.scan_apart(index, ids, &mut each) } else { self.db.scan_ids(index, ids, &mut each) };
+                    read.map_err(|error| engine_error(error, None))?;
                 }
             }
             return Ok(());

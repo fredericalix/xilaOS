@@ -286,6 +286,32 @@ pub(crate) fn range(store: &mut Store, root: u64, first: u64, last: u64, visit: 
     Ok(())
 }
 
+/// Copies into `found` the keys from `first` to `last` of the first leaf
+/// that has any, with their values, and nothing when no leaf has one.
+/// Who reads a tree leaf by leaf, asking again from the key after the
+/// last one it got, holds the store only while a leaf is read.
+pub(crate) fn leaf(store: &mut Store, root: u64, first: u64, last: u64, found: &mut Vec<(u64, Vec<u8>)>) -> Result<(), Error> {
+    if root == 0 || first > last {
+        return Ok(());
+    }
+    match load(store, root)? {
+        Node::Leaf(entries) => found.extend(entries.into_iter().filter(|(key, _)| (first..=last).contains(key))),
+        Node::Branch { children, keys, .. } => {
+            for (at, child) in children.iter().enumerate() {
+                let from_here = at == 0 || keys[at - 1] <= last;
+                let to_here = at + 1 == children.len() || keys[at] > first;
+                if from_here && to_here {
+                    leaf(store, *child, first, last, found)?;
+                    if !found.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Calls `each` with every page of a tree. Leaves are not read, except a
 /// root that is one: finding the pages of a table costs a small part of
 /// reading the table.

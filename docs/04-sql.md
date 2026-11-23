@@ -128,7 +128,7 @@ that they sort in the order of time.
 
 ```
 SELECT * | expression [AS name], COUNT(*), SUM(expression), ...
-  [FROM table]
+  [FROM table [name] [[LEFT] JOIN table [name] ON condition]]
   [WHERE condition]
   [GROUP BY column]
   [ORDER BY expression | name or position in the result [ASC | DESC]]
@@ -143,7 +143,20 @@ SELECT * | expression [AS name], COUNT(*), SUM(expression), ...
   word `AS` is required to give a name.
 - **Without `FROM`** a SELECT is a calculation: `select 7 / 2` gives `3.5`.
   It takes no `WHERE`.
-- **`FROM`** takes one table. There are no joins and no subqueries.
+- **`FROM`** takes one table, or two joined: `from spent join tags on
+  tags.id = spent.tag` puts beside each row of the first table the rows of
+  the second for which the condition holds. `left join` keeps a row of the
+  first that has none, with nothing beside it. A table may be given a
+  shorter name for the query (`from spent s join tags t on t.id = s.tag`),
+  and is then called by that name. A column is named alone when only one
+  of the tables has it, and after its table otherwise: `s.id`. A table can
+  be joined to itself under two names. There are no subqueries, and no
+  more than two tables.
+
+  The second table is read once for each row of the first. When the
+  condition says what its `id` is, as above, each of those readings goes
+  straight to its row; otherwise it reads the whole second table, which
+  is fine for small tables and slow for large ones.
 - **`WHERE`** takes any condition (see *Expressions*).
 - **Functions over rows**: `count(*)`, `count(x)`, `sum(x)`, `avg(x)`,
   `min(x)`, `max(x)`, where `x` is any expression of the row
@@ -439,7 +452,8 @@ follow from that, and from what is not built yet.
 
 What SQL has and this one does not:
 
-- joins, subqueries, `union`, `distinct`, `having`;
+- joins of more than two tables, `right` and `full` joins, subqueries,
+  `union`, `distinct`, `having`;
 - `case`, and `in` with a query in place of a list;
 - more than one column in `GROUP BY`, more than one key in `ORDER BY`;
 - `insert into ... select`;
