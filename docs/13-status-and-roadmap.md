@@ -1,9 +1,11 @@
 # Status and roadmap
 
-XilaOS was built on 18 and 19 November 2026 and development stopped
-there. It is a hobby project that reached a working first layer of a
-much larger plan. This chapter says plainly what is done, what is not,
-and what was designed on paper for whoever wants to take ideas from it.
+The first version of XilaOS was built on 18 and 19 November 2026 and
+published as XilaOS 0.1: a working first layer of a much larger plan.
+Development resumed on 23 November 2026. It is a hobby project with no
+schedule, and nothing in the plan is a promise. This chapter says
+plainly what is done, what is not, what is designed on paper, and what
+is left to do.
 
 Nobody should run it on a machine whose data matters, or on a network
 they do not trust.
@@ -38,12 +40,13 @@ were also tried on the real machine.
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
-Numbers at the end: about 25,000 lines of Rust, 229 unit tests, about
-300 system checks.
+Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
+about 300 system checks.
 
 ## Known limits of what is done
 
-These are not bugs to fix; they are where the first version stopped.
+These are not bugs; they are where the first version stopped. What is
+meant to change is in the [work plan](#work-plan) below.
 
 **SQL.** No joins, subqueries, `IN`, `BETWEEN` or `NOT LIKE`. No
 indexes, keys or constraints; every query reads the whole table. No
@@ -80,7 +83,7 @@ nothing behind them.
 
 ## Small things that are off
 
-Found while writing this documentation, and left as they are:
+Found while writing this documentation, and not fixed yet:
 
 - Network commands that fail after being served (`net ping` with no
   answer, `net get` with a 404, `install from` a silent server) say so
@@ -93,9 +96,9 @@ Found while writing this documentation, and left as they are:
 - The `about` column of `tables` is cut at 48 characters.
 - The `frames sent` row of `net` can lag by up to a second.
 
-## The plan that was not built
+## The larger plan
 
-The system was meant to grow in layers. Layer 0 (the base) and layer 1
+The system is meant to grow in layers. Layer 0 (the base) and layer 1
 (the database) are mostly there, with a first part of the network.
 
 | Layer | Content | State |
@@ -111,7 +114,7 @@ The system was meant to grow in layers. Layer 0 (the base) and layer 1
 
 ### The intentions behind it
 
-These were the author's decisions for the whole system. They explain
+These are the author's decisions for the whole system. They explain
 choices that are visible in the code.
 
 - **Not a Unix.** What was held against Unix: too much freedom, which
@@ -123,8 +126,8 @@ choices that are visible in the code.
 - **Programs are compiled for a virtual machine**, not to native code,
   as on OS/400. It gives independence from the processor, isolation by
   construction, and an application that installs as one object. The
-  machine itself was never chosen: WebAssembly, or one made for XilaOS
-  around objects and tables.
+  machine itself has not been chosen: WebAssembly, or one made for
+  XilaOS around objects and tables.
 - **Two levels of language.** Heavy programs (Doom, a spreadsheet
   engine) compiled for the virtual machine from an existing language;
   and the house language, XilaScript, interpreted, for everything
@@ -132,9 +135,9 @@ choices that are visible in the code.
   per line, blocks closed by `end`.
 - **An application is a zone**, isolated from the others, in the manner
   of FreeBSD jails or illumos zones, with a public or private status
-  and access control lists. Private by default. Isolation was to come
+  and access control lists. Private by default. Isolation is to come
   from the virtual machine rather than from a hypervisor.
-- **Events go out.** LISTEN / NOTIFY was meant to feed webhooks and
+- **Events go out.** LISTEN / NOTIFY is meant to feed webhooks and
   mail through a durable queue written in the same transaction as the
   change: a companion raises an alert and a message leaves for a phone;
   a disk fails and a pager rings.
@@ -168,8 +171,8 @@ and at the far end the chip's 3D engine to render the city with a
 moving camera. See [Hardware and graphics](11-hardware.md).
 
 **An encrypted protocol between XilaOS machines.** The last thing
-designed, the day before the project stopped, to replace the clear-text
-`remote` prompt and to let one machine hand work to others:
+designed before version 0.1, to replace the clear-text `remote` prompt
+and to let one machine hand work to others:
 
 - three kinds of parties speak it: a XilaOS instance, a hub on the
   Internet that keeps a directory and routes sealed envelopes, and a
@@ -181,42 +184,216 @@ designed, the day before the project stopped, to replace the clear-text
   their keys;
 - the handshake follows the published Noise framework, with the
   algorithms taken from established Rust libraries (the first outside
-  code the kernel would have had), `no_std` and without allocation, as
-  a state machine fed with bytes like `tcp.rs`;
+  code the kernel would have), `no_std` and without allocation, as a
+  state machine fed with bytes like `tcp.rs`;
 - a channel closes at the first message that does not verify; there is
   no mode without verification, not even for tests.
 
 It was reviewed once by a second AI instance asked to break it, which
 found one serious flaw (only one side confirmed the code) that the
-design then fixed. It was never reviewed by a human specialist and none
-of it was implemented. The steps after it (the hub, the remote
+design then fixed. It has not been reviewed by a human specialist and
+none of it is implemented. The steps after it (the hub, the remote
 terminal, primary and secondary machines, distributed tasks, a XilaOS
-without a screen) were only outlined.
+without a screen) are only outlined.
 
 ### Where the original notes are
 
-The project's working documents were written in French: the vision,
-the reasoning behind each technical choice, the work plan with its
-journal, the language reference, the hardware notes and the protocol
-design. This English documentation replaces them and sums up what they
-held: the intentions and the unbuilt designs above come from them. The
-notes themselves, and the history of the two days of work, are not part
-of this repository, which starts from the finished state.
+The working documents of the first two days were written in French:
+the vision, the reasoning behind each technical choice, the first work
+plan with its journal, the language reference, the hardware notes and
+the protocol design. This English documentation replaces them and sums
+up what they held: the intentions and the unbuilt designs above, and
+the work plan below, come from them. The notes themselves, and the
+history of those two days, are not part of this repository, which
+starts from version 0.1.
 
-## If you want to take it further
+## Work plan
 
-In rough order of how much each would unlock:
+This is what is left to do, kept up to date as the work goes. It is a
+list, not a schedule: inside a group the order is roughly the order in
+which things depend on each other, and nothing here is promised. A
+step that is finished and verified leaves this plan and enters the
+table of what is done, at the top of this chapter. A larger step is
+designed with the author before it is built.
 
-1. **A `devices`-driven driver model and device interrupts** (APIC,
-   MSI): polling suits a disk, not a sound card.
-2. **NVMe and USB** (xHCI, then keyboards and storage): what a PC made
-   after 2018 needs to run it at all.
-3. **Indexes and joins** in the SQL engine, and a `log` table.
-4. **Tasks for programs**, so that a XilaScript program does not hold
-   the system.
-5. **The virtual machine**, which everything about applications, zones
-   and rights depends on.
+**In progress:** nothing. The next step is being chosen.
 
-Each driver should be written from the standard or the maker's manual,
-tested in QEMU first, and then tried on real hardware, where it will
-fail in ways the emulator never shows.
+### Loose ends of what exists
+
+- The five small things that are off, listed above.
+- A command for the full read of the database: `Database::verify`
+  exists and nothing calls it.
+- Something that moves on the screen while `install` writes; today the
+  screen waits one to two seconds.
+- The dead keys of the `fr` layout (circumflex, diaeresis) give the
+  character alone.
+- A text cannot hold an apostrophe.
+- Characters outside ASCII leave as `?` on the serial port and in the
+  web pages.
+- `net ping` holds the system for the second it waits.
+- A development mode. The serial shell is always open and may do
+  everything; it is meant to be open in QEMU, or on request at start,
+  and closed otherwise.
+- A close comparison of the screens with the mock-up, and the
+  touch-ups it calls for.
+
+### Kernel
+
+- Device interrupts (APIC, then MSI) and the APIC timer in place of
+  the old one. Polling suits a disk, not a sound card.
+- Waiting for an event (a key, a byte, a device) instead of waking at
+  every tick.
+- Reading the simple ACPI tables (processors, interrupts, the whole
+  PCI bus); then power-off, battery and sleep, which need an ACPI
+  interpreter.
+- One shape for all drivers, attached by class of device, and
+  `devices` as a system view.
+- More than eight tasks; priorities, or at least a larger share for
+  the interface.
+- A fatal error shown on the screen, not only on the serial port.
+- A log kept in the database and read after a restart, for trials
+  that can leave the screen dark.
+- The memory of the firmware's boot services taken back: the kernel
+  only uses what was free at start (205 MB of 250 in QEMU).
+- Memory protection: page zero and the kernel's code first, then user
+  mode and a memory of its own for each program.
+- Setting the machine's clock; time zone and summer time.
+- More than one processor core.
+
+### Drivers and hardware
+
+- NVMe, and disks with 4 KB sectors: the disk of a recent PC.
+- USB: the xHCI controller, then keyboards, sticks and Ethernet
+  adapters. With NVMe, this is what a PC made after 2018 needs to run
+  XilaOS at all.
+- virtio-net and virtio-gpu, for virtual machines.
+- Sound: Intel HD Audio.
+- An interrupt for the network card: a frame waits up to a hundredth
+  of a second today.
+- On the T430: the brightness keys (they go through a circuit XilaOS
+  does not drive) and turning the screen off.
+- On the T430: the link stays at 100 Mb/s on a gigabit switch. Set
+  aside by the author; to take it up again, show in `net registers`
+  what the chip near the socket announces and what the switch
+  announces to it (its registers 4, 5, 9 and 10).
+- Far away: Wi-Fi, and a second processor family (RISC-V).
+
+Each driver is written from the standard or the maker's manual, tested
+in QEMU first, and then tried on real hardware, where it will fail in
+ways the emulator never shows.
+
+### Graphics and the interface
+
+- The city seen in perspective with a camera that moves, as in the
+  mock-up, instead of the fixed isometric view; commands and query
+  results that move the camera and light the blocks they speak of.
+- Movement in the interface outside the city (header, changes of
+  screen).
+- A virtual screen for each application, with its own theme; a screen
+  that switches to pixels for a game. Something behind the `sound` and
+  `irc` labels of the header.
+- On the Intel chip: a hardware plane for sprites over the character
+  grid, and hardware scaling for a low-resolution screen.
+- Further on the chip: its 2D engine (little to gain at this size of
+  screen: measure first), and its 3D engine for the city, which is a
+  project of its own.
+
+### Storage
+
+- The mirror on two disks, as designed above; then four.
+- A read of every page, on demand and at regular intervals.
+- The checksum of a page kept in the page that points to it, against
+  a write the disk loses silently.
+- Snapshots: a table as it was at a past date.
+- Pages merged when rows leave; today a leaf is given back only when
+  it is empty.
+- Large typed objects (music, pictures): a row holds 1000 bytes at
+  most.
+- Installing beside another system, in the free space of a disk.
+
+### SQL
+
+- Keys, indexes, constraints (`NOT NULL`, `UNIQUE`), `ALTER TABLE`.
+  Even `where id = 5` reads the whole table today.
+- Joins, subqueries, `IN`, `BETWEEN`, `NOT LIKE`, and aggregates
+  inside a calculation.
+- `BEGIN`, `COMMIT`, `ROLLBACK` at the prompt.
+- Date and time types.
+- The fixed sizes: eight columns, 32 rows per result, 48 characters
+  per text, 16 elements per calculation, one column in `GROUP BY`, one
+  criterion in `ORDER BY`, eight rows per `INSERT`.
+- A system view of the log.
+- Changing a setting with `update settings`.
+
+### XilaScript
+
+- A task of its own for a program, so that it does not hold the
+  system.
+- Parameters, and names that belong to a program.
+- An editor, to change a program without typing it again.
+- `insert into t select ...`, a `select` inside a calculation, loops
+  over more than 32 rows.
+- The values of before in `on update` and `on delete`.
+- More rhythms from the clock: `every monday at 9:00`, `every month`.
+- Screens in characters to enter data.
+
+### Network
+
+- DNS.
+- TLS, which everything that reaches the Internet needs.
+- Fragments, segments that arrive out of order, more than eight
+  conversations, IPv6.
+- The web pages: sorting, filtering, the rest of a long table, a page
+  that brings itself up to date when the table changes; then an HTTP
+  server for content kept in the database, perhaps a REST API.
+- Events that go out: a durable queue written in the transaction of
+  the change, sending rules kept in a table, webhooks and mail.
+- A way for programs to use the network, and a stack for each zone.
+
+### The encrypted protocol
+
+Designed above, not started; the design of the channel waits for the
+author's agreement. The order that was agreed:
+
+1. the encrypted channel, in a library that every party shares;
+2. the hub, first as a small program for another system built from
+   that library, and the command that registers a machine with it;
+3. the remote terminal, a client application for other systems, which
+   replaces `remote`;
+4. primary and secondary machines: the primary asks, a code is
+   compared, a person accepts;
+5. tasks handed by a primary to its secondaries, and their results;
+6. a XilaOS without a screen, then the hub on it.
+
+### The layers above
+
+- **Programs.** The virtual machine, then zones with their public or
+  private status and access lists, rights to listen, installing an
+  application, supervised services, a vault for secrets.
+- **Sound.** Mixing, MP3, ambiences that follow the mood.
+- **Applications.** A spreadsheet, a database front end, a
+  HyperCard-like, mail, a text web browser, IRC, a port of Doom.
+- **Agents.** Companions that are written to and answer in writing,
+  each a zone with its own rights on the data, drawn as pixel-art
+  characters.
+
+### Decisions still to take
+
+- Which virtual machine.
+- How an application is installed, and where it comes from.
+- What exactly is taken from OS/400: typed objects, single-level
+  storage, or both.
+- One user, or several.
+- Whether an agent may change data and act on the system, or only
+  read.
+- How a HyperCard-like is driven with the keyboard alone.
+- Where a tenth system view goes: the `data` plot of the city has
+  room for nine.
+
+### Set aside
+
+- MBR partition tables: `install` writes a GPT.
+- A client of the protocol inside a web browser.
+- Anything between XilaOS machines over HTTP: that is the protocol's
+  work.
+- RAID 0.

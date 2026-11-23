@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## State of the project
 
-XilaOS is a hobby operating system built on 2026-11-18 and 2026-11-19. Development stopped there: the repository is published as a finished experiment, and what follows is the briefing the work was done from, kept in step with the code as it stands. Documentation, code, comments and everything the system shows on screen are in English.
+XilaOS is a hobby operating system. Its first version was built on 2026-11-18 and 2026-11-19 and published as XilaOS 0.1; development resumed on 2026-11-23, with no schedule. What follows is the briefing the work is done from: keep it in step with the code. Documentation, code, comments and everything the system shows on screen are in English.
 
-Boot, screen, keyboard, shell, serial port, preemptive kernel tasks, kernel memory, the city view, SQL (system views and stored tables, kept on a virtio disk) and LISTEN / NOTIFY work in QEMU. On 2026-11-18 the author started their Lenovo T430 from the USB stick, installed XilaOS on its disk with `install` and started from the disk, without a problem; the graphics chip, the network card, the remote prompt, the web pages and the start from the network were then tried there too. It is the only real hardware XilaOS ran on. That machine has no serial port in use: what happens there is known from what the author reads on its screen.
+Boot, screen, keyboard, shell, serial port, preemptive kernel tasks, kernel memory, the city view, SQL (system views and stored tables, kept on a virtio disk) and LISTEN / NOTIFY work in QEMU. On 2026-11-18 the author started their Lenovo T430 from the USB stick, installed XilaOS on its disk with `install` and started from the disk, without a problem; the graphics chip, the network card, the remote prompt, the web pages and the start from the network were then tried there too. It is the only real hardware XilaOS has run on. That machine has no serial port in use: what happens there is known from what the author reads on its screen.
 
 The project is under the GNU AGPL (version 3 or later).
 
@@ -14,7 +14,7 @@ The project is under the GNU AGPL (version 3 or later).
 
 The documentation is in `docs/`, one chapter per file, with `docs/README.md` as its index and `docs/xilaos.pdf` as the same content in one file (`python3 tools/docs.py` rebuilds it). Keep a chapter in step with the code it describes.
 
-- `docs/13-status-and-roadmap.md`: what is done, what is not, and what was only designed. The French working documents it replaces (vision, technical choices, work plan, protocol design) are not published; that chapter sums them up.
+- `docs/13-status-and-roadmap.md`: what is done, what is not, what is only designed, and the work plan. The plan is kept there as work goes: a step that is finished and verified leaves the plan and enters the table of what is done, in the same commit as the code. The French working documents the chapter replaces (vision, technical choices, the first work plan, protocol design) are not published; it sums them up.
 - `docs/06-architecture.md`, `docs/07-kernel.md`, `docs/08-storage.md`: how the system is built.
 - `docs/05-xilascript.md`: XilaScript, the language of the prompt, as it is built, with its limits. Keep it in step with `core/src/lang.rs`.
 - `docs/11-hardware.md`: hardware. How a driver is written here, which standards to target so that XilaOS runs on other PCs, what firmware means, the licence limits on reusing drivers, and the levels of graphics acceleration. Read it before writing a driver.

@@ -22,7 +22,7 @@ XilaOS has a small network stack of its own, written for it: no code from anothe
 | Network boot | A script on another computer serves the kernel to a PC that starts from its cable. | `tools/netboot.py` |
 | Driver | Intel cards of the e1000 family only. | `kernel/src/e1000.rs` |
 
-What does not exist: DNS (machines are named by their address), TLS or any other encryption, IPv6, Wi-Fi, any card that is not an Intel e1000, sockets for programs (XilaScript has no statement that opens a conversation), routing, and a firewall. An encrypted protocol between XilaOS machines was designed and never built.
+What does not exist: DNS (machines are named by their address), TLS or any other encryption, IPv6, Wi-Fi, any card that is not an Intel e1000, sockets for programs (XilaScript has no statement that opens a conversation), routing, and a firewall. An encrypted protocol between XilaOS machines is designed and not built yet.
 
 ## Using it
 

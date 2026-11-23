@@ -34,7 +34,7 @@ The same content as one file: [xilaos.pdf](xilaos.pdf) (rebuild it with
 12. [Development and testing](12-development.md): the serial protocol,
     the tools, the checks.
 13. [Status and roadmap](13-status-and-roadmap.md): what is done, what
-    is not, what was designed.
+    is not, what is designed, and the work plan.
 
 ## Also here
 

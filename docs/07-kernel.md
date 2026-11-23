@@ -24,7 +24,7 @@ everything runs inside it.
   character grid it produces to the screen.
 
 Programs outside the kernel, a virtual machine to run them and isolated
-zones were part of the plan and were never built: see
+zones are part of the plan and are not built yet: see
 [Status and roadmap](13-status-and-roadmap.md).
 
 ## The files

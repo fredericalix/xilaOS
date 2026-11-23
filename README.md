@@ -12,11 +12,11 @@ a power cut, and talks TCP on a cable. The city at the top of the
 screen is not decoration: every block is something real, one tower per
 task, as tall as its share of the processor.
 
-> **Status: finished experiment.** XilaOS was built over two days in
-> November 2026 and is no longer developed. It is published as it is,
-> for the curious. Do not run it on a machine whose data matters:
-> `install` erases a whole disk, and nothing on the network is
-> encrypted.
+> **Status: in development, as a hobby.** The first version was built
+> over two days in November 2026 and published as XilaOS 0.1; work
+> resumed on 23 November 2026, with no schedule and no promise. Do not
+> run it on a machine whose data matters: `install` erases a whole
+> disk, and nothing on the network is encrypted.
 
 **Full documentation:** [docs/](docs/README.md), or as one file,
 [docs/xilaos.pdf](docs/xilaos.pdf).
@@ -135,21 +135,21 @@ About 25,000 lines of Rust in three crates, and nothing else linked in.
 
 There are no programs outside the kernel, no memory protection, one
 processor core, no USB, no sound, no Wi-Fi, no encryption, no joins or
-indexes in SQL. The plan was larger: a virtual machine for programs,
+indexes in SQL. The plan is larger: a virtual machine for programs,
 applications as isolated zones with access lists, a mirrored disk, an
 encrypted protocol between machines.
-[Status and roadmap](docs/13-status-and-roadmap.md) says what was built,
-what was not, and what was designed on paper.
+[Status and roadmap](docs/13-status-and-roadmap.md) says what is built,
+what is not, what is designed on paper, and holds the work plan.
 
 ## How it was made
 
-XilaOS was written by its author together with Claude, Anthropic's AI
+XilaOS is written by its author together with Claude, Anthropic's AI
 model, through Claude Code. Most of the code and of the documentation
-was written by the model; the author set the direction, made the
-decisions and tried each step on the real machine. The system was
+is written by the model; the author sets the direction, makes the
+decisions and tries each step on the real machine. The system was
 shaped for that from the first day: a serial shell that a program can
 read, and a check for every behavior. [`CLAUDE.md`](CLAUDE.md) is the
-briefing the model worked from.
+briefing the model works from.
 
 ## Licence
 

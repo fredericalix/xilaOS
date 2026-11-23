@@ -324,8 +324,8 @@ followed by its value:
 ```
 
 Fields a record does not have read as null. A record is at most 1,000
-bytes; larger objects (pictures, music) would need a form of their own,
-which was not built.
+bytes; larger objects (pictures, music) need a form of their own,
+which is not built yet.
 
 **The catalog** is one more tree. Its keys are table keys (given from
 `next_table`, never used twice) and its values describe a table:
@@ -455,9 +455,9 @@ kind of write needs a scenario there.
 What the engine does not do:
 
 - **Disk failure.** A damaged page is detected, not repaired. The
-  planned answer was a mirror (two disks, each page written on both,
+  planned answer is a mirror (two disks, each page written on both,
   the checksum telling which copy is good). The `Volume` layer is where
-  it would go; it was not built.
+  it will go; it is not built yet.
 - **A write the disk loses silently.** If a disk answers "written" and
   keeps the old page, that old page is still valid by its own checksum.
   Catching it needs the checksum of a page kept in the page that points

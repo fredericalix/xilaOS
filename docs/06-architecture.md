@@ -206,7 +206,7 @@ programs call each other three levels deep at most.
 XilaOS is not a Unix, on purpose. There are no files, no `fork`, no
 POSIX, no Unix shell. The model is OS/400: a database at the core of
 the system, with data shared between applications. Three more parts of
-that model were designed and never built: programs compiled for a
+that model are designed and not built yet: programs compiled for a
 virtual machine rather than to native code, applications as isolated
 zones with a public or private status and access lists, and typed
 objects larger than a row. See

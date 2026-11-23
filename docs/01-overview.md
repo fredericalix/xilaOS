@@ -11,10 +11,10 @@ cable, and draws a small city that shows what the system is doing.
 
 ![The overview screen: the city above the terminal](screenshots/ui-overview-day.png)
 
-The project is finished as an experiment: it was built over two days
-in November 2026 and development stopped there. This documentation
-describes what exists, how it works inside, and what was planned and
-never built.
+The first version was built over two days in November 2026 and
+published as XilaOS 0.1. Development resumed on 23 November 2026, as a
+hobby, with no schedule. This documentation describes what exists, how
+it works inside, and what is planned and not built yet.
 
 ## The idea
 
@@ -57,9 +57,10 @@ driven by the keyboard only.
 
 ## What does not exist
 
-The plan was larger than what was built. None of the following exists:
+The plan is larger than what is built. None of the following exists
+yet:
 
-- programs outside the kernel, and the virtual machine they were to be
+- programs outside the kernel, and the virtual machine they are to be
   compiled for;
 - applications as isolated zones with access control lists;
 - DNS, TLS, or encryption of any kind: the network prompt and the web
@@ -69,8 +70,8 @@ The plan was larger than what was built. None of the following exists:
   characters in SQL;
 - more than one processor core.
 
-[Status and roadmap](13-status-and-roadmap.md) has the full list and
-the designs that were written for some of these.
+[Status and roadmap](13-status-and-roadmap.md) has the full list, the
+designs that were written for some of these, and the work plan.
 
 ## Where it runs
 
@@ -80,7 +81,7 @@ the designs that were written for some of these.
   4000, Intel 82579 Ethernet, SATA disk). It started from a USB stick,
   installed itself on the disk, started from the disk, started from the
   network, got an address by DHCP and served its tables to a browser.
-  It is the only real machine XilaOS ran on.
+  It is the only real machine XilaOS has run on.
 
 Another PC needs UEFI with secure boot off, a PS/2 keyboard (the
 internal keyboard of most laptops), and for a disk an AHCI SATA
@@ -88,10 +89,11 @@ controller. Nothing is promised there.
 
 ## How it was built
 
-XilaOS was written in November 2026 by its author together with Claude,
-Anthropic's AI model, working through Claude Code. Most of the code and
-of this documentation was written by the model; the author set the
-direction, made the decisions, and tried each step on the real machine.
+XilaOS has been written since November 2026 by its author together
+with Claude, Anthropic's AI model, working through Claude Code. Most of
+the code and of this documentation is written by the model; the author
+sets the direction, makes the decisions, and tries each step on the
+real machine.
 
 One requirement shaped the system from the first day: it must work well
 in QEMU with a shell on the serial port, so that an AI can run
@@ -122,7 +124,7 @@ and an interactive web mock-up called Trame, kept in
 | [Networking](10-networking.md) | The stack, TCP, the remote prompt, the web pages. |
 | [Hardware and graphics](11-hardware.md) | Drivers, the display path, the Intel chip. |
 | [Development and testing](12-development.md) | The serial protocol, the tools, the checks. |
-| [Status and roadmap](13-status-and-roadmap.md) | What is done, what is not, what was designed. |
+| [Status and roadmap](13-status-and-roadmap.md) | What is done, what is not, what is designed, the work plan. |
 
 ## Licence
 
