@@ -7,7 +7,7 @@
 //! (`amount * 2`, `n > 3 or tag is null`) is in `expr.rs`.
 //!
 //! ```text
-//! SELECT * | expression [AS name], COUNT(*), SUM(expression), ...
+//! SELECT * | expression [AS name], COUNT(*), SUM(expression), SUM(a) / COUNT(*), ...
 //!   [FROM table]
 //!   [WHERE condition]
 //!   [GROUP BY column]
@@ -23,7 +23,7 @@
 use core::cmp::Ordering;
 use core::fmt::Write;
 
-use crate::expr::{self, Binary, Expr, Names, Vars, NO_VARS};
+use crate::expr::{self, Aggregates, Binary, Expr, Names, Over, Vars, NO_VARS};
 use crate::shell::{Table, Text, TABLE_COLS, TABLE_ROWS};
 use crate::text::FixedStr;
 
@@ -182,6 +182,12 @@ pub trait Source {
     /// Calls `visit` with every row of a table. Fails when the rows cannot
     /// be read, with what to tell the user.
     fn scan(&self, table: usize, visit: &mut dyn FnMut(&Row)) -> Result<(), Message>;
+    /// As `scan`, when only the rows whose first column is a whole number
+    /// from `first` to `last` are of use: the others may be left out, or
+    /// not. A table that finds its rows by that column reads only those.
+    fn scan_among(&self, table: usize, _first: i64, _last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+        self.scan(table, visit)
+    }
 }
 
 pub type Message = FixedStr<80>;
@@ -337,27 +343,13 @@ pub(crate) fn unexpected(expected: &[u8], found: Token) -> Message {
     message
 }
 
-/// What an item of the list does with the rows.
-#[derive(Clone, Copy, PartialEq)]
-enum Function {
-    /// Nothing: the item is worked out for each row.
-    Each,
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
-const FUNCTIONS: [(&[u8], Function); 5] =
-    [(b"count", Function::Count), (b"sum", Function::Sum), (b"avg", Function::Avg), (b"min", Function::Min), (b"max", Function::Max)];
-
+/// An item of the list: worked out for each row of the table, or, when
+/// it is made of functions over the rows, once for each group from a
+/// row of their results.
 #[derive(Clone, Copy)]
 struct Item {
-    function: Function,
     expr: Expr,
-    /// COUNT(*): rows are counted, whatever they hold.
-    every: bool,
+    over: bool,
 }
 
 /// What the rows of the result are ordered by.
@@ -464,7 +456,8 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
     };
 
     // Now the list.
-    let mut items = [Item { function: Function::Each, expr: Expr::NONE, every: false }; MAX_COLUMNS];
+    let mut items = [Item { expr: Expr::NONE, over: false }; MAX_COLUMNS];
+    let mut aggregates = Aggregates::new();
     let mut headers = [Name::new(); MAX_COLUMNS];
     let mut count = 0;
     lexer.at = list_at;
@@ -487,35 +480,17 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
                 return Err(full());
             }
             let start = lexer.at;
-            let function = match lexer.peek() {
-                Token::Word(word) => FUNCTIONS.iter().find(|(name, _)| name.eq_ignore_ascii_case(word)).copied(),
-                _ => None,
-            };
             let item = &mut items[count];
             let mut header = Name::new();
-            match function {
-                Some((name, function)) => {
-                    lexer.next();
-                    lexer.expect(b"(")?;
-                    item.function = function;
-                    if function == Function::Count && lexer.symbol(b"*") {
-                        item.every = true;
-                    } else {
-                        item.expr = expr::parse(&mut lexer, names)?;
-                    }
-                    lexer.expect(b")")?;
-                    header.push_bytes(name);
-                }
-                None => {
-                    item.expr = expr::parse(&mut lexer, names)?;
-                    match (item.expr.column(), &schema) {
-                        (Some(column), Some(schema)) => header = schema.columns[column],
-                        // a calculation is named by what was typed
-                        _ => {
-                            for &byte in query[start..lexer.at].iter().filter(|byte| **byte != b' ') {
-                                header.push(byte.to_ascii_lowercase());
-                            }
-                        }
+            (item.expr, item.over) = expr::parse_item(&mut lexer, names, &mut aggregates)?;
+            match (item.over, item.expr.column(), &schema) {
+                // a function over the rows alone is named by its name
+                (true, Some(function), _) => header.push_bytes(aggregates.list[function].function.name()),
+                (false, Some(column), Some(schema)) => header = schema.columns[column],
+                // a calculation is named by what was typed
+                _ => {
+                    for &byte in query[start..lexer.at].iter().filter(|byte| **byte != b' ') {
+                        header.push(byte.to_ascii_lowercase());
                     }
                 }
             }
@@ -548,10 +523,11 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
         group_by = Some(schema.column(lexer.word(b"a column")?)?);
     }
     let items = &items[..count];
-    let grouped = group_by.is_some() || items.iter().any(|item| item.function != Function::Each);
+    let grouped = group_by.is_some() || items.iter().any(|item| item.over);
+    let aggregates = &aggregates.list[..aggregates.count];
     if grouped {
-        // what is not a function over the rows must be the column of the groups
-        if let Some(i) = items.iter().position(|item| item.function == Function::Each && (item.expr.column().is_none() || item.expr.column() != group_by)) {
+        // what is not made of functions over the rows must be the column of the groups
+        if let Some(i) = items.iter().position(|item| !item.over && (item.expr.column().is_none() || item.expr.column() != group_by)) {
             return Err(error(b"This must be in GROUP BY, or in a function: ", headers[i].bytes()));
         }
     }
@@ -607,10 +583,11 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
 
     // Read the table. Without functions, `rows` holds the rows of the
     // result, kept in order as they come: when there are more than fit,
-    // the first ones of the order stay. With functions it holds one row
-    // per group, each cell being the running result of its item; `sorts`
+    // the first ones of the order stay. With functions over the rows it
+    // holds one row per group, each cell being the running result of one
+    // function, until the end turns it into the row of the result; `sorts`
     // then holds the value the group is for, and `counts` how many values
-    // each item saw.
+    // each function saw.
     let mut result = Rows {
         name: schema.as_ref().map_or(Name::from_bytes(b"result"), |schema| schema.name),
         headers,
@@ -674,10 +651,7 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
                 return Ok(());
             }
         };
-        for (i, item) in items.iter().enumerate() {
-            if item.function == Function::Each {
-                continue;
-            }
+        for (i, item) in aggregates.iter().enumerate() {
             // as in SQL, the functions skip what is nothing; COUNT(*) counts rows
             let value = if item.every { Value::Int(1) } else { item.expr.eval(row)? };
             if value == Value::Null {
@@ -686,14 +660,14 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
             counts[group][i] += 1;
             let result = &mut rows[group][i];
             match item.function {
-                Function::Sum | Function::Avg => {
+                Over::Sum | Over::Avg => {
                     if value.number().is_none() {
                         return Err(Message::from_bytes(b"SUM and AVG take numbers."));
                     }
                     *result = if *result == Value::Null { value } else { expr::binary(Binary::Add, *result, value)? };
                 }
-                Function::Min if *result == Value::Null || value.compare(result) == Ordering::Less => *result = value,
-                Function::Max if *result == Value::Null || value.compare(result) == Ordering::Greater => *result = value,
+                Over::Min if *result == Value::Null || value.compare(result) == Ordering::Less => *result = value,
+                Over::Max if *result == Value::Null || value.compare(result) == Ordering::Greater => *result = value,
                 _ => {}
             }
         }
@@ -702,7 +676,10 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
     match &schema {
         Some(schema) => {
             let mut failed = None;
-            source.scan(schema.table, &mut |row: &Row| {
+            // what the condition says of the first column, the `id` of a
+            // stored table, lets the source go straight to those rows
+            let (first, last) = filter.as_ref().map_or((i64::MIN, i64::MAX), |filter| filter.bounds(0));
+            source.scan_among(schema.table, first, last, &mut |row: &Row| {
                 if failed.is_none() {
                     failed = take(row).err();
                 }
@@ -720,15 +697,21 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
             row_count = 1;
         }
         for group in 0..row_count {
-            for (i, item) in items.iter().enumerate() {
+            // what the functions found, then the items made of it
+            let mut found = rows[group];
+            for (i, item) in aggregates.iter().enumerate() {
                 let seen = counts[group][i] as i64;
-                rows[group][i] = match item.function {
-                    Function::Each => sorts[group],
-                    Function::Count => Value::Int(seen),
-                    Function::Avg if seen > 0 => expr::binary(Binary::Divide, rows[group][i], Value::Int(seen))?,
-                    _ => rows[group][i],
+                found[i] = match item.function {
+                    Over::Count => Value::Int(seen),
+                    Over::Avg if seen > 0 => expr::binary(Binary::Divide, found[i], Value::Int(seen))?,
+                    _ => found[i],
                 };
             }
+            let mut made = [Value::Null; MAX_COLUMNS];
+            for (cell, item) in made.iter_mut().zip(items) {
+                *cell = if item.over { item.expr.eval(&found)? } else { sorts[group] };
+            }
+            rows[group] = made;
         }
         if let Some(Order::Result(column)) = order {
             // insertion sort: small and keeps the order of equal rows
@@ -843,7 +826,13 @@ mod tests {
         assert_eq!(run("select name from fruit limit 2 please"), ["error: Expected the end of the query, found: please"]);
         assert_eq!(run("select name from fruit limit -1"), ["error: Expected a number, found: -"]);
         assert_eq!(run("select median(price) from fruit"), ["error: Unknown function: median"]);
-        assert_eq!(run("select sum(price) + 1 from fruit"), ["error: Expected FROM, found: +"]);
+        assert_eq!(run("select sum(price) + price from fruit"), ["error: Next to a function over the rows, a column must be inside one."]);
+        assert_eq!(run("select sum(count(*)) from fruit"), ["error: A function over the rows has no place here: count"]);
+        assert_eq!(run("select name from fruit where sum(price) > 1"), ["error: A function over the rows has no place here: sum"]);
+        assert_eq!(run("select name from fruit order by max(price)"), ["error: A function over the rows has no place here: max"]);
+        assert_eq!(run("select sum(price) / (count(*) - 5) from fruit"), ["error: Division by zero."]);
+        assert_eq!(run("select count(*)+count(*)+count(*)+count(*)+count(*)+count(*)+count(*)+count(*)+count(*) from fruit"), ["error: Too many functions over the rows: eight at most."]);
+        assert_eq!(run("select name from fruit where price in (20, 25) and name not like 'b%' and stock between 30 and 50"), ["name", "lemon"]);
         assert_eq!(run("select sum(name) from fruit"), ["error: SUM and AVG take numbers."]);
         assert_eq!(run("select name fruit"), ["error: Without FROM and a table there is no column name"]);
         assert_eq!(run("select name from"), ["error: Expected a table, but the query ends."]);
@@ -889,7 +878,21 @@ mod tests {
         assert_eq!(run("select color, avg(price) as mean from fruit group by color order by mean desc"), ["color|mean", "red|60", "purple|45", "yellow|22.5"]);
         assert_eq!(run("select count(kilo * 2), sum(kilo + 1) from fruit"), ["count|sum", "4|24.00"]);
         assert_eq!(run("select avg(price) from fruit where color = 'blue'"), ["avg", ""]);
-        assert_eq!(run("select max(price) - 1 from fruit"), ["error: Expected FROM, found: -"]);
+        // a calculation made of such functions
+        assert_eq!(run("select max(price) - 1 from fruit"), ["max(price)-1", "89"]);
+        assert_eq!(run("select sum(price) / count(*) as mean, avg(price) from fruit"), ["mean|avg", "42|42"]);
+        assert_eq!(run("select round(sum(kilo) / count(kilo), 1) as kilo, count(*) - count(kilo) as unknown from fruit"), ["kilo|unknown", "5.0|1"]);
+        assert_eq!(run("select 'from ' || min(price) || ' to ' || max(price) as prices from fruit"), ["prices", "from 20 to 90"]);
+        assert_eq!(
+            run("select color, max(price) - min(price) as spread, sum(price * stock) / sum(stock) as mean from fruit group by color order by spread desc"),
+            ["color|spread|mean", "red|60|47.647059", "yellow|5|25", "purple|0|45"]
+        );
+        // the same function twice is worked out twice, and the result may hold fewer columns than
+        // functions; a name of column keeps 24 characters
+        assert_eq!(run("select count(*) * count(*) + count(*) from fruit"), ["count(*)*count(*)+count(", "30"]);
+        // over no row at all: nothing, which a calculation keeps
+        assert_eq!(run("select sum(price) / count(*), count(*) + 1 from fruit where color = 'blue'"), ["sum(price)/count(*)|count(*)+1", "|1"]);
+        assert_eq!(run("select coalesce(sum(x), 0) + 1 as n from empty"), ["n", "1"]);
     }
 
     #[test]

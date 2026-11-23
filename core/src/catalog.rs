@@ -77,6 +77,11 @@ pub fn kept(sys: &System) -> Text {
     text
 }
 
+/// The ids of the engine among these whole numbers; None when there are none.
+pub(crate) fn ids(first: i64, last: i64) -> Option<xila_db::Ids> {
+    (first <= last && last >= 0).then(|| xila_db::Ids { first: first.max(0) as u64, last: last as u64 })
+}
+
 fn row(values: &[Value]) -> Row {
     let mut row = [Value::Null; MAX_COLUMNS];
     row[..values.len()].copy_from_slice(values);
@@ -97,6 +102,10 @@ impl Source for System {
     }
 
     fn scan(&self, table: usize, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+        self.scan_among(table, i64::MIN, i64::MAX, visit)
+    }
+
+    fn scan_among(&self, table: usize, first: i64, last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
         let text = Value::text;
         let stored = self.db.tables();
         if let Some(index) = table.checked_sub(TABLES.len()) {
@@ -105,7 +114,10 @@ impl Source for System {
                 for (kind, column) in kinds.iter_mut().zip(&table.columns) {
                     *kind = column.kind;
                 }
-                self.db.scan(index, &mut |fields| visit(&row_from(fields, &kinds))).map_err(|error| engine_error(error, None))?;
+                // the first column of a stored table is its id, which the engine finds rows by
+                if let Some(ids) = ids(first, last) {
+                    self.db.scan_ids(index, ids, &mut |fields| visit(&row_from(fields, &kinds))).map_err(|error| engine_error(error, None))?;
+                }
             }
             return Ok(());
         }

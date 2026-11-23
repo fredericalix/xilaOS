@@ -308,7 +308,11 @@ fn update(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
     lexer.end()?;
     let (kinds, sets) = (schema.kinds, &sets[..count]);
     let mut failed = None;
-    let changed = db.update_each(schema.table - catalog::TABLES.len(), &mut |fields, put| {
+    // a condition on the id goes straight to those rows
+    let Some(ids) = among(&filter) else {
+        return Ok(Done { message: count_message(0, "changed in", &schema.name), table: schema.name, event: None });
+    };
+    let changed = db.update_each_ids(schema.table - catalog::TABLES.len(), ids, &mut |fields, put| {
         if failed.is_some() {
             return;
         }
@@ -340,6 +344,18 @@ fn update(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
     Ok(Done { message: count_message(changed, "changed in", &schema.name), table: schema.name, event: None })
 }
 
+/// The ids a condition leaves a row to have: all of them without a
+/// condition, None when no row can hold.
+fn among(filter: &Option<Expr>) -> Option<xila_db::Ids> {
+    match filter {
+        Some(filter) => {
+            let (first, last) = filter.bounds(0);
+            catalog::ids(first, last)
+        }
+        None => Some(xila_db::Ids::ALL),
+    }
+}
+
 fn delete(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Message> {
     if !lexer.keyword(b"from") {
         return Err(unexpected(b"FROM", lexer.peek()));
@@ -349,7 +365,10 @@ fn delete(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
     lexer.end()?;
     let kinds = schema.kinds;
     let mut failed = None;
-    let removed = db.delete(schema.table - catalog::TABLES.len(), &mut |fields| match &filter {
+    let Some(ids) = among(&filter) else {
+        return Ok(Done { message: count_message(0, "removed from", &schema.name), table: schema.name, event: None });
+    };
+    let removed = db.delete_ids(schema.table - catalog::TABLES.len(), ids, &mut |fields| match &filter {
         _ if failed.is_some() => false,
         None => true,
         Some(filter) => filter.holds(&row_from(fields, &kinds)).unwrap_or_else(|message| {

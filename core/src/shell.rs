@@ -1455,6 +1455,10 @@ fn disk(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
             let mut used = Text::new();
             let _ = write!(used, "{} KB", storage.used * 4);
             t.row(&[b"used", used.bytes()]);
+            // what reading and changing the tables cost since the start
+            let mut looked = Text::new();
+            let _ = write!(looked, "{}", storage.looked);
+            t.row(&[b"pages read", looked.bytes()]);
             show(sys, out, &t);
             if sys.spare.is_some() {
                 out.line(Style::Out, b"The disk was not used. To give it to XilaOS, type: disk erase");
@@ -2329,6 +2333,55 @@ pub mod tests {
         fn flush(&mut self) -> Result<(), xila_db::DiskError> {
             self.disk.flush()
         }
+    }
+
+    #[test]
+    fn a_row_is_reached_by_its_id_without_reading_its_table() {
+        let mut sys = System::new();
+        sys.db.set_limit(16 << 20);
+        assert!(run_line(&mut sys, "create table many (n int, label text)").0);
+        for batch in 0..200 {
+            let rows: Vec<String> = (batch * 4..batch * 4 + 4).map(|n| format!("({n}, 'row {n} {}')", "x".repeat(30))).collect();
+            let (ok, out) = run_line(&mut sys, &format!("insert into many values {}", rows.join(", ")));
+            assert!(ok, "{:?}", out.lines);
+        }
+        // what a statement costs, in pages, as `disk` counts them
+        let cost = |sys: &mut System, line: &str| {
+            let before = sys.db.storage().looked;
+            let (ok, out) = run_line(sys, line);
+            assert!(ok, "{line}: {:?}", out.lines);
+            (sys.db.storage().looked - before, out.lines)
+        };
+        let (whole, lines) = cost(&mut sys, "select count(*) from many");
+        assert_eq!(lines[1].trim(), "800");
+        assert!(whole > 10, "{whole}");
+        let (one, lines) = cost(&mut sys, "select n from many where id = 640");
+        assert_eq!((one, lines[1].trim()), (2, "639"));
+        let (few, lines) = cost(&mut sys, "select sum(n) from many where id between 100 and 103 and n != 100");
+        assert_eq!(lines[1].trim(), (99 + 101 + 102).to_string());
+        assert!(few <= 3, "{few}");
+        let (among, lines) = cost(&mut sys, "select count(*) from many where id in (5, 6, 700) and label like 'row%'");
+        assert_eq!(lines[1].trim(), "3");
+        assert!(among < whole, "{among}");
+        assert_eq!(cost(&mut sys, "select n from many where id = 1 and id = 2"), (0, vec!["   n".to_string()]));
+        assert_eq!(cost(&mut sys, "select n from many where id = -4").0, 0);
+        // a condition that says nothing of the id reads everything, as before
+        assert_eq!(cost(&mut sys, "select count(*) from many where n = 5 or id = 3").0, whole);
+        // changes go the same way
+        let (changed, lines) = cost(&mut sys, "update many set label = 'changed' where id = 400");
+        assert_eq!(lines, ["1 row changed in many."]);
+        let (removed, lines) = cost(&mut sys, "delete from many where id >= 799");
+        assert_eq!(lines, ["2 rows removed from many."]);
+        // finding the rows, then going down to each one to change it
+        assert!(changed < whole && removed < whole, "{changed} {removed} {whole}");
+        assert_eq!(run_line(&mut sys, "update many set n = 0 where id = 3 and id = 4").1.lines, ["0 rows changed in many."]);
+        assert_eq!(run_line(&mut sys, "delete from many where id < 0").1.lines, ["0 rows removed from many."]);
+        assert_eq!(run_line(&mut sys, "select id, label from many where id > 397 and id <= 400 order by id desc limit 1").1.lines[1].trim(), "400  changed");
+        assert_eq!(run_line(&mut sys, "select count(*) from many").1.lines[1].trim(), "798");
+        // the views of the system are not found by an id: they are read as before
+        assert_eq!(run_line(&mut sys, "select name from tasks where id = 0 and id = 1").1.lines.len(), 1);
+        let (ok, out) = run_line(&mut sys, "disk");
+        assert!(ok && out.lines[5].trim().starts_with("pages read") && out.lines[5].trim().split_whitespace().last().unwrap().parse::<u64>().unwrap() == sys.db.storage().looked, "{:?}", out.lines);
     }
 
     #[test]
@@ -3255,7 +3308,7 @@ pub mod tests {
         assert!(ok);
         assert_eq!(out.lines[1].trim(), "disk           sata partition, holds something else: not used");
         assert_eq!(out.lines[2].trim(), "stored tables  in memory, lost when the machine stops");
-        assert_eq!(out.lines[5], "The disk was not used. To give it to XilaOS, type: disk erase");
+        assert_eq!(out.lines[6], "The disk was not used. To give it to XilaOS, type: disk erase");
         let (ok, out) = run_line(&mut sys, "disk erase");
         assert!(ok);
         assert_eq!(
@@ -3281,7 +3334,7 @@ pub mod tests {
         assert_eq!(out.lines[1].trim(), "disk           sata, 10 MB");
         assert_eq!(out.lines[2].trim(), "stored tables  on disk, transaction 1");
         assert_eq!(out.lines[3].trim(), "room           10 MB");
-        assert_eq!(out.lines.len(), 5);
+        assert_eq!(out.lines.len(), 6);
         assert!(run_line(&mut sys, "create table notes (title text)").0);
         assert_eq!(run_line(&mut sys, "disk erase yes").1.lines, ["There is no disk to erase."]);
     }

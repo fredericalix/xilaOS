@@ -40,7 +40,7 @@ What it promises:
 |---|---|---|
 | `db/src/disk.rs` | 127 | The `Disk` trait, `Memory`, and `Volume`. |
 | `db/src/store.rs` | 430 | Copy-on-write pages, checksums, headers, commit and rollback. |
-| `db/src/tree.rs` | 365 | The B-tree: `set`, `walk`, `pages`, `release`, `check`. |
+| `db/src/tree.rs` | 377 | The B-tree: `set`, `walk`, `range`, `pages`, `release`, `check`. |
 | `db/src/lib.rs` | 990 | `Database`: tables, records, the catalog, transactions. |
 | `db/src/testing.rs` | 674 | A disk whose power can be cut, and the tests that cut it. |
 
@@ -270,6 +270,7 @@ on the way down, every change returns a new root.
 | `set(store, root, key, Some(value))` | Gives a key a value; returns the new root. |
 | `set(store, root, key, None)` | Removes a key. |
 | `walk(store, root, visit)` | Calls `visit` with every key and value, in order. |
+| `range(store, root, first, last, visit)` | The same for the keys from `first` to `last`: only the pages that can hold them are read, so one key costs one page per level. |
 | `pages(store, root, each)` | Calls `each` with every page of the tree, without reading the leaves. |
 | `release(store, root)` | Frees every page of the tree (`drop table`). |
 | `check(store, root, each)` | Reads everything and checks that the tree is well made. |
@@ -285,7 +286,8 @@ Three choices keep it short:
   a root with a single page below it is dropped. A table from which
   many rows were removed keeps pages that are partly empty.
 - **There is one tree per table, by id.** No secondary index exists:
-  a query reads the whole table.
+  a query reads the whole table, unless it says where the id must be
+  (`range`).
 
 `check` verifies, for a whole tree, that keys rise, that every key is
 on the right side of the keys above it, that leaves are all at the same
@@ -353,6 +355,7 @@ The `Database` API is small:
 | `remove(table)` | Removes a table and frees its tree. |
 | `insert(table, fields)` | Adds a row, returns its id. |
 | `scan(table, visit)` | Calls `visit` with every row, by id. |
+| `scan_ids(table, ids, visit)` | The same for the rows whose ids are in `ids` (an `Ids`: first and last), read through `tree::range`. `update_each_ids` and `delete_ids` change and remove among those rows only. |
 | `update(table, pick, set)` | Sets columns of the rows `pick` accepts. |
 | `update_each(table, each)` | Changes rows one by one, each with its own new values. |
 | `delete(table, pick)` | Removes the rows `pick` accepts. |

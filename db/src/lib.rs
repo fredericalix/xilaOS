@@ -237,6 +237,26 @@ pub struct Storage {
     pub transaction: u64,
     /// See `Error::Stopped`.
     pub stopped: bool,
+    /// Pages that reading and changing the tables went through since the
+    /// database was opened: what a query costs.
+    pub looked: u64,
+}
+
+/// The rows of a table whose ids go from `first` to `last`, both
+/// included. Reading them goes down the tree to them: it costs their
+/// pages, not those of the table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ids {
+    pub first: u64,
+    pub last: u64,
+}
+
+impl Ids {
+    pub const ALL: Ids = Ids { first: 0, last: u64::MAX };
+
+    pub fn one(id: u64) -> Ids {
+        Ids { first: id, last: id }
+    }
 }
 
 pub struct Database {
@@ -424,7 +444,7 @@ impl Database {
     }
 
     pub fn storage(&self) -> Storage {
-        let none = Storage { disk: "memory", keeps: false, pages: (self.limit / PAGE) as u64, used: 0, transaction: 0, stopped: false };
+        let none = Storage { disk: "memory", keeps: false, pages: (self.limit / PAGE) as u64, used: 0, transaction: 0, stopped: false, looked: 0 };
         let Ok(slot) = self.store.try_borrow() else {
             return none;
         };
@@ -435,6 +455,7 @@ impl Database {
             used: store.used(),
             transaction: store.txn(),
             stopped: store.stopped(),
+            looked: store.looked(),
         })
     }
 
@@ -550,13 +571,18 @@ impl Database {
     /// Calls `visit` with every row, in the order of their ids. The first
     /// field is the id.
     pub fn scan(&self, table: usize, visit: &mut dyn FnMut(&[Field])) -> Result<(), Error> {
+        self.scan_ids(table, Ids::ALL, visit)
+    }
+
+    /// As `scan`, for the rows whose ids are among `ids` only.
+    pub fn scan_ids(&self, table: usize, ids: Ids, visit: &mut dyn FnMut(&[Field])) -> Result<(), Error> {
         let table = &self.tables[table];
         let count = table.columns.len();
         let mut slot = self.store.try_borrow_mut().map_err(|_| Error::Busy)?;
         let Some(store) = slot.as_mut() else {
             return Ok(());
         };
-        tree::walk(store, table.root, &mut |id, record| {
+        tree::range(store, table.root, ids.first, ids.last, &mut |id, record| {
             let mut fields = [Field::Null; MAX_COLUMNS];
             fields[0] = Field::Int(id as i64);
             decode(record, &mut fields[1..count]);
@@ -593,12 +619,17 @@ impl Database {
     /// id first and unchanged. A row it does not call the function for
     /// stays as it is. Returns how many rows changed.
     pub fn update_each(&mut self, table: usize, each: &mut dyn FnMut(&[Field], &mut dyn FnMut(&[Field]))) -> Result<usize, Error> {
+        self.update_each_ids(table, Ids::ALL, each)
+    }
+
+    /// As `update_each`, for the rows whose ids are among `ids` only.
+    pub fn update_each_ids(&mut self, table: usize, ids: Ids, each: &mut dyn FnMut(&[Field], &mut dyn FnMut(&[Field]))) -> Result<usize, Error> {
         let kinds: Vec<Kind> = self.tables[table].columns.iter().map(|column| column.kind).collect();
         // the new records are worked out first: the tree is not changed
         // while it is read
         let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut failed = None;
-        self.scan(table, &mut |fields| {
+        self.scan_ids(table, ids, &mut |fields| {
             let Field::Int(id) = fields[0] else {
                 return;
             };
@@ -636,8 +667,13 @@ impl Database {
 
     /// Removes the rows `pick` accepts. Returns how many.
     pub fn delete(&mut self, table: usize, pick: &mut dyn FnMut(&[Field]) -> bool) -> Result<usize, Error> {
+        self.delete_ids(table, Ids::ALL, pick)
+    }
+
+    /// As `delete`, for the rows whose ids are among `among` only.
+    pub fn delete_ids(&mut self, table: usize, among: Ids, pick: &mut dyn FnMut(&[Field]) -> bool) -> Result<usize, Error> {
         let mut ids = Vec::new();
-        self.scan(table, &mut |fields| {
+        self.scan_ids(table, among, &mut |fields| {
             if let (true, Field::Int(id)) = (pick(fields), fields[0]) {
                 ids.push(id as u64);
             }
@@ -950,6 +986,71 @@ mod tests {
         assert!(db.tables().is_empty());
         db.rollback();
         assert_eq!(rows(&db, 0), ["1 1"]);
+    }
+
+    #[test]
+    fn rows_are_reached_by_their_ids_without_reading_the_table() {
+        let mut db = Database::new();
+        db.set_limit(64 << 20);
+        let notes = db.create(b"notes", &[(b"n", Kind::Int), (b"text", Kind::Text)]).unwrap();
+        // enough rows for a tree of three levels: the ids are 1 to 6000, without those that leave below
+        for n in 1..=6000 {
+            db.insert(notes, &[Field::Int(n * 2), Field::Text(&[b'x'; 300])]).unwrap();
+        }
+        db.delete(notes, &mut |fields| matches!(fields[0], Field::Int(id) if id % 7 == 0)).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        let ids = |db: &Database, among: Ids| {
+            let mut found = Vec::new();
+            db.scan_ids(notes, among, &mut |fields| {
+                let (Field::Int(id), Field::Int(n)) = (fields[0], fields[1]) else {
+                    panic!("not a row: {fields:?}");
+                };
+                assert_eq!(n, id * 2);
+                found.push(id as u64);
+            })
+            .unwrap();
+            found
+        };
+        let all = ids(&db, Ids::ALL);
+        assert_eq!(all.len(), 6000 - 6000 / 7);
+        let whole = db.storage().looked;
+        // a range gives what reading everything and keeping the range gives
+        for (first, last) in [(1, 1), (7, 7), (6000, 6000), (6001, 9000), (0, 0), (5, 3), (1, 20), (2990, 3010), (5999, u64::MAX), (0, u64::MAX), (4321, 4321)] {
+            let wanted: Vec<u64> = all.iter().copied().filter(|id| (first..=last).contains(id)).collect();
+            assert_eq!(ids(&db, Ids { first, last }), wanted, "{first} to {last}");
+        }
+        // and one row costs a page for each level of the tree, not the pages of the table
+        let before = db.storage().looked;
+        assert_eq!(ids(&db, Ids::one(4321)), [4321]);
+        let one = db.storage().looked - before;
+        let before = db.storage().looked;
+        ids(&db, Ids::ALL);
+        let every = db.storage().looked - before;
+        assert!(one <= 3 && every > 400 && whole >= every, "one row: {one} pages, all of them: {every}");
+
+        // changing and removing rows by their ids touch no other row
+        let changed = db.update_each_ids(notes, Ids { first: 100, last: 110 }, &mut |fields, put| {
+            let mut new = [Field::Null; 3];
+            new.copy_from_slice(fields);
+            new[2] = Field::Text(b"changed");
+            put(&new);
+        });
+        // 105 left with the multiples of seven
+        assert_eq!(changed, Ok(10));
+        assert_eq!(db.delete_ids(notes, Ids { first: 200, last: 202 }, &mut |fields| fields[0] != Field::Int(201)), Ok(2));
+        db.commit(&mut |_, _, _| {}).unwrap();
+        let mut texts = Vec::new();
+        db.scan(notes, &mut |fields| {
+            if let (Field::Int(id), Field::Text(text)) = (fields[0], fields[2]) {
+                if text == b"changed" {
+                    texts.push(id);
+                }
+            }
+        })
+        .unwrap();
+        assert_eq!(texts, [100, 101, 102, 103, 104, 106, 107, 108, 109, 110]);
+        assert_eq!(ids(&db, Ids { first: 199, last: 204 }), [199, 201, 204]);
+        assert_eq!(db.verify(), Ok(()));
     }
 
     #[test]

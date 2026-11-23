@@ -30,6 +30,7 @@ were also tried on the real machine.
 | `install`, `install system`, the USB stick image | yes | yes |
 | SQL: `SELECT`, `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`, expressions | yes | yes |
 | `disk check`: every page of the tables read and checked | yes | not tried |
+| SQL: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; rows reached by their `id` | yes | not tried |
 | `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | not tried |
 | LISTEN / NOTIFY | yes | yes |
 | XilaScript: variables, blocks, stored programs, `on` and `every` programs | yes | yes |
@@ -50,12 +51,11 @@ about 300 system checks.
 These are not bugs; they are where the first version stopped. What is
 meant to change is in the [work plan](#work-plan) below.
 
-**SQL.** No joins, subqueries, `IN`, `BETWEEN` or `NOT LIKE`. No
-indexes, keys or constraints; every query reads the whole table. No
+**SQL.** No joins or subqueries. No indexes, keys or constraints: a
+query reads the whole table unless it says where the `id` must be. No
 `ALTER TABLE`. No `BEGIN` / `COMMIT`: one statement is one transaction.
 Eight columns per table, 32 rows per result, 48 characters per text, no
-date type. An aggregate cannot be part of a calculation
-(`sum(a) / count(*)` is refused; `avg(a)` exists). Details in
+date type. Details in
 [The database and SQL](04-sql.md).
 
 **XilaScript.** No parameters, no editor (a program is retyped to be
@@ -315,13 +315,12 @@ ways the emulator never shows.
 ### SQL
 
 - Keys, indexes, constraints (`NOT NULL`, `UNIQUE`), `ALTER TABLE`.
-  Even `where id = 5` reads the whole table today.
-- Joins, subqueries, `IN`, `BETWEEN`, `NOT LIKE`, and aggregates
-  inside a calculation.
+  Only the `id` leads straight to a row today.
+- Joins and subqueries.
 - `BEGIN`, `COMMIT`, `ROLLBACK` at the prompt.
 - Date and time types.
 - The fixed sizes: eight columns, 32 rows per result, 48 characters
-  per text, 16 elements per calculation, one column in `GROUP BY`, one
+  per text, 24 elements per calculation, one column in `GROUP BY`, one
   criterion in `ORDER BY`, eight rows per `INSERT`.
 - A system view of the log.
 - Changing a setting with `update settings`.

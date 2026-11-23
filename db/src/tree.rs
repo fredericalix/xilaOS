@@ -256,18 +256,30 @@ pub(crate) fn set(store: &mut Store, root: u64, key: u64, value: Option<&[u8]>) 
 
 /// Calls `visit` with every key and its value, in the order of the keys.
 pub(crate) fn walk(store: &mut Store, root: u64, visit: &mut dyn FnMut(u64, &[u8])) -> Result<(), Error> {
-    if root == 0 {
+    range(store, root, 0, u64::MAX, visit)
+}
+
+/// Calls `visit` with the keys from `first` to `last`, both included, and
+/// their values, in the order of the keys. Only the pages that can hold
+/// such keys are read: one key costs one page for each level of the tree.
+pub(crate) fn range(store: &mut Store, root: u64, first: u64, last: u64, visit: &mut dyn FnMut(u64, &[u8])) -> Result<(), Error> {
+    if root == 0 || first > last {
         return Ok(());
     }
     match load(store, root)? {
         Node::Leaf(entries) => {
-            for (key, value) in &entries {
+            for (key, value) in entries.iter().filter(|(key, _)| (first..=last).contains(key)) {
                 visit(*key, value);
             }
         }
-        Node::Branch { children, .. } => {
-            for child in children {
-                walk(store, child, visit)?;
+        Node::Branch { children, keys, .. } => {
+            for (at, child) in children.iter().enumerate() {
+                // what is below this page: from the key before it, to just before the next
+                let from_here = at == 0 || keys[at - 1] <= last;
+                let to_here = at + 1 == children.len() || keys[at] > first;
+                if from_here && to_here {
+                    range(store, *child, first, last, visit)?;
+                }
             }
         }
     }

@@ -7,8 +7,13 @@
 //! ```
 //!
 //! From what binds least to what binds most: `or`, `and`, `not`, the
-//! comparisons (`= != <> < <= > >= like`, `is [not] null`), `+ - ||`,
-//! `* / %`, the sign, then values, columns, functions and parentheses.
+//! comparisons (`= != <> < <= > >= like`, `is [not] null`, `[not] in
+//! (a, b)`, `[not] between a and b`, `not like`), `+ - ||`, `* / %`, the
+//! sign, then values, columns, functions and parentheses.
+//!
+//! In the list of a SELECT a calculation may also be made of functions
+//! over the rows (`sum(amount) / count(*)`): `parse_item` reads those,
+//! and keeps each such function in an `Aggregates` for the query to fill.
 //!
 //! How values behave:
 //!
@@ -31,10 +36,12 @@ use core::cmp::Ordering;
 use crate::change::MAX_TEXT;
 use crate::shell::Text;
 use crate::text::FixedStr;
-use crate::sql::{compare_numbers, error, like, unexpected, Lexer, Message, Row, Schema, Token, Value, MAX_SCALE};
+use crate::sql::{compare_numbers, error, like, unexpected, Lexer, Message, Row, Schema, Token, Value, MAX_COLUMNS, MAX_SCALE};
 
 /// Values and operations in one expression.
-const MAX_NODES: usize = 16;
+const MAX_NODES: usize = 24;
+/// Values in the list of one `in (...)`.
+const MAX_IN: usize = 10;
 /// How deep parentheses and signs may nest.
 const MAX_DEPTH: usize = 12;
 /// Digits after the point a division keeps at most.
@@ -79,6 +86,48 @@ const FUNCTIONS: [(&[u8], Function, usize, usize); 6] = [
     (b"coalesce", Function::Coalesce, 2, 2),
 ];
 
+/// A function over the rows of a query, or of each of its groups.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Over {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+const OVER: [(&[u8], Over); 5] = [(b"count", Over::Count), (b"sum", Over::Sum), (b"avg", Over::Avg), (b"min", Over::Min), (b"max", Over::Max)];
+
+impl Over {
+    pub fn name(self) -> &'static [u8] {
+        OVER.iter().find(|(_, over)| *over == self).map_or(b"", |(name, _)| *name)
+    }
+}
+
+/// One function over the rows that a query has to fill: what it is
+/// given for each row.
+#[derive(Clone, Copy)]
+pub(crate) struct Aggregate {
+    pub function: Over,
+    pub expr: Expr,
+    /// COUNT(*): rows are counted, whatever they hold.
+    pub every: bool,
+}
+
+/// The functions over the rows of the list of a SELECT. The items of the
+/// list that use them are expressions over a row of their results: the
+/// function number 2 is column 2 there.
+pub(crate) struct Aggregates {
+    pub list: [Aggregate; MAX_COLUMNS],
+    pub count: usize,
+}
+
+impl Aggregates {
+    pub fn new() -> Aggregates {
+        Aggregates { list: [Aggregate { function: Over::Count, expr: Expr::NONE, every: false }; MAX_COLUMNS], count: 0 }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Node {
     Value(Value),
@@ -87,6 +136,9 @@ enum Node {
     Not(usize),
     /// Whether a value is nothing, or is something.
     IsNull(usize, bool),
+    /// Whether the first value is among those of a list: one value of
+    /// the list, and the node of the rest of it, if any.
+    In(usize, usize, Option<usize>),
     Binary(Binary, usize, usize),
     Call(Function, usize, Option<usize>),
 }
@@ -284,6 +336,75 @@ impl Expr {
         self.node(self.root, row)
     }
 
+    /// The whole numbers outside which a column makes the expression
+    /// not hold, as far as that can be told by looking at it: `id = 5`,
+    /// `id between 10 and 20 and label = 'x'`, `id in (3, 9)`, `7 < id`.
+    /// When the first is above the last, no row can hold. It is what
+    /// lets a query go straight to rows by their `id`: every row within
+    /// is still given to `holds`.
+    pub fn bounds(&self, column: usize) -> (i64, i64) {
+        self.bounds_at(self.root, column)
+    }
+
+    fn bounds_at(&self, at: usize, column: usize) -> (i64, i64) {
+        const ANY: (i64, i64) = (i64::MIN, i64::MAX);
+        let is_column = |at: usize| matches!(self.nodes[at], Node::Column(found) if found == column);
+        let whole = |at: usize| match self.nodes[at] {
+            Node::Value(Value::Int(n)) => Some(n),
+            _ => None,
+        };
+        match self.nodes[at] {
+            // both sides must hold
+            Node::Binary(Binary::And, a, b) => {
+                let (a, b) = (self.bounds_at(a, column), self.bounds_at(b, column));
+                (a.0.max(b.0), a.1.min(b.1))
+            }
+            Node::Binary(operation, a, b) => {
+                use Binary::*;
+                // the column on the left of a number, or on its right
+                let (operation, n) = match (is_column(a), whole(b), is_column(b), whole(a)) {
+                    (true, Some(n), ..) => (operation, n),
+                    (_, _, true, Some(n)) => (
+                        match operation {
+                            Less => Greater,
+                            LessOrEqual => GreaterOrEqual,
+                            Greater => Less,
+                            GreaterOrEqual => LessOrEqual,
+                            other => other,
+                        },
+                        n,
+                    ),
+                    _ => return ANY,
+                };
+                match operation {
+                    Equal => (n, n),
+                    Less if n == i64::MIN => (0, -1),
+                    Less => (i64::MIN, n - 1),
+                    LessOrEqual => (i64::MIN, n),
+                    Greater if n == i64::MAX => (0, -1),
+                    Greater => (n + 1, i64::MAX),
+                    GreaterOrEqual => (n, i64::MAX),
+                    _ => ANY,
+                }
+            }
+            Node::In(a, ..) if is_column(a) => {
+                // from the smallest of the list to the largest
+                let (mut rest, mut bounds) = (Some(at), (i64::MAX, i64::MIN));
+                while let Some(Node::In(_, one, next)) = rest.map(|at| self.nodes[at]) {
+                    match self.nodes[one] {
+                        Node::Value(Value::Int(n)) => bounds = (bounds.0.min(n), bounds.1.max(n)),
+                        // among nothing: no row for this one
+                        Node::Value(Value::Null) => {}
+                        _ => return ANY,
+                    }
+                    rest = next;
+                }
+                bounds
+            }
+            _ => ANY,
+        }
+    }
+
     /// Whether the expression holds for a row, as a condition.
     pub fn holds(&self, row: &Row) -> Result<bool, Message> {
         Ok(truth(&self.eval(row)?)? == Some(true))
@@ -296,6 +417,25 @@ impl Expr {
             Node::Negate(a) => binary(Binary::Subtract, Value::Int(0), self.node(a, row)?)?,
             Node::Not(a) => truth(&self.node(a, row)?)?.map_or(Value::Null, |holds| boolean(!holds)),
             Node::IsNull(a, wanted) => boolean((self.node(a, row)? == Value::Null) == wanted),
+            Node::In(a, ..) => {
+                // as with `=`: nothing is among nothing, and what is not
+                // found among values of which one is nothing is not known
+                let value = self.node(a, row)?;
+                let (mut rest, mut unknown) = (Some(at), value == Value::Null);
+                while let Some(Node::In(_, one, next)) = rest.map(|at| self.nodes[at]) {
+                    match binary(Binary::Equal, value, self.node(one, row)?)? {
+                        Value::Null => unknown = true,
+                        Value::Int(0) => {}
+                        _ => return Ok(boolean(true)),
+                    }
+                    rest = next;
+                }
+                if unknown {
+                    Value::Null
+                } else {
+                    boolean(false)
+                }
+            }
             // one side can settle these; the other is then not looked at
             Node::Binary(operation @ (Binary::And | Binary::Or), a, b) => {
                 let settles = operation == Binary::Or;
@@ -418,6 +558,11 @@ struct Parser<'a, 'b> {
     names: Names<'b>,
     expr: Expr,
     depth: usize,
+    /// Where the functions over the rows go, where they may be used.
+    over: Option<&'b mut Aggregates>,
+    /// Whether a column of the table was named, and a function over the rows.
+    columns: bool,
+    overs: bool,
 }
 
 impl Parser<'_, '_> {
@@ -471,6 +616,53 @@ impl Parser<'_, '_> {
                 return Err(unexpected(b"NULL", self.lexer.peek()));
             }
             return self.add(Node::IsNull(left, wanted));
+        }
+        // `not` after a value belongs to what follows: not like, not in, not between
+        let at = self.lexer.at;
+        let negated = self.lexer.keyword(b"not");
+        let found = if self.lexer.keyword(b"in") {
+            self.lexer.expect(b"(")?;
+            let mut values = [0; MAX_IN];
+            let mut count = 0;
+            loop {
+                if count == MAX_IN {
+                    return Err(Message::from_bytes(b"A list after IN takes ten values at most."));
+                }
+                values[count] = self.sum()?;
+                count += 1;
+                if !self.lexer.symbol(b",") {
+                    break;
+                }
+            }
+            self.lexer.expect(b")")?;
+            let mut rest = None;
+            for &value in values[..count].iter().rev() {
+                rest = Some(self.add(Node::In(left, value, rest))?);
+            }
+            rest
+        } else if self.lexer.keyword(b"between") {
+            let low = self.sum()?;
+            if !self.lexer.keyword(b"and") {
+                return Err(unexpected(b"AND", self.lexer.peek()));
+            }
+            let high = self.sum()?;
+            let (above, below) = (self.add(Node::Binary(Binary::GreaterOrEqual, left, low))?, self.add(Node::Binary(Binary::LessOrEqual, left, high))?);
+            Some(self.add(Node::Binary(Binary::And, above, below))?)
+        } else if negated && self.lexer.keyword(b"like") {
+            let pattern = self.sum()?;
+            Some(self.add(Node::Binary(Binary::Like, left, pattern))?)
+        } else {
+            None
+        };
+        match (found, negated) {
+            (Some(found), true) => return self.add(Node::Not(found)),
+            (Some(found), false) => return Ok(found),
+            (None, true) => {
+                self.lexer.at = at;
+                self.lexer.next();
+                return Err(unexpected(b"LIKE, IN or BETWEEN after NOT", self.lexer.peek()));
+            }
+            (None, false) => {}
         }
         let operation = match self.lexer.peek() {
             Token::Symbol(b"=") => Binary::Equal,
@@ -556,6 +748,23 @@ impl Parser<'_, '_> {
             Token::Word(word) if word.eq_ignore_ascii_case(b"true") => self.add(Node::Value(Value::Int(1))),
             Token::Word(word) if word.eq_ignore_ascii_case(b"false") => self.add(Node::Value(Value::Int(0))),
             Token::Word(word) if self.lexer.symbol(b"(") => {
+                if let Some(&(_, function)) = OVER.iter().find(|(name, _)| name.eq_ignore_ascii_case(word)) {
+                    let Some(aggregates) = self.over.as_deref_mut() else {
+                        return Err(error(b"A function over the rows has no place here: ", word));
+                    };
+                    if aggregates.count == MAX_COLUMNS {
+                        return Err(Message::from_bytes(b"Too many functions over the rows: eight at most."));
+                    }
+                    let every = function == Over::Count && self.lexer.symbol(b"*");
+                    // what it is given is worked out for each row, and holds no such function
+                    let expr = if every { Expr::NONE } else { parse(self.lexer, self.names)? };
+                    self.lexer.expect(b")")?;
+                    aggregates.list[aggregates.count] = Aggregate { function, expr, every };
+                    aggregates.count += 1;
+                    self.overs = true;
+                    let slot = aggregates.count - 1;
+                    return self.add(Node::Column(slot));
+                }
                 let Some(&(name, function, least, most)) = FUNCTIONS.iter().find(|(name, ..)| name.eq_ignore_ascii_case(word)) else {
                     return Err(error(b"Unknown function: ", word));
                 };
@@ -570,7 +779,10 @@ impl Parser<'_, '_> {
             Token::Word(word) => {
                 let column = self.names.columns.and_then(|schema| schema.column(word).ok());
                 match (column, self.names.vars.get(word)) {
-                    (Some(column), _) => self.add(Node::Column(column)),
+                    (Some(column), _) => {
+                        self.columns = true;
+                        self.add(Node::Column(column))
+                    }
                     (None, Some(value)) => self.add(Node::Value(value)),
                     (None, None) => Err(error(self.names.unknown, word)),
                 }
@@ -583,11 +795,26 @@ impl Parser<'_, '_> {
 /// Reads an expression. It ends where something that cannot continue it
 /// begins: the caller looks at what follows.
 pub(crate) fn parse(lexer: &mut Lexer, names: Names) -> Result<Expr, Message> {
-    let mut parser = Parser { lexer, names, expr: Expr::NONE, depth: 0 };
+    let mut parser = Parser { lexer, names, expr: Expr::NONE, depth: 0, over: None, columns: false, overs: false };
     parser.expr.count = 0;
     let root = parser.either()?;
     parser.expr.root = root;
     Ok(parser.expr)
+}
+
+/// Reads an item of the list of a SELECT, which may be made of functions
+/// over the rows: `sum(amount) / count(*)`. Those are added to
+/// `aggregates`, and the expression then reads a row of their results,
+/// not a row of the table: true is returned with it.
+pub(crate) fn parse_item(lexer: &mut Lexer, names: Names, aggregates: &mut Aggregates) -> Result<(Expr, bool), Message> {
+    let mut parser = Parser { lexer, names, expr: Expr::NONE, depth: 0, over: Some(aggregates), columns: false, overs: false };
+    parser.expr.count = 0;
+    let root = parser.either()?;
+    parser.expr.root = root;
+    if parser.overs && parser.columns {
+        return Err(Message::from_bytes(b"Next to a function over the rows, a column must be inside one."));
+    }
+    Ok((parser.expr, parser.overs))
 }
 
 /// Reads `WHERE condition` if it is there.
@@ -743,6 +970,74 @@ mod tests {
     }
 
     #[test]
+    fn a_condition_tells_where_a_column_must_be() {
+        // `n` is the first column of the row these are read for
+        let bounds = |text: &str| {
+            let mut schema = Schema::new(0, b"t", true);
+            schema.add(b"n", Kind::Int);
+            schema.add(b"m", Kind::Int);
+            let mut vars = Vars::new();
+            assert!(vars.set(b"wanted", Value::Int(12)));
+            let mut lexer = Lexer::new(text.as_bytes());
+            parse(&mut lexer, Names::of(&schema, &vars)).unwrap().bounds(0)
+        };
+        const ANY: (i64, i64) = (i64::MIN, i64::MAX);
+        assert_eq!(bounds("n = 5"), (5, 5));
+        assert_eq!(bounds("5 = n"), (5, 5));
+        assert_eq!(bounds("n = wanted"), (12, 12));
+        assert_eq!(bounds("n > 5"), (6, i64::MAX));
+        assert_eq!(bounds("n >= 5"), (5, i64::MAX));
+        assert_eq!(bounds("n < 5"), (i64::MIN, 4));
+        assert_eq!(bounds("5 >= n"), (i64::MIN, 5));
+        assert_eq!(bounds("5 < n"), (6, i64::MAX));
+        assert_eq!(bounds("n between 10 and 20"), (10, 20));
+        assert_eq!(bounds("n between 10 and 20 and m = 3 and n != 15"), (10, 20));
+        assert_eq!(bounds("m = 3 and (n > 4 and n <= 9)"), (5, 9));
+        assert_eq!(bounds("n in (9, 3, 7)"), (3, 9));
+        assert_eq!(bounds("n in (9, null)"), (9, 9));
+        assert_eq!(bounds("n = -3"), (-3, -3));
+        // no row can hold: the first is above the last
+        let none = |(first, last): (i64, i64)| first > last;
+        assert!(none(bounds("n = 1 and n = 2")) && none(bounds("n > 5 and n < 6")) && none(bounds("n in (null)")));
+        assert!(none(bounds("n > 9223372036854775807")));
+        // what cannot be told by looking is left to every row
+        for open in ["m = 5", "n = 5 or m = 1", "not n = 5", "n != 5", "n = m", "n + 1 = 5", "n = 2.5", "n < 2.5", "n in (1, m)", "n not in (1, 2)", "n is null", "n = '5'", "m in (1, 2)", "n not between 1 and 5"] {
+            assert_eq!(bounds(open), ANY, "{open}");
+        }
+        assert_eq!(bounds("n = 5 and (n = 6 or m = 1)"), (5, 5));
+    }
+
+    #[test]
+    fn among_and_between() {
+        assert_eq!(work("n in (1, 7, 9)"), "1");
+        assert_eq!(work("n in (1, 2)"), "0");
+        assert_eq!(work("n not in (1, 2)"), "1");
+        assert_eq!(work("n in (3 + 4)"), "1");
+        assert_eq!(work("label in ('coffee', 'tea')"), "1");
+        assert_eq!(work("upper(label) not in ('COFFEE', 'TEA')"), "0");
+        assert_eq!(work("n in (1,2,3,4,5,6,8,9,10,7)"), "1");
+        // nothing is among nothing; among values of which one is nothing, what is not found is not known
+        assert_eq!(work("empty in (1, 2)"), "null");
+        assert_eq!(work("n in (1, empty)"), "null");
+        assert_eq!(work("n in (empty, 7)"), "1");
+        assert_eq!(work("n not in (1, empty)"), "null");
+        assert_eq!(work("n between 7 and 9"), "1");
+        assert_eq!(work("n between 1 and 7"), "1");
+        assert_eq!(work("n between 8 and 9"), "0");
+        assert_eq!(work("n not between 8 and 9"), "1");
+        assert_eq!(work("price between 12 and 12.5"), "1");
+        assert_eq!(work("label between 'a' and 'z'"), "1");
+        assert_eq!(work("empty between 1 and 9"), "null");
+        // the `and` of a between is its own; the next one joins conditions
+        assert_eq!(work("n between 1 and 9 and label = 'tea'"), "1");
+        assert_eq!(work("n between 1 + 1 and 2 * 4 or 1 / 0 > 1"), "1");
+        assert_eq!(work("label not like 't%'"), "0");
+        assert_eq!(work("label not like 'c%'"), "1");
+        assert_eq!(work("not label not like 'c%'"), "0");
+        assert_eq!(work("n in (1, 7) and label not like 'c%' and n not between 1 and 5"), "1");
+    }
+
+    #[test]
     fn what_is_wrong_is_said() {
         assert_eq!(work("n +"), "error: Expected a value, but the query ends.");
         assert_eq!(work("(n + 1"), "error: Expected ), but the query ends.");
@@ -754,7 +1049,15 @@ mod tests {
         assert_eq!(work("upper(label, 2)"), "error: upper takes one value.");
         assert_eq!(work("round(price, 12)"), "error: round keeps 0 to 9 digits after the point.");
         assert_eq!(work("n is 3"), "error: Expected NULL, found: 3");
-        assert_eq!(work("1+1+1+1+1+1+1+1+1+1"), "error: This calculation is too long.");
+        assert_eq!(work("1+1+1+1+1+1+1+1+1+1+1+1"), "12");
+        assert_eq!(work("1+1+1+1+1+1+1+1+1+1+1+1+1"), "error: This calculation is too long.");
+        assert_eq!(work("n not 3"), "error: Expected LIKE, IN or BETWEEN after NOT, found: 3");
+        assert_eq!(work("n in 3"), "error: Expected (, found: 3");
+        assert_eq!(work("n in ()"), "error: Expected a value, found: )");
+        assert_eq!(work("n in (1, 2"), "error: Expected ), but the query ends.");
+        assert_eq!(work("n in (1,2,3,4,5,6,7,8,9,10,11)"), "error: A list after IN takes ten values at most.");
+        assert_eq!(work("n between 1 or 9"), "error: Expected AND, found: or");
+        assert_eq!(work("n in ('a')"), "error: A number and a text cannot be compared.");
         assert_eq!(work(&"(".repeat(20)), "error: This calculation is too long.");
         let mut lexer = Lexer::new(b"amount");
         let said = parse(&mut lexer, Names::without(&NO_VARS, b"A value is expected, not the name ")).err().unwrap();

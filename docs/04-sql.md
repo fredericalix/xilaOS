@@ -150,8 +150,12 @@ SELECT * | expression [AS name], COUNT(*), SUM(expression), ...
   (`sum(price * stock)`). As in SQL they skip what is nothing, and
   `count(*)` counts rows. Without `GROUP BY` they give one row, even for an
   empty table: `count` is then 0 and the others are nothing. `sum` and `avg`
-  take numbers; `min` and `max` take texts too. A function over rows cannot
-  be part of a calculation: `sum(a) / count(*)` is refused, `avg(a)` exists.
+  take numbers; `min` and `max` take texts too. An item may be a
+  calculation made of such functions: `sum(amount) / count(*)`,
+  `round(avg(amount), 2)`, `max(price) - min(price)`. A column next to
+  them must be inside one (`sum(price) + price` is refused), a function
+  over rows cannot be inside another, and a query holds eight of them at
+  most.
 - **`GROUP BY`** takes one column. Whatever in the list is not a function
   over rows must be that column.
 - **`ORDER BY`** takes one key: a column of the result by its name or by its
@@ -233,7 +237,8 @@ text of `notify`, and every value in XilaScript.
 
 ```
 amount * 2            price + tax           'Mr ' || name        -amount
-amount > 10 and (tag = 'food' or tag is null)        not label like 'a%'
+amount > 10 and (tag = 'food' or tag is null)        label not like 'a%'
+tag in ('food', 'train')     amount between 10 and 50     n not in (1, 2)
 round(amount / 3, 2)  length(label)  upper(tag)  abs(n)  coalesce(tag, '-')
 ```
 
@@ -244,7 +249,7 @@ From what binds least to what binds most:
 | 1 | `or` |
 | 2 | `and` |
 | 3 | `not` |
-| 4 | `=` `!=` `<>` `<` `<=` `>` `>=` `like`, `is null`, `is not null` (one comparison: they do not chain) |
+| 4 | `=` `!=` `<>` `<` `<=` `>` `>=` `like`, `is null`, `is not null`, `in (a, b)`, `between a and b`, and `not like`, `not in`, `not between` (one comparison: they do not chain) |
 | 5 | `+` `-` `\|\|` |
 | 6 | `*` `/` `%` |
 | 7 | `-` in front of a value |
@@ -268,7 +273,8 @@ How values behave:
 - **Nothing in, nothing out.** `null` in a calculation or a comparison gives
   nothing, and a condition that gives nothing does not hold. `and` and `or`
   can still be settled by their other side: `0 and null` is 0, `1 or null`
-  is 1.
+  is 1. `in` follows: `n in (1, null)` holds when `n` is 1 and gives
+  nothing otherwise, so `n not in (1, null)` never holds.
 - **A condition is a number**: 1 when it holds, 0 when it does not. `true`
   is 1 and `false` is 0. A text cannot be a condition.
 - **Texts compare byte by byte**, so capital letters come before small ones
@@ -421,7 +427,9 @@ follow from that, and from what is not built yet.
 | Rows of a result | 32; the rest is counted, not shown |
 | Groups of a `GROUP BY` | 32 |
 | Rows of one `INSERT` | 8 |
-| An expression | 16 values and operations; parentheses, signs and `not` nest 12 deep |
+| An expression | 24 values and operations; parentheses, signs and `not` nest 12 deep |
+| The list after `in` | 10 values |
+| Functions over rows in one query | 8 |
 | A text | 48 characters |
 | A name of table or column | 24 characters |
 | Stored tables | 64 |
@@ -432,16 +440,21 @@ follow from that, and from what is not built yet.
 What SQL has and this one does not:
 
 - joins, subqueries, `union`, `distinct`, `having`;
-- `in`, `between`, `case`; `not like` is written `not x like '...'`;
+- `case`, and `in` with a query in place of a list;
 - more than one column in `GROUP BY`, more than one key in `ORDER BY`;
-- a calculation on functions over rows (`sum(a) / count(*)`);
 - `insert into ... select`;
 - `alter table`, keys, indexes, `not null`, `unique`, defaults;
 - `begin`, `commit`, `rollback`;
 - dates and times as a type, and objects larger than a text.
 
-Every query reads the whole table. There is no index besides the order of
-the rows by `id`, and `where id = 5` does not use it yet.
+A query reads the whole table, unless its condition says where the `id`
+must be: the rows of a stored table are kept in the order of their ids,
+and `where id = 5`, `where id between 10 and 20`, `where id in (3, 9)` or
+`where id > 100 and label = 'x'` go down the tree to those rows and read
+nothing else. `update` and `delete` do the same. What counts is what the
+condition says at its top, joined by `and`: `id = 5 or label = 'x'` reads
+everything. There is no other index yet. The `pages read` row of `disk`
+tells what a query cost.
 
 ## How it is implemented
 

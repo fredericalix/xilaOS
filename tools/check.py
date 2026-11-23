@@ -558,6 +558,34 @@ with Xila(disk=disk) as x:
         x.cmd("insert into many values " + ", ".join("(%d, 'row %d')" % (n, n) for n in range(batch * 8, batch * 8 + 8)))
     total = x.table("select count(*), sum(n) from many")
     check("a table over several pages", total == [{"count": "320", "sum": str(sum(range(320)))}], total)
+    # conditions: among, between, not like
+    found = x.table("select count(*) from many where n in (1, 5, 9) or n between 100 and 102")
+    check("select: in and between", found == [{"count": "6"}], found)
+    found = x.table("select label from many where label not like 'row 1%' and id between 1 and 3")
+    check("select: not like", found == [{"label": "row 0"}, {"label": "row 2"}], found)
+    ok, lines = x.cmd("select n from many where n in (1,2,3,4,5,6,7,8,9,10,11)")
+    check("select: a list after in has its limit, and says so", not ok and lines == ["A list after IN takes ten values at most."], lines)
+    # a calculation made of functions over the rows
+    found = x.table("select sum(n) / count(*) as mean, max(n) - min(n) as spread, round(avg(n), 0) from many")
+    check("select: a calculation on functions over the rows", found == [{"mean": "159.5", "spread": "319", "round(avg(n),0)": "160"}], found)
+    ok, lines = x.cmd("select sum(n) + n from many")
+    check("select: a column next to such a function is refused", not ok and lines == ["Next to a function over the rows, a column must be inside one."], lines)
+
+    # a row is reached by its id: the pages on the way down to it, not those of the table
+    def pages(line):
+        read = lambda: int({row["item"]: row["value"] for row in x.table("disk")}["pages read"])
+        before = read()
+        answer = x.table(line)
+        return read() - before, answer
+    whole, answer = pages("select count(*) from many where label like 'row%'")
+    one, row = pages("select n, label from many where id = 300")
+    check("select: a row is reached by its id without reading the table", row == [{"n": "299", "label": "row 299"}] and one == 2 and whole > one, (one, whole, row))
+    few, rows = pages("select sum(n) from many where id between 10 and 12 and n != 10")
+    check("select: and so are the rows between two ids", rows == [{"sum": "20"}] and few <= 3, (few, rows))
+    ok, lines = x.cmd("update many set label = 'changed' where id = 300")
+    check("update: a row is changed by its id", ok and lines == ["1 row changed in many."] and x.table("select label from many where id in (299, 300, 301)") == [{"label": "row 298"}, {"label": "changed"}, {"label": "row 300"}], lines)
+    x.cmd("update many set label = 'row 299' where id = 300")
+
     # every page of every table read back, with its checksum
     ok, lines = x.cmd("disk check")
     used = int({row["item"]: row["value"] for row in x.table("disk")}["used"].split()[0])

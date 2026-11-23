@@ -140,6 +140,9 @@ pub(crate) struct Store {
     stopped: bool,
     /// The change under way removes things and may use the reserve.
     pub(crate) spare: bool,
+    /// Pages that were asked for since the store was opened, whether the
+    /// volume gave them or they were at hand.
+    looked: u64,
 }
 
 /// What `Store::open` found on a volume.
@@ -165,6 +168,7 @@ impl Store {
             next_table: header.next_table,
             stopped: false,
             spare: false,
+            looked: 0,
         };
         for page in 0..FIRST {
             store.set(page);
@@ -245,6 +249,10 @@ impl Store {
         self.stopped
     }
 
+    pub(crate) fn looked(&self) -> u64 {
+        self.looked
+    }
+
     pub(crate) fn volume(&self) -> &Volume {
         &self.volume
     }
@@ -323,6 +331,7 @@ impl Store {
         if page < FIRST || page >= self.pages {
             return Err(Error::Damaged(page));
         }
+        self.looked += 1;
         if let Some(data) = self.dirty.get(&page).or_else(|| self.cache.get(&page)) {
             return Ok(with(data));
         }
