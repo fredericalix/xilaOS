@@ -216,7 +216,26 @@ step that is finished and verified leaves this plan and enters the
 table of what is done, at the top of this chapter. A larger step is
 designed with the author before it is built.
 
-**In progress:** nothing. The next step is being chosen.
+### The phases under way
+
+Chosen by the author on 23 November 2026. The T430 is out of reach for
+now, so these phases are the ones that can be built and verified in
+QEMU alone; device interrupts and the drivers for recent PCs wait for
+a real machine. Each numbered step is merged once its unit tests and
+its checks in `tools/check.py` pass.
+
+| Phase | Content | State |
+|---|---|---|
+| 1. Loose ends | The small things that are off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing; `net ping` that does not hold the system | In progress |
+| 2. SQL | `IN`, `BETWEEN`, `NOT LIKE`, aggregates inside a calculation; a row reached by its `id` without reading the table; constraints and indexes; joins; a view of the log; `BEGIN` / `COMMIT` | Next |
+| 3. XilaScript | Parameters and names of a program's own; a task of its own for a program; an editor; `insert ... select`, the values of before, more rhythms | After 2 |
+| 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design and on the first outside code |
+| 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
+| 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
+
+**Waiting for the T430.** What these phases build is only verified in
+QEMU until it is tried there: the dead keys on the real keyboard, and
+`install` showing its progress on a real disk.
 
 ### Loose ends of what exists
 
