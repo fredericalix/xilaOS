@@ -96,7 +96,7 @@ The system is meant to grow in layers. Layer 0 (the base) and layer 1
 | 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet and TCP/IP only |
 | 4. Sound | Audio driver, mixing, MP3, ambiences | Not started |
 | 5. Applications | Spreadsheet, database front end, a HyperCard-like, mail, text web browser, IRC, HTTP server, a port of Doom | Not started |
-| 6. Agents | AI companions with their own access rights to the data | Not started |
+| 6. Agents | AI companions with their own access rights to the data | A first companion is under way, without access rights |
 | 7. Later | Wi-Fi, USB, RISC-V | Not started |
 
 ### The intentions behind it
@@ -211,10 +211,15 @@ QEMU alone; device interrupts and the drivers for recent PCs wait for
 a real machine. Each numbered step is merged once its unit tests and
 its checks in `tools/check.py` pass.
 
+On 26 November 2026 the author put a first AI companion ahead of the
+rest: it is the phase under way, and what is left of phase 2 waits for
+it. Its steps are [below](#the-companion).
+
 | Phase | Content | State |
 |---|---|---|
 | 1. Loose ends | The small things that were off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing | Done on 23 November 2026 |
-| 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Left: constraints and indexes, which change what is written on the disk; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | In progress |
+| The companion | A first AI companion: a screen to write to it, and its reactions to what happens in the system. Names (DNS), TLS and HTTPS first, since the model it speaks through is reached over the Internet | In progress |
+| 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Left: constraints and indexes, which change what is written on the disk; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | Waits for the companion |
 | 3. XilaScript | Parameters and names of a program's own; a task of its own for a program, and for the commands that wait (`net ping`, `net get`, `install from`); an editor; `insert ... select`, the values of before, more rhythms | After 2 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design and on the first outside code |
 | 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
@@ -224,6 +229,67 @@ its checks in `tools/check.py` pass.
 QEMU until it is tried there: the dead keys on the real keyboard,
 `install` showing its progress on a real disk, and `disk check` on a
 real disk.
+
+### The companion
+
+What the author decided on 26 November 2026:
+
+- **One companion to begin with**, with no narrow role, described by a
+  row of a table (its name, its character, what it is told). The four
+  of the first notes (a lookout, an archivist, a luthier, a doorkeeper)
+  would be more rows.
+- **It speaks through a model reached over the Internet**, by HTTPS.
+  So names and TLS are built into XilaOS itself, not left to another
+  machine on the way.
+- **It reads the tables and acts by itself**: it runs commands and
+  changes data without asking. Three things hold it: every action it
+  takes is a row of a table; a command stops it; `install`,
+  `disk erase`, `remote on` and `web on` are refused to it. Nothing
+  caps what it spends on the model.
+- **It reacts by itself** to changes in a table, to the state of the
+  system, to the clock, and when a XilaScript program calls it.
+- **It remembers**: its conversations and notes of its own are kept in
+  the database, as rows that SQL reads. No index of vectors: at the
+  size of one machine's notes it reads them, or searches them with
+  `like`. A column of vectors and a distance in SQL could come later.
+
+What has to be said with it: a companion that acts by itself follows
+what it reads, and any text of a table can steer it. Access lists do
+not exist yet to bound it; the three guards above are all there is.
+
+The steps, in order. Each is merged once verified:
+
+1. **Names.** DHCP asks for the name server; a question over UDP gives
+   the address of a name; `net get` takes a name.
+2. **TLS.** A client for TLS 1.3 only, written here as a machine fed
+   with bytes like `tcp.rs`, in a crate of its own (`tls/`) which holds
+   the first outside code of XilaOS: the algorithms (X25519,
+   ChaCha20-Poly1305, SHA-2, ECDSA on P-256 and P-384, RSA) from the
+   RustCrypto and dalek libraries, and the checking of certificates
+   from `rustls-webpki` against the public roots. Certificates are
+   checked against the machine's clock. No TLS 1.2, one cipher suite,
+   no asking whether a certificate was revoked, no session taken up
+   again. A machine whose processor has no source of chance of its own
+   does not start TLS.
+3. **HTTPS.** `net get https://...`, then a question with lines of its
+   own and a body, answers that come in chunks, and answers longer
+   than a kilobyte.
+4. **Longer texts, and waiting without holding the system.** A text
+   holds 48 characters today, and a command that waits for the network
+   holds everything.
+5. **The companion itself**: its screen, the conversation, reading the
+   tables.
+6. **Acting, notes, events.**
+
+A trial of step 2, thrown away afterwards, was run on 26 November
+2026: a real handshake with the model's server and one question to the
+model through it; servers with ECDSA and with RSA certificates;
+refusals of an expired certificate, of a wrong name and of a
+certificate nobody vouches for. Built for the kernel, it added about
+50 outside crates and 400 KB, and the calculations of one handshake
+took 26 ms in QEMU the first time and 7 ms after. Four of the crates
+have to be told not to use vector instructions, which the kernel is
+compiled without.
 
 ### Loose ends of what exists
 
@@ -385,8 +451,10 @@ author's agreement. The order that was agreed:
 - What exactly is taken from OS/400: typed objects, single-level
   storage, or both.
 - One user, or several.
-- Whether an agent may change data and act on the system, or only
-  read.
+- Where the key that opens the model to the companion is kept: there
+  is no vault for secrets, and the tables can be read from a browser
+  after `web on`.
+- Which states of the system are events the companion hears.
 - How a HyperCard-like is driven with the keyboard alone.
 - Where a tenth system view goes: the `data` plot of the city has
   room for nine.
