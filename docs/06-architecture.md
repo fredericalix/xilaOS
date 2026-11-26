@@ -141,7 +141,7 @@ storage engine allocates.
 | `clock.rs` | 251 | Dates and times from the battery clock. |
 | `keys.rs` | 237 | Scancodes to key events, `us` and `fr` layouts. |
 | `catalog.rs` | 208 | The system views: tables that show live state. |
-| `ask.rs` | 207 | One HTTP question over TCP. |
+| `ask.rs` | 658 | One HTTP question over TCP, plainly or through TLS, and its answer read whole. |
 | `text.rs` | 189 | `FixedStr<N>` and helpers. |
 | `line.rs` | 165 | The line editor. |
 | `term.rs` | 110 | A terminal: a scrollback of rows. |

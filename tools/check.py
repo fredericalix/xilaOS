@@ -980,17 +980,58 @@ import threading
 asked_of_us = []
 
 
+LONG = b"".join(b"line %d of a long page\n" % n for n in range(400))
+asked_by, sent_to_us = [], []
+
+
 class Served(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         asked_of_us.append((self.path, self.headers.get("Host")))
+        asked_by.append((self.request_version, self.headers.get("User-Agent")))
         if self.path == "/missing":
             self.send_response(404)
             self.end_headers()
             return
+        if self.path in ("/chunks", "/cut-chunks"):
+            # In chunks of every size, each after its length in hexadecimal,
+            # some with a note after the length; an empty one ends it, and
+            # lines may follow. Or no end at all: cut.
+            self.protocol_version = "HTTP/1.1"
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            at, size = 0, 1
+            while at < len(LONG):
+                piece = LONG[at:at + size]
+                self.wfile.write(b"%X%s\r\n" % (len(piece), b";note=%d" % size if size % 2 else b"") + piece + b"\r\n")
+                at, size = at + size, size * 3 % 997 + 1
+            if self.path == "/chunks":
+                self.wfile.write(b"0\r\nX-After: the last chunk\r\n\r\n")
+            return
         if self.path == "/long":
-            body = b"".join(b"line %d of a long page\n" % n for n in range(400))
+            body = LONG
         else:
             body = b"hello from the host\nyou asked for " + self.path.encode() + b"\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        if self.path == "/cut":
+            # says more than it gives
+            self.send_header("Content-Length", str(len(LONG) + 100))
+            body = LONG
+        elif self.path != "/to-the-end":
+            # (that one says no length: it ends when we hang up)
+            self.send_header("Content-Length", str(len(body)))
+        else:
+            body = LONG
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        text = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        sent_to_us.append((self.path, self.headers.get("Content-Type"), text))
+        body = b"you sent " + text + b"\nto " + self.path.encode() + b"\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
@@ -1019,7 +1060,22 @@ with Xila(net="e1000e") as x:
     ok, lines = x.cmd("net get http://%s/missing" % there)
     check("net get: what is not there is said so, and is a failure", not ok and lines == [there + " answered 404."], lines)
     ok, lines = x.cmd("net get %s/long" % there)
-    check("net get: of a long page the start is shown", lines[:2] == [there + " answered 200.", "line 0 of a long page"] and lines[-1] == "(and more)" and len(lines) == 10, lines)
+    whole = "(and more: %d bytes in all)" % len(LONG)
+    check("net get: of a long page the start is shown, and how long it is in all", lines[:2] == [there + " answered 200.", "line 0 of a long page"] and lines[-1] == whole and len(lines) == 10, lines)
+    check("net get: the question says what asks, in the HTTP of today", asked_by[0] == ("HTTP/1.1", "XilaOS/0.1"), asked_by[:1])
+    ok, lines = x.cmd("net get %s/chunks" % there)
+    check("net get: a page that comes in chunks is put together", ok and lines[:2] == [there + " answered 200.", "line 0 of a long page"] and lines[8:] == ["line 7 of a long page", whole], lines)
+    ok, lines = x.cmd("net get %s/to-the-end" % there)
+    check("net get: a page with no length said goes on until they hang up", ok and lines[:2] == [there + " answered 200.", "line 0 of a long page"] and lines[-1] == whole, lines)
+    ok, lines = x.cmd("net get %s/cut" % there)
+    check("net get: a page shorter than the length it said was cut", not ok and lines == [there + " hung up before it had said everything."], lines)
+    ok, lines = x.cmd("net get %s/cut-chunks" % there)
+    check("net get: and so was one whose chunks have no end", not ok and lines == [there + " hung up before it had said everything."], lines)
+    ok, lines = x.cmd("net post %s/notes 'big expense: ' || 2 * 21" % there)
+    check("net post: a text is sent to a page, and what the page says is shown", ok and lines == [there + " answered 200.", "you sent big expense: 42", "to /notes"], lines)
+    check("net post: the machine got the text, said to be plain text", sent_to_us == [("/notes", "text/plain", b"big expense: 42")], sent_to_us)
+    ok, lines = x.cmd("net post %s/notes" % there)
+    check("net post: wants a text", not ok and lines == ["Type net post, where, and a text: net post 192.168.1.20:8000/notes 'hello'"] and len(sent_to_us) == 1, lines)
     start = time.time()
     ok, lines = x.cmd("net get 10.0.2.2:1/")
     check("net get: a port nobody listens on does not answer, at once", lines == ["10.0.2.2:1 does not answer."] and time.time() - start < 2, (lines, time.time() - start))
@@ -1246,8 +1302,11 @@ if openssl:
             check("net get https: a page of the Internet, asked through TLS", ok and lines[0] == "example.com:443 answered 200." and len(lines) > 1, lines)
             ok, lines = x.cmd("net get https://www.debian.org/", timeout=40)
             check("net get https: one whose certificates are signed with RSA", re.fullmatch(r"www\.debian\.org:443 answered \d+\.", lines[0]), lines)
-            ok, lines = x.cmd("net get https://openrouter.ai/api/v1/models", timeout=40)
-            check("net get https: the server the companion will speak through", lines[0] == "openrouter.ai:443 answered 200.", lines)
+            ok, lines = x.cmd("net get https://openrouter.ai/api/v1/models", timeout=60)
+            long = re.fullmatch(r"\(and more: (\d+) bytes in all\)", lines[-1])
+            check("net get https: a long answer in chunks from the server the companion will speak through", lines[0] == "openrouter.ai:443 answered 200." and lines[1].startswith('{"data":[') and long and int(long.group(1)) > 100_000, (lines[:2], lines[-1]))
+            ok, lines = x.cmd("net post https://openrouter.ai/api/v1/chat/completions '{}'", timeout=40)
+            check("net post https: a question to the model without a key is refused by the model's server, in its own words", not ok and lines[0] == "openrouter.ai:443 answered 401." and len(lines) > 1 and "error" in lines[1], lines)
         else:
             print("skip  net get https: a page of the Internet (no name server of the Internet answers this machine)")
         check("net get https: the memory each conversation took is given back", [row for row in x.table("mem") if row["kind"] == "kernel heap in use"] == heap, heap)

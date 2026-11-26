@@ -439,7 +439,7 @@ task that ran it calls `serve` (`main.rs`) right after:
 | `Measure` | Times the drawing of a whole screen (`display test`). |
 | `Flip(..)`, `Light(..)`, `Chip {..}` | Graphics chip: two pictures in turn, brightness, reading its state. |
 | `Ping(ip)`, `NetRegisters`, `NetRestart` | Network card and stack. |
-| `Get(ip, port, secret)` | One HTTP question over TCP (`net get`), after finding the address of the machine if it was named; through TLS if asked, with keys drawn from the processor's source of chance (`arch::random`) and a client made on the heap for the time of the question. |
+| `Ask { to, port, secret, post }` | One HTTP question over TCP (`net get`, `net post`), after finding the address of the machine if it was named; through TLS if asked, with keys drawn from the processor's source of chance (`arch::random`) and a client made on the heap for the time of the question. |
 | `Name` | Finds the address of a machine by its name (`net name`). |
 | `Fetch(ip)` | Fetches a system by TFTP (`install from`). |
 | `Install { disk, whole }` | Writes XilaOS on a disk. |

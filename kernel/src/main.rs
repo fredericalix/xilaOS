@@ -595,9 +595,9 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
                 sys.chip = Some((chip::look(&card, generation), registers));
             }
         }
-        Some(Request::Get(to, port, secret)) => {
+        Some(Request::Ask { to, port, secret, post }) => {
             let got = match nic {
-                Some(nic) => get(sys, nic, to, port, secret),
+                Some(nic) => get(sys, nic, to, port, secret, post),
                 None => Err(ask::Failed::NoAnswer),
             };
             sys.got = Some((port, got));
@@ -682,13 +682,15 @@ fn named(sys: &mut System, nic: &mut e1000::Nic, start: u64) -> Result<xila_core
     }
 }
 
-/// Asks a machine for a page, and waits for its answer: how it went, and
-/// the start of what it said. The machine does nothing else meanwhile,
-/// five seconds at most, after the three at most that finding its
-/// address may take when it is asked by its name (`to` is then None).
-/// With `secret` it is asked through TLS: the client is made here, on
-/// the heap (it is 37 KB), and lives as long as the question.
-fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, port: u16, secret: bool) -> Result<(u16, FixedStr<640>), ask::Failed> {
+/// Asks a machine for a page, or with `post` sends it the text of
+/// `System::asked_text`, and waits for its answer: how it went, the
+/// start of what it said and how much it said in all. The machine does
+/// nothing else meanwhile: until the answer is whole, or until five
+/// seconds have passed without a byte, after the three at most that
+/// finding its address may take when it is asked by its name (`to` is
+/// then None). With `secret` it is asked through TLS: the client is made
+/// here, on the heap (it is 37 KB), and lives as long as the question.
+fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, port: u16, secret: bool, post: bool) -> Result<shell::Got, ask::Failed> {
     let start = arch::micros();
     // the time of the network, which stands still while a command is served
     let now = |sys: &System| sys.ticks + (arch::micros() - start) / 10_000;
@@ -709,10 +711,13 @@ fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, p
         Some(to) => to,
         None => named(sys, nic, start).map_err(ask::Failed::Name)?,
     };
-    let (machine, path) = (sys.asked_machine, sys.asked_path);
+    let (machine, path, text) = (sys.asked_machine, sys.asked_path, sys.asked_text);
     let place = ask::Place { machine: machine.bytes(), ip: Some(to), port, path: path.bytes(), secret };
+    let question = if post { ask::Question::post(text.bytes()) } else { ask::Question::GET };
     let at = now(sys);
-    let mut asking = ask::Ask::start(&mut sys.net.tcp, to, &place, b"GET", b"", at)?;
+    let mut asking = ask::Ask::start(&mut sys.net.tcp, to, &place, &question, at)?;
+    // the start of what they say is kept; the rest is counted
+    let mut start = [0u8; 640];
     let mut frame = [0u8; 2048];
     loop {
         while let Some(length) = nic.receive(&mut frame) {
@@ -722,11 +727,11 @@ fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, p
         }
         let at = now(sys);
         sys.net.tick(at, nic);
-        let step = asking.step(&mut sys.net.tcp, tls.as_deref_mut(), at);
+        let step = asking.step(&mut sys.net.tcp, tls.as_deref_mut(), &mut start, at);
         sys.net.speak(at, nic);
         match step {
             ask::Step::Going => core::hint::spin_loop(),
-            ask::Step::Done(status) => return Ok((status, FixedStr::from_bytes(asking.said()))),
+            ask::Step::Done(status) => return Ok(shell::Got { status, start: FixedStr::from_bytes(&start[..asking.kept]), total: asking.total }),
             ask::Step::Failed(why) => return Err(why),
         }
     }

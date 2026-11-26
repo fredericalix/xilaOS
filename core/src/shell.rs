@@ -592,19 +592,41 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         out.line(Style::Done, line.bytes());
         return true;
     }
-    if word.eq_ignore_ascii_case(b"get") {
-        // a page of another machine: the calling side of the network, tried by hand
-        let Some(place) = crate::ask::place(trim(rest)).filter(|place| place.path.len() <= 200) else {
-            out.line(Style::Error, b"Type net get and where to ask: net get 192.168.1.20:8000/page");
+    let post = word.eq_ignore_ascii_case(b"post");
+    if post || word.eq_ignore_ascii_case(b"get") {
+        // a page of another machine, or a text sent to one: the calling
+        // side of the network, tried by hand
+        let (place, text) = if post { split_word(trim(rest)) } else { (trim(rest), &b""[..]) };
+        let Some(place) = crate::ask::place(place).filter(|place| place.path.len() <= 200) else {
+            out.line(Style::Error, if post { b"Type net post, where, and a text: net post 192.168.1.20:8000/notes 'hello'" } else { b"Type net get and where to ask: net get 192.168.1.20:8000/page" });
             return false;
         };
+        // the text is a value: a 'text' between quotes, or a calculation
+        let mut said = Text::new();
+        if post {
+            let mut lexer = crate::sql::Lexer::new(text);
+            let names = crate::expr::Names::without(&sys.vars[sys.session], b"Put the text between quotes, or give a name that has a value, not: ");
+            let value = crate::expr::parse(&mut lexer, names).and_then(|text| lexer.end().map(|_| text)).and_then(|text| text.eval(&[crate::sql::Value::Null; TABLE_COLS]));
+            match value {
+                Ok(value) => said = value.shown(),
+                Err(_) if trim(text).is_empty() => {
+                    out.line(Style::Error, b"Type net post, where, and a text: net post 192.168.1.20:8000/notes 'hello'");
+                    return false;
+                }
+                Err(message) => {
+                    out.line(Style::Error, message.bytes());
+                    return false;
+                }
+            }
+        }
         if sys.net.ip.is_none() {
             out.line(Style::Error, b"This machine has no address on the network yet. Type net to see why.");
             return false;
         }
         sys.asked_machine = FixedStr::from_bytes(place.machine);
         sys.asked_path = FixedStr::from_bytes(place.path);
-        sys.request = Some(Request::Get(place.ip, place.port, place.secret));
+        sys.asked_text = said;
+        sys.request = Some(Request::Ask { to: place.ip, port: place.port, secret: place.secret, post });
         return true;
     }
     if arg.eq_ignore_ascii_case(b"registers") {
@@ -617,7 +639,7 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         return true;
     }
     if !arg.is_empty() {
-        out.line(Style::Error, b"After net: restart, registers, ping, get, name or names, and what they need.");
+        out.line(Style::Error, b"After net: restart, registers, ping, get, post, name or names, and what they need.");
         return false;
     }
     let mut t = Table::new(b"net", &[b"item", b"value"]);
@@ -775,6 +797,16 @@ pub enum InstallError {
     Database(xila_db::Error),
 }
 
+/// What a machine answered to `net get` or `net post`: the number that
+/// says how it went, the start of what it said, and how many bytes it
+/// said in all.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Got {
+    pub status: u16,
+    pub start: FixedStr<640>,
+    pub total: usize,
+}
+
 /// What a command asks the kernel to do once it has returned.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Request {
@@ -811,11 +843,12 @@ pub enum Request {
     /// it: answered in `System::fetched`.
     Fetch(crate::net::Ip),
     /// Ask the machine `System::asked_machine` for the page at
-    /// `System::asked_path`, on a port: answered in `System::got`. The
-    /// address is that of the machine, or none when it was written as a
-    /// name whose address is to be found first. The last says whether to
-    /// ask through TLS (`https://`).
-    Get(Option<crate::net::Ip>, u16, bool),
+    /// `System::asked_path`, on a port: answered in `System::got`. `to`
+    /// is the address of the machine, or none when it was written as a
+    /// name whose address is to be found first; `secret` says whether to
+    /// ask through TLS (`https://`); with `post`, `System::asked_text`
+    /// is sent to the page instead of only asking for it.
+    Ask { to: Option<crate::net::Ip>, port: u16, secret: bool, post: bool },
     /// Find the address of the machine named `System::asked_machine`:
     /// answered in `System::named`.
     Name,
@@ -937,7 +970,8 @@ pub struct System {
     /// it went and the start of what was said.
     pub asked_machine: crate::dns::Name,
     pub asked_path: FixedStr<200>,
-    pub got: Option<(u16, Result<(u16, FixedStr<640>), crate::ask::Failed>)>,
+    pub asked_text: Text,
+    pub got: Option<(u16, Result<Got, crate::ask::Failed>)>,
     /// The kernel's answer to `Request::Name`: the address of
     /// `asked_machine`.
     pub named: Option<Result<crate::net::Ip, crate::dns::Failed>>,
@@ -1029,6 +1063,7 @@ impl System {
             fetched: None,
             asked_machine: FixedStr::new(),
             asked_path: FixedStr::new(),
+            asked_text: Text::new(),
             got: None,
             named: None,
             last: [[Text::new(); TABLE_ROWS]; crate::events::SESSIONS],
@@ -1142,7 +1177,7 @@ const HELP_COMMANDS: [&[u8]; 34] = [
     b"   devices                    - The parts of the machine, and which are driven.",
     b"   disk [check|erase]         - Where the tables are; reads all; takes a disk.",
     b"   install [n|system|from a]  - Puts XilaOS on a disk; from: fetches it first.",
-    b"   net [ping a|get p|name n]  - The network: card, cable, address. Pings; asks.",
+    b"   net [ping|get|post|name]   - The network: card, cable, address. Pings; asks.",
     b"   remote [on|off]            - Opens this prompt to the local network.",
     b"   web [on|off]               - Shows the tables to browsers of that network.",
     b"   screen [n]                 - Lists the screens, or shows screen n.",
@@ -2092,7 +2127,7 @@ fn answers(sys: &mut System, out: &mut dyn Out) {
         line.push_bytes(sys.asked_machine.bytes());
         let _ = write!(line, ":{port}");
         match got {
-            Ok((status, said)) => {
+            Ok(Got { status, start: said, total }) => {
                 let _ = write!(line, " answered {status}.");
                 out.line(if status < 400 { Style::Done } else { Style::Error }, line.bytes());
                 // the start of what it said, as text: shown, never run
@@ -2105,8 +2140,10 @@ fn answers(sys: &mut System, out: &mut dyn Out) {
                     }
                     out.line(Style::Out, shown.bytes());
                 }
-                if rows.next().is_some() {
-                    out.line(Style::Out, b"(and more)");
+                if rows.next().is_some() || total > said.len() {
+                    let mut more = FixedStr::<COLS>::new();
+                    let _ = write!(more, "(and more: {total} bytes in all)");
+                    out.line(Style::Out, more.bytes());
                 }
             }
             // its address was not found: nothing was asked of it
@@ -2119,6 +2156,8 @@ fn answers(sys: &mut System, out: &mut dyn Out) {
                     Failed::NoAnswer | Failed::Name(_) | Failed::Secret(_) | Failed::NoChance | Failed::NoClock => b" does not answer.",
                     Failed::Silent => b" took the call and then said nothing.",
                     Failed::NotAnAnswer => b" answered something that is not a page.",
+                    Failed::Cut => b" hung up before it had said everything.",
+                    Failed::TooLong => b" says more than XilaOS listens to: given up.",
                 });
                 out.line(Style::Error, line.bytes());
             }
@@ -3194,7 +3233,8 @@ pub mod tests {
             assert_eq!(run_line(&mut sys, wrong).1.lines, ["Type net get and where to ask: net get 192.168.1.20:8000/page"], "{wrong}");
         }
         assert!(run_line(&mut sys, "net get http://192.168.1.20:8000/notes/1").0);
-        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Get(Some([192, 168, 1, 20]), 8000, false)), &b"192.168.1.20"[..], &b"/notes/1"[..]));
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Ask { to: Some([192, 168, 1, 20]), port: 8000, secret: false, post: false }), &b"192.168.1.20"[..], &b"/notes/1"[..]));
+        let whole = |status, text: &[u8]| Ok(Got { status, start: FixedStr::from_bytes(text), total: text.len() });
         let said = |sys: &mut System, got| {
             sys.got = Some((8000, got));
             let mut out = Lines::default();
@@ -3202,17 +3242,36 @@ pub mod tests {
             assert_eq!(served(sys, &mut out), out.errors == 0);
             (out.errors, out.lines)
         };
-        let text = FixedStr::from_bytes(b"first line\r\n\r\n<b>second</b> \x07\xe9\n3\n4\n5\n6\n7\n8\n9\n");
-        assert_eq!(said(&mut sys, Ok((200, text))), (0, vec!["192.168.1.20:8000 answered 200.".to_string(), "first line".to_string(), "<b>second</b> ??".to_string(), "3".to_string(), "4".to_string(), "5".to_string(), "6".to_string(), "7".to_string(), "8".to_string(), "(and more)".to_string()]));
-        assert_eq!(said(&mut sys, Ok((404, FixedStr::new()))), (1, vec!["192.168.1.20:8000 answered 404.".to_string()]));
+        let text = b"first line\r\n\r\n<b>second</b> \x07\xe9\n3\n4\n5\n6\n7\n8\n9\n";
+        assert_eq!(said(&mut sys, whole(200, text)), (0, vec!["192.168.1.20:8000 answered 200.".to_string(), "first line".to_string(), "<b>second</b> ??".to_string(), "3".to_string(), "4".to_string(), "5".to_string(), "6".to_string(), "7".to_string(), "8".to_string(), format!("(and more: {} bytes in all)", text.len())]));
+        // more was said than the start that was kept: how much in all
+        assert_eq!(said(&mut sys, Ok(Got { status: 200, start: FixedStr::from_bytes(b"one\ntwo\n"), total: 425_702 })), (0, vec!["192.168.1.20:8000 answered 200.".to_string(), "one".to_string(), "two".to_string(), "(and more: 425702 bytes in all)".to_string()]));
+        assert_eq!(said(&mut sys, whole(404, b"")), (1, vec!["192.168.1.20:8000 answered 404.".to_string()]));
+        assert_eq!(said(&mut sys, Err(crate::ask::Failed::Cut)), (1, vec!["192.168.1.20:8000 hung up before it had said everything.".to_string()]));
+        assert_eq!(said(&mut sys, Err(crate::ask::Failed::TooLong)), (1, vec!["192.168.1.20:8000 says more than XilaOS listens to: given up.".to_string()]));
         assert_eq!(said(&mut sys, Err(crate::ask::Failed::NoAnswer)), (1, vec!["192.168.1.20:8000 does not answer.".to_string()]));
         // a machine asked by its name: the kernel finds its address first
         assert!(run_line(&mut sys, "net get Example.org:8000/notes/1").0);
-        assert_eq!((sys.request.take(), sys.asked_machine.bytes()), (Some(Request::Get(None, 8000, false)), &b"Example.org"[..]));
-        assert_eq!(said(&mut sys, Ok((200, FixedStr::from_bytes(b"hello")))), (0, vec!["Example.org:8000 answered 200.".to_string(), "hello".to_string()]));
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes()), (Some(Request::Ask { to: None, port: 8000, secret: false, post: false }), &b"Example.org"[..]));
+        assert_eq!(said(&mut sys, whole(200, b"hello")), (0, vec!["Example.org:8000 answered 200.".to_string(), "hello".to_string()]));
         // through TLS: said by https:// before the place
         assert!(run_line(&mut sys, "net get https://openrouter.ai/api/v1/models").0);
-        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Get(None, 443, true)), &b"openrouter.ai"[..], &b"/api/v1/models"[..]));
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Ask { to: None, port: 443, secret: true, post: false }), &b"openrouter.ai"[..], &b"/api/v1/models"[..]));
+        // a text sent to a page: a value, as for notify
+        for wrong in ["net post", "net post 192.168.1.20:8000/notes", "net post 192.168.1 'hello'", "net post 'hello'"] {
+            let (ok, out) = run_line(&mut sys, wrong);
+            assert!(!ok && sys.request.is_none(), "{wrong}");
+            assert_eq!(out.lines, ["Type net post, where, and a text: net post 192.168.1.20:8000/notes 'hello'"], "{wrong}");
+        }
+        assert_eq!(run_line(&mut sys, "net post 192.168.1.20/notes hello").1.lines, ["Put the text between quotes, or give a name that has a value, not: hello"]);
+        assert!(run_line(&mut sys, "net post https://Example.org/notes 'big expense: ' || 2 * 21").0);
+        assert_eq!(
+            (sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes(), sys.asked_text.bytes()),
+            (Some(Request::Ask { to: None, port: 443, secret: true, post: true }), &b"Example.org"[..], &b"/notes"[..], &b"big expense: 42"[..])
+        );
+        assert!(run_line(&mut sys, "net post 192.168.1.20/notes ''").0);
+        assert_eq!((sys.request.take(), sys.asked_text.bytes()), (Some(Request::Ask { to: Some([192, 168, 1, 20]), port: 80, secret: false, post: true }), &b""[..]));
+        sys.asked_machine = FixedStr::from_bytes(b"openrouter.ai");
         use crate::ask::Failed as NoPage;
         use xila_tls::{Error as NoSecret, Refused};
         let mut unsure = vec![NoPage::NoChance, NoPage::NoClock];
@@ -3265,7 +3324,7 @@ pub mod tests {
         let long = "a.".repeat(crate::dns::NAME / 2 - 1) + "fr";
         assert!(run_line(&mut sys, &format!("net get {long}:65000/")).0);
         sys.request = None;
-        sys.got = Some((65000, Ok((200, FixedStr::new()))));
+        sys.got = Some((65000, Ok(Got { status: 200, start: FixedStr::new(), total: 0 })));
         let mut out = Lines::default();
         served(&mut sys, &mut out);
         assert_eq!(out.lines, [format!("{long}:65000 answered 200.")]);
@@ -3289,7 +3348,7 @@ pub mod tests {
         assert_eq!(run_line(&mut sys, "net").1.lines[7], "   name server           9.9.9.9, set by hand");
         assert_eq!(run_line(&mut sys, "net names 10.0.2.2:5300").1.lines, ["Names are now asked of 10.0.2.2:5300."]);
         assert_eq!(run_line(&mut sys, "net").1.lines[7], "   name server           10.0.2.2:5300, set by hand");
-        assert_eq!(run_line(&mut sys, "net status").1.lines, ["After net: restart, registers, ping, get, name or names, and what they need."]);
+        assert_eq!(run_line(&mut sys, "net status").1.lines, ["After net: restart, registers, ping, get, post, name or names, and what they need."]);
         let mut read = [("CTRL", 0, 0x0018_0240); NET_REGISTERS];
         read[1] = ("STATUS", 8, 0x0008_0083);
         sys.net_registers = Some(read);

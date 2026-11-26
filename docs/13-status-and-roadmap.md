@@ -40,14 +40,15 @@ were also tried on the real machine.
 | Ethernet (Intel e1000 family), ARP, IPv4, ICMP, UDP, DHCP | yes | yes, after five trials |
 | Names (DNS): `net name`, `net names`, `net get` by name | yes | not tried |
 | TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | not tried |
+| HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 26 November 2026: about 29,500 lines, 264
-unit tests, 395 system checks.
+about 300 system checks. On 26 November 2026: about 29,500 lines, 270
+unit tests, 404 system checks.
 
 ## Known limits of what is done
 
@@ -265,7 +266,7 @@ What has to be said with it: a companion that acts by itself follows
 what it reads, and any text of a table can steer it. Access lists do
 not exist yet to bound it; the three guards above are all there is.
 
-The steps, in order. Each is merged once verified. Two were done on
+The steps, in order. Each is merged once verified. Three were done on
 26 November 2026:
 
 - **Names**: DHCP asks for the name server, a question over UDP gives
@@ -277,15 +278,18 @@ The steps, in order. Each is merged once verified. Two were done on
   whose processor has no source of chance of its own asks nothing
   through TLS. What it does and does not make sure of is in
   [Networking](10-networking.md#security).
+- **HTTP as a service of the Internet speaks it**: a question with
+  lines of its own (a key) and bytes that go along, answers that come
+  in chunks, answers of any length up to 4 MB, and an answer that was
+  cut short known from a whole one. `net post` tries it by hand; a
+  megabyte from the model's server is read in a quarter of a second.
 
 What is left:
 
-3. **HTTPS for a program.** A question with lines of its own and a
-   body, answers that come in chunks, and answers longer than a
-   kilobyte: what speaking to the model needs beyond `net get`.
 4. **Longer texts, and waiting without holding the system.** A text
    holds 48 characters today, and a command that waits for the network
-   holds everything.
+   holds everything: a model that thinks for half a minute would stop
+   the machine for half a minute.
 5. **The companion itself**: its screen, the conversation, reading the
    tables.
 6. **Acting, notes, events.**

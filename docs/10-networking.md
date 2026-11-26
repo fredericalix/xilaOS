@@ -17,7 +17,7 @@ XilaOS has a small network stack of its own, written for it, with no heap and no
 | DNS | Client only: asks the name server for the IPv4 address of a name, over UDP, and keeps the answer for as long as it says. Eight names remembered. | `core/src/dns.rs` |
 | TCP | Both sides: listens and calls. Eight conversations at once, four ports listened on. No out-of-order reassembly, no window scaling, no selective acknowledgement. | `core/src/tcp.rs` |
 | TLS | Client only, version 1.3 only: one key exchange (X25519), one cipher (ChaCha20-Poly1305), certificates signed with ECDSA or RSA, checked against the authorities browsers trust. | `tls/` |
-| HTTP, asking | One `GET` (the code can also write a `POST`), HTTP/1.0, plainly or through TLS, the first kilobyte of the answer is kept. | `core/src/ask.rs` |
+| HTTP, asking | One question, `GET` or `POST` with lines and bytes of the asker's own, HTTP/1.1, plainly or through TLS. The answer is read whole, whether it says its length, comes in chunks or ends when the machine hangs up, up to 4 MB; what is cut short is known to be. | `core/src/ask.rs` |
 | HTTP, serving | Read-only pages of the tables, one browser at a time. | `core/src/web.rs` |
 | Remote prompt | One command per UDP message on port 4000. | `core/src/remote.rs`, `tools/remote.py` |
 | TFTP | Client only, for one file: the system. | `core/src/tftp.rs` |
@@ -156,22 +156,12 @@ XilaOS|all:/>net get 10.0.2.2:55485/missing
 </head>
 <body>
 <h1>Error response</h1>
-(and more)
+(and more: 335 bytes in all)
 XilaOS|all:/>net get 10.0.2.2:1/
 10.0.2.2:1 does not answer.
 ```
 
-What comes back is shown and never run. The other failures say `took the call and then said nothing`, `answered something that is not a page`, or `cannot be asked now: too many conversations at once`. A machine that has not finished answering after five seconds is given up.
-
-With `https://` before the place, the page is asked through TLS, on port 443 if none is said. Nobody on the way can read the question or the answer, and the machine has proved it is the one that was named:
-
-```
-XilaOS|all:/>net get https://example.com/
-example.com:443 answered 200.
-<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data
-```
-
-When that cannot be made sure of, nothing is asked, and one line says why: `No authority that XilaOS trusts vouches for that machine's certificate.`, `That machine showed the certificate of another: it is not who was asked.`, `That machine's certificate is out of date, by the clock of this one.`, `That machine only speaks a TLS older than 1.3, which XilaOS does not.`, `That machine and XilaOS have no way in common of keeping a secret.`, `That machine does not speak TLS there, or not as TLS is spoken.`, and a few more of the same kind. On a processor with no source of chance of its own, `This processor has no source of chance: nothing here can be kept secret.`: the boot log says which it is, on its `Chance` line.
+What comes back is shown and never run: its first eight lines, and how many bytes it was in all when that is more. The whole answer is read, however long (up to 4 MB) and in whichever of the three ways HTTP ends one: after a length that was said, in chunks, or when the machine hangs up. The other failures say `took the call and then said nothing`, `answered something that is not a page`, `hung up before it had said everything` (an answer shorter than the length it said, or whose chunks have no end), `says more than XilaOS listens to: given up`, or `cannot be asked now: too many conversations at once`. A machine that stays silent for five seconds is given up.
 
 With a name in place of the address, the address is found first, as `net name` does, and the machine is told the name it was asked by, since one address may serve the pages of several names. When the address is not found, nothing is asked and the line says why, as `net name` would. Here a name server on the host knows the host as `xila.test`:
 
@@ -183,6 +173,52 @@ this page is served by python3 -m http.server
 XilaOS|all:/>net get no-such-machine.example/
 The name server knows no machine of that name.
 ```
+
+### net post
+
+Sends a text to a page of another machine and shows what the page says, as `net get` does. The text is a value, as for `notify`: between quotes, or a calculation.
+
+```
+XilaOS|all:/>net post 10.0.2.2:55485/notes 'hello'
+10.0.2.2:55485 answered 501.
+<!DOCTYPE HTML>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error response</title>
+</head>
+<body>
+<h1>Error response</h1>
+(and more: 357 bytes in all)
+```
+
+(That server only gives files, and says so.) The text is said to be plain text, and is 48 characters at most, like every text today. It is the calling side tried by hand: what XilaOS itself will send, to a model or to a webhook, goes through the same code with lines of its own (a key, the kind of what is sent) and as many bytes as it likes.
+
+### Through TLS
+
+With `https://` before the place, the page is asked through TLS, on port 443 if none is said. Nobody on the way can read the question or the answer, and the machine has proved it is the one that was named:
+
+```
+XilaOS|all:/>net get https://example.com/
+example.com:443 answered 200.
+<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data
+```
+
+When that cannot be made sure of, nothing is asked, and one line says why: `No authority that XilaOS trusts vouches for that machine's certificate.`, `That machine showed the certificate of another: it is not who was asked.`, `That machine's certificate is out of date, by the clock of this one.`, `That machine only speaks a TLS older than 1.3, which XilaOS does not.`, `That machine and XilaOS have no way in common of keeping a secret.`, `That machine does not speak TLS there, or not as TLS is spoken.`, and a few more of the same kind. On a processor with no source of chance of its own, `This processor has no source of chance: nothing here can be kept secret.`: the boot log says which it is, on its `Chance` line.
+
+`net post` goes through TLS in the same way. To the server the companion will speak through, without a key:
+
+```
+XilaOS|all:/>net post https://openrouter.ai/api/v1/chat/completions '{}'
+openrouter.ai:443 answered 401.
+{"error":{"message":"No cookie auth credentials found","code":401}}
+XilaOS|all:/>net get https://openrouter.ai/api/v1/models
+openrouter.ai:443 answered 200.
+{"data":[{"id":"inclusionai/lingsante-3.1-air-vl","canonical_slug":"inclusionai
+(and more: 926852 bytes in all)
+```
+
+That last answer, almost a megabyte in chunks under TLS, took a quarter of a second in QEMU.
 
 ### remote: the prompt from another computer
 
@@ -315,7 +351,15 @@ The DHCP client asks after 2, 4, then every 8 seconds until it is offered an add
 
 The card raises no interrupt. The interface task, the one that also reads the keyboard and redraws the screen, calls `network` in `kernel/src/main.rs` at each pass of its loop: it takes up to 32 frames from the card, gives each to `Net::receive`, then calls `Net::tick`. A packet therefore waits up to a hundredth of a second. If one of the messages is a command for the remote prompt, it is run there and then, exactly as the serial task runs a line. Then `web::step` does a little of the pages' work and `Net::speak` sends what TCP has ready.
 
-Commands that wait for the network (`net ping`, `net name`, `net get`, `install from`) run their own loop of the same kind while the command is served, holding the system for up to one second, three seconds, five seconds (after the three of a name) and one minute respectively.
+Commands that wait for the network (`net ping`, `net name`, `net get` and `net post`, `install from`) run their own loop of the same kind while the command is served, holding the system for up to one second, three seconds, as long as the answer keeps coming (five seconds of silence end it, after the three of a name), and one minute respectively.
+
+### Asking
+
+`core/src/ask.rs` asks one question and reads one answer. `Ask::start` calls the machine and writes the first lines of the question: what is asked (`GET /path HTTP/1.1`), of whom (`Host`), by what (`User-Agent: XilaOS/0.1`), that one answer is all that is wanted (`Connection: close`), the asker's own lines if it has any, and the length and kind of the bytes that go along. `Ask::step`, called again and again, says what is not said yet and reads what has come, plainly or through the TLS client it is given.
+
+The answer is read as it arrives, a line at a time until what was asked for begins, with no buffer for the lines before it: only the number of the first line, the length and whether it comes in chunks are kept. What was asked for is then written, without lengths and chunk marks, into the buffer the caller gives, as far as that has room; the rest is counted (`kept`, `total`). So `net get` keeps 640 bytes and shows eight lines of a megabyte, and whoever needs all of an answer gives the room for it.
+
+An answer that ends before the length it said, or before the empty chunk, is a failure (`Failed::Cut`). One that says no length ends when the machine hangs up: asked plainly that is taken as the end; through TLS only if the machine said under seal that it had finished, since anyone on the way can cut a conversation.
 
 ### TLS
 
@@ -476,7 +520,8 @@ Every frame that goes by is kept in `build/net.pcap`. `tools/check.py` reads tha
 - One card, one address, one gateway. No IPv6, no fragments.
 - Names: IPv4 addresses only, one question at a time, names of 56 characters at most, no answers over TCP, and nothing that proves who answered.
 - A packet waits up to 10 ms for the next tick; throughput is whatever 100 passes per second and a 1 KB receive window allow. This is enough for pages of tables and a 1 MB kernel, and not meant for more.
-- `net ping`, `net name`, `net get` and `install from` hold the whole system while they wait.
+- `net ping`, `net name`, `net get`, `net post` and `install from` hold the whole system while they wait.
 - TCP is only used by the kernel's own `web` and `net get`; the language has no way to open a conversation.
 - The parts specific to the 82579 ran on a single T430. The driver has never met another real card.
-- Encryption only where XilaOS calls (`net get https://`), never where it is called (`remote`, `web`). TLS 1.3 only, one cipher, no revocation, and of an answer only the first kilobyte.
+- Encryption only where XilaOS calls (`net get https://`), never where it is called (`remote`, `web`). TLS 1.3 only, one cipher, no revocation.
+- Asking: one question for one conversation, no answer kept by the way (no cache, no following a "moved to" answer), nothing compressed, 4 MB at most.
