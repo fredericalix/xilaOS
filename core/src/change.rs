@@ -5,6 +5,8 @@
 //!     type: int, decimal, decimal(p,s), text
 //!     rule: NOT NULL, UNIQUE, DEFAULT value, CHECK (condition)
 //! DROP TABLE name
+//! CREATE INDEX ON name (column)
+//! DROP INDEX ON name (column)
 //! INSERT INTO name [(column, ...)] VALUES (value, ...) [, (value, ...)]
 //! UPDATE name SET column = value [, ...] [WHERE ...]
 //! DELETE FROM name [WHERE ...]
@@ -112,7 +114,7 @@ fn stored(db: &Database, name: &[u8]) -> Result<Schema, Message> {
 
 /// Turns a value into a field of a column, or says why the column does
 /// not take it.
-fn field<'a>(schema: &Schema, column: usize, value: &'a Value) -> Result<Field<'a>, Message> {
+pub(crate) fn field<'a>(schema: &Schema, column: usize, value: &'a Value) -> Result<Field<'a>, Message> {
     let name = schema.columns[column].bytes();
     let wrong = |what: &[u8]| {
         let mut message = error(b"Column ", name);
@@ -400,7 +402,73 @@ pub fn written(db: &Database, name: &[u8], out: &mut dyn crate::shell::Out) -> b
         out.line(crate::shell::Style::Out, line.bytes());
     }
     out.line(crate::shell::Style::Out, b")");
+    // the indexes that are not those of a column that takes no value twice
+    for column in table.columns.iter().filter(|column| column.indexed() && !column.unique) {
+        line.clear();
+        line.push_bytes(b"create index on ");
+        line.push_bytes(&table.name);
+        line.push_bytes(b" (");
+        line.push_bytes(&column.name);
+        line.push(b')');
+        out.line(crate::shell::Style::Out, line.bytes());
+    }
     true
+}
+
+/// `CREATE INDEX ON table (column)` and `DROP INDEX ON table (column)`.
+/// An index has no name of its own: a column has one, or has none.
+fn index(db: &mut Database, lexer: &mut Lexer, make: bool) -> Result<Done, Message> {
+    if !lexer.keyword(b"on") {
+        return Err(match lexer.peek() {
+            Token::Word(_) => Message::from_bytes(b"An index has no name: create index on t (c), drop index on t (c)."),
+            other => unexpected(b"ON", other),
+        });
+    }
+    let schema = stored(db, lexer.word(b"a table")?)?;
+    lexer.expect(b"(")?;
+    let column = schema.column(lexer.word(b"a column")?)?;
+    if lexer.peek() == Token::Symbol(b",") {
+        return Err(Message::from_bytes(b"An index is on one column."));
+    }
+    lexer.expect(b")")?;
+    lexer.end()?;
+    let table = schema.table - catalog::TABLES.len();
+    let (unique, indexed) = (db.tables()[table].columns[column].unique, schema.indexed[column]);
+    let mut message = Message::new();
+    let place = |message: &mut Message| {
+        let _ = write!(message, "{} ({})", schema.name, schema.columns[column]);
+    };
+    match (make, indexed) {
+        _ if column == 0 => return Err(Message::from_bytes(b"id needs no index: the rows are kept in its order.")),
+        (true, true) => {
+            place(&mut message);
+            message.push_bytes(b" has an index already.");
+            return Err(message);
+        }
+        (false, false) => {
+            place(&mut message);
+            message.push_bytes(b" has no index.");
+            return Err(message);
+        }
+        (false, true) if unique => {
+            let _ = write!(message, "Column {} takes no value twice: its index stays with it.", schema.columns[column]);
+            return Err(message);
+        }
+        (true, false) => {
+            db.index(table, column).map_err(|e| engine_error(e, Some(&schema)))?;
+            message.push_bytes(b"Index made on ");
+            place(&mut message);
+            let rows = db.tables()[table].rows();
+            let _ = write!(message, ", from {rows} row{}.", if rows == 1 { "" } else { "s" });
+        }
+        (false, true) => {
+            db.unindex(table, column).map_err(|e| engine_error(e, Some(&schema)))?;
+            message.push_bytes(b"Index removed from ");
+            place(&mut message);
+            message.push(b'.');
+        }
+    }
+    Ok(Done { message, table: schema.name, event: None })
 }
 
 fn drop(db: &mut Database, lexer: &mut Lexer) -> Result<Done, Message> {
@@ -632,7 +700,10 @@ fn delete(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
 pub fn target(statement: &[u8]) -> Option<&[u8]> {
     let mut lexer = Lexer::new(statement);
     let verb = lexer.word(b"a statement").ok()?;
+    let makes = verb.eq_ignore_ascii_case(b"create") || verb.eq_ignore_ascii_case(b"drop");
     let before: &[u8] = match verb.len() {
+        // an index is a change to its table
+        _ if makes && lexer.keyword(b"index") => b"on",
         6 if verb.eq_ignore_ascii_case(b"create") => b"table",
         4 if verb.eq_ignore_ascii_case(b"drop") => b"table",
         6 if verb.eq_ignore_ascii_case(b"insert") => b"into",
@@ -663,6 +734,8 @@ pub fn change_with(db: &mut Database, vars: &Vars, statement: &[u8], changed: &m
     }
     let table = |lexer: &mut Lexer| if lexer.keyword(b"table") { Ok(()) } else { Err(unexpected(b"TABLE", lexer.peek())) };
     let done = match lower.bytes() {
+        b"create" if lexer.keyword(b"index") => index(db, &mut lexer, true),
+        b"drop" if lexer.keyword(b"index") => index(db, &mut lexer, false),
         b"create" => table(&mut lexer).and_then(|_| create(db, &mut lexer)),
         b"drop" => table(&mut lexer).and_then(|_| drop(db, &mut lexer)),
         b"insert" => insert(db, &mut lexer, vars),
@@ -818,6 +891,146 @@ mod tests {
         assert_eq!(out.lines, ["tasks is a view of the system and cannot be changed.", "Unknown table: nowhere. Type tables to list them."]);
     }
 
+    /// Two thousand four hundred visits, to five towns, with a year that
+    /// four of them share, a cost each and a few words: a table of some
+    /// fifty pages.
+    fn visits() -> System {
+        let mut sys = System::new();
+        run(&mut sys, &["create table visits (town text, year int, cost decimal(8,2), words text)"]);
+        let towns = ["paris", "parma", "paris, texas", "oslo", "lima"];
+        for batch in 0..300 {
+            let rows: Vec<String> = (batch * 8..batch * 8 + 8).map(|n| format!("('{}', {}, {}, 'a few words about visit number {n:<6}')", towns[n % 5], 1990 + n % 600, n as f64 * 1.25)).collect();
+            assert_eq!(run(&mut sys, &[&format!("insert into visits values {}", rows.join(", "))]).split(' ').next(), Some("8"));
+        }
+        sys
+    }
+
+    /// What a query gives, and the pages it read to give it.
+    fn cost(sys: &System, query: &str) -> (Vec<String>, u64) {
+        let before = sys.db.storage().looked;
+        let found = rows(sys, query);
+        (found, sys.db.storage().looked - before)
+    }
+
+    #[test]
+    fn a_query_goes_to_its_rows_by_an_index_and_gives_the_same_ones() {
+        let mut sys = visits();
+        let queries = [
+            "select id from visits where year = 2000",
+            "select count(*), min(id), max(id) from visits where year between 2000 and 2002",
+            "select id from visits where year in (1991, 2029) and town = 'oslo'",
+            "select count(*) from visits where year > 2588",
+            "select count(*) from visits where 1995 >= year",
+            "select count(*) from visits where year > 5000",
+            "select count(*) from visits where town = 'paris'",
+            "select count(*) from visits where town = 'paris, texas' and cost > 100",
+            "select count(*) from visits where town = 'nowhere'",
+            "select id, town from visits where cost = 12.5",
+            "select id from visits where cost = 100",
+            "select count(*) from visits where cost = 12.505",
+            "select count(*) from visits where year = null",
+            "select count(*) from visits where year = 2000 or town = 'lima'",
+        ];
+        let whole: Vec<(Vec<String>, u64)> = queries.iter().map(|query| cost(&sys, query)).collect();
+        assert_eq!(whole[0].0, ["11", "611", "1211", "1811"]);
+        assert_eq!(whole[9].0, ["11|paris"]);
+        assert_eq!(run(&mut sys, &["create index on visits (year)"]), "Index made on visits (year), from 2400 rows.");
+        assert_eq!(run(&mut sys, &["create index on visits (town)"]), "Index made on visits (town), from 2400 rows.");
+        assert_eq!(run(&mut sys, &["create index on visits (cost)"]), "Index made on visits (cost), from 2400 rows.");
+        let by: Vec<(Vec<String>, u64)> = queries.iter().map(|query| cost(&sys, query)).collect();
+        for ((query, whole), by) in queries.iter().zip(&whole).zip(&by) {
+            assert_eq!(whole.0, by.0, "{query}");
+        }
+        // a value few rows have is found by reading a few pages, not the table
+        for at in [0, 1, 3, 5, 8, 9, 10, 12] {
+            assert!(by[at].1 * 3 < whole[at].1, "{}: {} pages by the index, {} without", queries[at], by[at].1, whole[at].1);
+        }
+        // what an index cannot tell reads the table as before: `or`, a value
+        // the column does not keep; and so does a value that a fifth of
+        // the rows have, or the years from the first to the last of a
+        // list, give or take the pages that said so
+        assert_eq!((by[11].1, by[13].1), (whole[11].1, whole[13].1));
+        for at in [2, 4, 6, 7] {
+            assert!(by[at].1 <= whole[at].1 + 4, "{}: {} pages by the index, {} without", queries[at], by[at].1, whole[at].1);
+        }
+        // a wrong comparison is still said
+        let said = crate::sql::select(&sys, b"select id from visits where town = 5").err().map(|message| String::from_utf8_lossy(message.bytes()).into_owned());
+        assert_eq!(said.as_deref(), Some("A number and a text cannot be compared."));
+        // the indexes follow what changes
+        assert_eq!(run(&mut sys, &["update visits set year = 1, town = 'rome' where id = 11"]), "1 row changed in visits.");
+        assert_eq!(run(&mut sys, &["delete from visits where id = 611"]), "1 row removed from visits.");
+        assert_eq!(run(&mut sys, &["insert into visits values ('rome', 2000, 1, null)"]), "1 row added to visits, with id 2401.");
+        assert_eq!(rows(&sys, "select id from visits where year = 2000"), ["1211", "1811", "2401"]);
+        assert_eq!(rows(&sys, "select id, year from visits where town = 'rome'"), ["11|1", "2401|2000"]);
+        assert_eq!(sys.db.verify(), Ok(()));
+        // a table says its indexes
+        let mut out = crate::shell::tests::Lines::default();
+        assert!(written(&sys.db, b"visits", &mut out));
+        assert_eq!(out.lines[5..], [")", "create index on visits (town)", "create index on visits (year)", "create index on visits (cost)"]);
+        assert_eq!(rows(&sys, "select name, index from columns where table_name = 'visits'"), ["id|", "town|yes", "year|yes", "cost|yes", "words|"]);
+        // without it the query reads the table again, and says the same
+        assert_eq!(run(&mut sys, &["drop index on visits (year)"]), "Index removed from visits (year).");
+        let (found, read) = cost(&sys, "select count(*) from visits where year > 5000");
+        assert_eq!((found, read), (vec!["0".to_string()], whole[5].1));
+    }
+
+    #[test]
+    fn a_join_finds_the_rows_beside_by_an_index() {
+        let mut sys = visits();
+        run(&mut sys, &["create table towns (name text unique, people int)"]);
+        run(&mut sys, &["insert into towns values ('paris', 2100), ('parma', 190), ('oslo', 700), ('lima', 9700), ('rome', 2800)"]);
+        // what was bought on some of the visits: the visit it belongs to is a number in a column
+        run(&mut sys, &["create table bought (visit int, thing text)"]);
+        for batch in 0..100 {
+            let rows: Vec<String> = (batch * 8..batch * 8 + 8).map(|n| format!("({}, 'thing number {n:<30}')", 1 + n * 3)).collect();
+            run(&mut sys, &[&format!("insert into bought values {}", rows.join(", "))]);
+        }
+        let queries = [
+            "select visits.id, bought.thing from visits join bought on bought.visit = visits.id where visits.id between 100 and 120",
+            "select count(*) from visits left join bought on bought.visit = visits.id where visits.id < 40",
+            "select towns.name, count(*) from towns join visits on visits.town = towns.name group by towns.name",
+            "select towns.people, visits.id from visits join towns on towns.name = visits.town where visits.year = 2000",
+        ];
+        let whole: Vec<(Vec<String>, u64)> = queries.iter().map(|query| cost(&sys, query)).collect();
+        assert_eq!(whole[0].0.len(), 7);
+        assert_eq!(whole[0].0[0], format!("100|thing number {:<30}", 33));
+        assert_eq!(whole[1].0, ["39"]);
+        assert_eq!(whole[2].0, ["paris|480", "parma|480", "oslo|480", "lima|480"]);
+        assert_eq!(whole[3].0, ["2100|11", "2100|611", "2100|1211", "2100|1811"]);
+        run(&mut sys, &["create index on bought (visit)", "create index on visits (town)", "create index on visits (year)"]);
+        let by: Vec<(Vec<String>, u64)> = queries.iter().map(|query| cost(&sys, query)).collect();
+        for ((query, whole), by) in queries.iter().zip(&whole).zip(&by) {
+            assert_eq!(by.0, whole.0, "{query}");
+        }
+        // for each visit, what was bought on it: a few pages, not the table of what was bought
+        assert!(by[0].1 * 3 < whole[0].1 && by[1].1 * 3 < whole[1].1, "{} and {} pages by the index, {} and {} without", by[0].1, by[1].1, whole[0].1, whole[1].1);
+        // a town has a fifth of the visits: the table is read as it lies, as before
+        assert!(by[2].1 <= whole[2].1 + 5 * 4, "{} pages by the index, {} without", by[2].1, whole[2].1);
+        // the first table by the index of a year, the second by the one its unique name always had
+        assert!(by[3].1 * 3 < whole[3].1, "{} pages by the index, {} without", by[3].1, whole[3].1);
+    }
+
+    #[test]
+    fn what_is_wrong_with_an_index_is_said() {
+        let mut sys = visits();
+        run(&mut sys, &["create table towns (name text unique, people int)"]);
+        assert_eq!(run(&mut sys, &["create index on visits (year)", "create index on visits (YEAR)"]), "error: visits (year) has an index already.");
+        assert_eq!(run(&mut sys, &["drop index on visits (town)"]), "error: visits (town) has no index.");
+        assert_eq!(run(&mut sys, &["create index on visits (id)"]), "error: id needs no index: the rows are kept in its order.");
+        assert_eq!(run(&mut sys, &["create index on visits (nothing)"]), "error: Unknown column: nothing");
+        assert_eq!(run(&mut sys, &["create index on nowhere (year)"]), "error: Unknown table: nowhere. Type tables to list them.");
+        assert_eq!(run(&mut sys, &["create index on tasks (name)"]), "error: tasks is a view of the system and cannot be changed.");
+        assert_eq!(run(&mut sys, &["create index on visits (year, town)"]), "error: An index is on one column.");
+        assert_eq!(run(&mut sys, &["create index by_year on visits (year)"]), "error: An index has no name: create index on t (c), drop index on t (c).");
+        assert_eq!(run(&mut sys, &["create index visits (year)"]), "error: An index has no name: create index on t (c), drop index on t (c).");
+        assert_eq!(run(&mut sys, &["create index on visits"]), "error: Expected (, but the query ends.");
+        assert_eq!(run(&mut sys, &["create index"]), "error: Expected ON, but the query ends.");
+        // a column that takes no value twice has its index from the start, and keeps it
+        assert_eq!(run(&mut sys, &["create index on towns (name)"]), "error: towns (name) has an index already.");
+        assert_eq!(run(&mut sys, &["drop index on towns (name)"]), "error: Column name takes no value twice: its index stays with it.");
+        assert_eq!(rows(&sys, "select name, rules, index from columns where table_name = 'towns'"), ["id||", "name|unique|yes", "people||"]);
+    }
+
     #[test]
     fn the_table_of_a_statement_is_known_before_it_is_run() {
         let of = |statement: &str| target(statement.as_bytes()).map(|name| String::from_utf8_lossy(name).into_owned());
@@ -827,6 +1040,9 @@ mod tests {
         assert_eq!(of("delete from acts where id = 1").as_deref(), Some("acts"));
         assert_eq!(of("drop table companions").as_deref(), Some("companions"));
         assert_eq!(of("create table acts (a int)").as_deref(), Some("acts"));
+        assert_eq!(of("create index on acts (went)").as_deref(), Some("acts"));
+        assert_eq!(of("DROP  INDEX ON Programs (name)").as_deref(), Some("Programs"));
+        assert_eq!((of("create index acts"), of("drop index")), (None, None));
         assert_eq!((of("select * from acts"), of("drop acts"), of("insert notes"), of("")), (None, None, None, None));
     }
 

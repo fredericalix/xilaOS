@@ -353,6 +353,32 @@ impl Expr {
         self.bounds_at(self.root, column, known)
     }
 
+    /// The value a column must have for the expression to hold, when it
+    /// says so at its top, alone or joined by `and`: `label = 'x'`,
+    /// `n > 3 and tag = b.name`. As for `bounds_beside`, `known` is the
+    /// columns that are known before any row is read. It is what lets a
+    /// query go to rows by an index on a text or a decimal.
+    pub fn pins_beside(&self, column: usize, known: &[Value]) -> Option<Value> {
+        self.pins_at(self.root, column, known)
+    }
+
+    fn pins_at(&self, at: usize, column: usize, known: &[Value]) -> Option<Value> {
+        let is_column = |at: usize| matches!(self.nodes[at], Node::Column(found) if found == column);
+        let value = |at: usize| match self.nodes[at] {
+            Node::Value(value) => Some(value),
+            Node::Column(other) => known.get(other).copied(),
+            _ => None,
+        };
+        match self.nodes[at] {
+            Node::Binary(Binary::And, a, b) => self.pins_at(a, column, known).or_else(|| self.pins_at(b, column, known)),
+            Node::Binary(Binary::Equal, a, b) if is_column(a) => value(b),
+            Node::Binary(Binary::Equal, a, b) if is_column(b) => value(a),
+            _ => None,
+        }
+        // equal to nothing holds for no row: the whole table is read to find none
+        .filter(|value| *value != Value::Null)
+    }
+
     fn bounds_at(&self, at: usize, column: usize, known: &[Value]) -> (i64, i64) {
         const ANY: (i64, i64) = (i64::MIN, i64::MAX);
         let is_column = |at: usize| matches!(self.nodes[at], Node::Column(found) if found == column);

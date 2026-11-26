@@ -41,11 +41,13 @@ const CACHE_PAGES: usize = 256;
 
 const MAGIC: [u8; 8] = *b"XilaOSdb";
 /// The format this code writes. Version 2 is version 1 with, in the
-/// catalog, what a table may say of its columns besides their type.
-const VERSION: u32 = 2;
+/// catalog, what a table may say of its columns besides their type;
+/// version 3 is version 2 with indexes, trees the catalog names.
+const VERSION: u32 = 3;
 /// The oldest format this code reads. A volume in it is read as it is,
 /// and is in the format above from the first commit on: code that only
-/// knows version 1 then takes it for something else, and leaves it alone.
+/// knows an older version then takes it for something else, and leaves
+/// it alone.
 const OLDEST: u32 = 1;
 
 const fn crc_table() -> [u32; 256] {

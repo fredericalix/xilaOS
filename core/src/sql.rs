@@ -161,11 +161,13 @@ pub struct Schema {
     pub count: usize,
     /// Whether the table stores rows. The others are views of live state.
     pub stored: bool,
+    /// The columns an index leads to the rows by: of a stored table only.
+    pub indexed: [bool; MAX_COLUMNS],
 }
 
 impl Schema {
     pub fn new(table: usize, name: &[u8], stored: bool) -> Schema {
-        Schema { table, name: Name::from_bytes(name), columns: [Name::new(); MAX_COLUMNS], kinds: [Kind::Text; MAX_COLUMNS], count: 0, stored }
+        Schema { table, name: Name::from_bytes(name), columns: [Name::new(); MAX_COLUMNS], kinds: [Kind::Text; MAX_COLUMNS], count: 0, stored, indexed: [false; MAX_COLUMNS] }
     }
 
     pub fn add(&mut self, name: &[u8], kind: Kind) {
@@ -191,6 +193,39 @@ impl TableDef {
     }
 }
 
+/// How the rows a query needs are reached.
+enum Way {
+    /// By their id, from one to another: all of them when nothing says more.
+    Ids(i64, i64),
+    /// By the index of a column, for its values from one to another.
+    By(usize, Value, Value),
+}
+
+/// What conditions say of where the rows of a table are, as far as that
+/// can be told before any is read. `at` is where the columns of the table
+/// start in the row the conditions read, and `known` the columns before
+/// them: those of the first table of a join, for the second. Every row
+/// reached is still given to the conditions.
+fn way(schema: &Schema, conditions: [Option<&Expr>; 2], at: usize, known: &[Value]) -> Way {
+    const ANY: (i64, i64) = (i64::MIN, i64::MAX);
+    let span = |column: usize| conditions.iter().flatten().map(|condition| condition.bounds_beside(at + column, known)).fold(ANY, |all, one| (all.0.max(one.0), all.1.min(one.1)));
+    let ids = span(0);
+    if ids != ANY {
+        return Way::Ids(ids.0, ids.1);
+    }
+    for column in (1..schema.count).filter(|column| schema.indexed[*column]) {
+        if schema.kinds[column] == Kind::Int {
+            let within = span(column);
+            if within != ANY {
+                return Way::By(column, Value::Int(within.0), Value::Int(within.1));
+            }
+        } else if let Some(value) = conditions.iter().flatten().find_map(|condition| condition.pins_beside(at + column, known)) {
+            return Way::By(column, value, value);
+        }
+    }
+    Way::Ids(ANY.0, ANY.1)
+}
+
 /// Where the rows come from.
 pub trait Source {
     /// Describes a table, by name.
@@ -203,6 +238,17 @@ pub trait Source {
     /// not. A table that finds its rows by that column reads only those.
     fn scan_among(&self, table: usize, _first: i64, _last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
         self.scan(table, visit)
+    }
+    /// As `scan`, when only the rows whose value in a column is from
+    /// `first` to `last` are of use, and the schema says the column has an
+    /// index: the others may be left out, or not. `apart` says that
+    /// `visit` reads tables itself, as for `scan_apart`.
+    fn scan_by(&self, table: usize, _column: usize, _first: &Value, _last: &Value, apart: bool, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+        if apart {
+            self.scan_apart(table, i64::MIN, i64::MAX, visit)
+        } else {
+            self.scan(table, visit)
+        }
     }
     /// As `scan_among`, for the first table of a join: `visit` reads
     /// other tables of the source, and the same one, while it is called.
@@ -736,22 +782,17 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
     match (&schema, &second, &on) {
         (Some(schema), Some(second), Some(on)) => {
             let mut failed = None;
-            let (first, last) = filter.as_ref().map_or((i64::MIN, i64::MAX), |filter| filter.bounds(0));
-            source.scan_apart(schema.table, first, last, &mut |left: &Row| {
+            let mut beside = |left: &Row| {
                 if failed.is_some() {
                     return;
                 }
                 // the two rows side by side
                 let mut both = [Value::Null; 2 * MAX_COLUMNS];
                 both[..JOINED].copy_from_slice(left);
-                // where the condition says the id of the second table must be, for this row of the first
-                let (mut low, mut high) = on.bounds_beside(JOINED, left);
-                if let (Some(filter), false) = (&filter, keeps_all) {
-                    let (first, last) = filter.bounds_beside(JOINED, left);
-                    (low, high) = (low.max(first), high.min(last));
-                }
+                // where the conditions say the rows of the second table are,
+                // for this row of the first: by their id, or by an index
                 let mut matched = false;
-                let scanned = source.scan_among(second.table, low, high, &mut |right: &Row| {
+                let mut each = |right: &Row| {
                     if failed.is_some() {
                         return;
                     }
@@ -764,7 +805,11 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
                         Ok(false) => {}
                         Err(message) => failed = Some(message),
                     }
-                });
+                };
+                let scanned = match way(second, [Some(on), filter.as_ref().filter(|_| !keeps_all)], JOINED, left) {
+                    Way::Ids(low, high) => source.scan_among(second.table, low, high, &mut each),
+                    Way::By(column, first, last) => source.scan_by(second.table, column, &first, &last, false, &mut each),
+                };
                 if let (Err(message), None) = (scanned, &failed) {
                     failed = Some(message);
                 }
@@ -773,7 +818,11 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
                     both[JOINED..].fill(Value::Null);
                     failed = take(&both).err();
                 }
-            })?;
+            };
+            match way(schema, [filter.as_ref(), None], 0, &[]) {
+                Way::Ids(first, last) => source.scan_apart(schema.table, first, last, &mut beside)?,
+                Way::By(column, first, last) => source.scan_by(schema.table, column, &first, &last, true, &mut beside)?,
+            }
             if let Some(message) = failed {
                 return Err(message);
             }
@@ -781,13 +830,17 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
         (Some(schema), ..) => {
             let mut failed = None;
             // what the condition says of the first column, the `id` of a
-            // stored table, lets the source go straight to those rows
-            let (first, last) = filter.as_ref().map_or((i64::MIN, i64::MAX), |filter| filter.bounds(0));
-            source.scan_among(schema.table, first, last, &mut |row: &Row| {
+            // stored table, lets the source go straight to those rows; and
+            // so does what it says of a column that has an index
+            let mut each = |row: &Row| {
                 if failed.is_none() {
                     failed = take(row).err();
                 }
-            })?;
+            };
+            match way(schema, [filter.as_ref(), None], 0, &[]) {
+                Way::Ids(first, last) => source.scan_among(schema.table, first, last, &mut each)?,
+                Way::By(column, first, last) => source.scan_by(schema.table, column, &first, &last, false, &mut each)?,
+            }
             if let Some(message) = failed {
                 return Err(message);
             }

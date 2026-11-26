@@ -1697,7 +1697,7 @@ with Xila(disk=old_disk) as x:
     x.cmd("create table plain (n int)")
     x.cmd("insert into plain values (7), (8)")
     time.sleep(0.2)
-check("version 1: this XilaOS writes version 2", header_versions(old_disk) == [2, 2], header_versions(old_disk))
+check("version 1: this XilaOS writes version 3", header_versions(old_disk) == [3, 3], header_versions(old_disk))
 header_versions(old_disk, becomes=1)
 with Xila(disk=old_disk) as x:
     log = "\n".join(x.boot_log)
@@ -1711,15 +1711,83 @@ with Xila(disk=old_disk) as x:
     first = header_versions(old_disk)
     made = x.cmd("create table ruled (n int not null)")
     time.sleep(0.2)
-check("version 1: the first change makes it version 2, and columns may ask there", first == [2, 1] and made[0] and header_versions(old_disk) == [2, 2], (first, made, header_versions(old_disk)))
+check("version 1: the first change makes it version 3, and columns may ask there", first == [3, 1] and made[0] and header_versions(old_disk) == [3, 3], (first, made, header_versions(old_disk)))
 with Xila(disk=old_disk) as x:
     found = (x.table("select n from plain"), x.cmd("insert into ruled values (null)"), x.cmd("disk check")[0])
     check("version 1: and everything is there at the next start", found == ([{"n": "7"}, {"n": "8"}, {"n": "9"}], (False, ["Column n must have a value."]), True), found)
-header_versions(old_disk, becomes=3)
+header_versions(old_disk, becomes=4)
 with Xila(disk=old_disk) as x:
     log = "\n".join(x.boot_log)
-    check("version 3: a disk of a format to come is left alone", "Database ............ in memory" in log and x.table("select name from tables where kind = 'stored'") == [], log[-400:])
-check("version 3: and nothing is written on it", header_versions(old_disk) == [3, 3], header_versions(old_disk))
+    check("version 4: a disk of a format to come is left alone", "Database ............ in memory" in log and x.table("select name from tables where kind = 'stored'") == [], log[-400:])
+check("version 4: and nothing is written on it", header_versions(old_disk) == [4, 4], header_versions(old_disk))
+
+# Indexes: from a value of a column to its rows, without reading the table.
+index_disk = blank_disk(os.path.join(ROOT, "build", "index.img"))
+
+
+def pages_for(x, line):
+    """What a query gives, and the pages of the disk it read to give it."""
+    read = lambda: int({row["item"]: row["value"] for row in x.table("disk")}["pages read"])
+    before = read()
+    answer = x.table(line)
+    return answer, read() - before
+
+
+with Xila(disk=index_disk) as x:
+    # rows made long by what their columns take by default: a serial line holds 240 characters
+    long = "words text default '%s', more text default '%s', again text default '%s'" % ("a few words, the same for each visit", "and a few more, to make the row long", "and as many again, for many pages...")
+    x.cmd("create table visits (town text, year int, %s)" % long)
+    towns = ["paris", "parma", "oslo", "lima"]
+    filled = []
+    for batch in range(100):
+        rows = ", ".join("('%s', %d)" % (towns[n % 4], 1990 + n % 200) for n in range(batch * 8, batch * 8 + 8))
+        filled.append(x.cmd("insert into visits (town, year) values " + rows)[0])
+    queries = ["select id from visits where year = 2000", "select count(*) from visits where year between 2100 and 2101", "select count(*) from visits where town = 'oslo'", "select count(*) from visits where year = 2000 or town = 'lima'"]
+    whole = [pages_for(x, query) for query in queries]
+    check("index: (the table is many pages, and a query reads them all)", all(filled) and whole[0][0] == [{"id": "11"}, {"id": "211"}, {"id": "411"}, {"id": "611"}] and whole[0][1] > 20, whole[0])
+    made = (x.cmd("create index on visits (year)"), x.cmd("create index on visits (town)"))
+    check("create index: makes it from the rows that are there", made == ((True, ["Index made on visits (year), from 800 rows."]), (True, ["Index made on visits (town), from 800 rows."])), made)
+    by = [pages_for(x, query) for query in queries]
+    check("index: a query gives the same rows as before", [found for found, _ in by] == [found for found, _ in whole], by)
+    check("index: and reads a few pages for a value few rows have, or a span of values", by[0][1] * 2 < whole[0][1] and by[1][1] * 2 < whole[1][1], (by, whole))
+    check("index: a value a quarter of the rows have reads the table as it lies, and so does or", by[2][1] <= whole[2][1] + 4 and by[3][1] == whole[3][1], (by, whole))
+    x.cmd("update visits set year = 2000, town = 'rome' where id = 5")
+    x.cmd("delete from visits where id = 211")
+    x.cmd("insert into visits (town, year) values ('rome', 2000)")
+    found = (x.table("select id from visits where year = 2000"), x.table("select id from visits where town = 'rome'"))
+    check("index: it follows the rows that change, go and come", found == ([{"id": "5"}, {"id": "11"}, {"id": "411"}, {"id": "611"}, {"id": "801"}], [{"id": "5"}, {"id": "801"}]), found)
+    x.cmd("create table bought (visit int, thing text default 'a thing, with a few words after its name')")
+    for batch in range(100):
+        x.cmd("insert into bought (visit) values " + ", ".join("(%d)" % (1 + n * 2) for n in range(batch * 8, batch * 8 + 8)))
+    join = "select visits.id, bought.id as thing from visits join bought on bought.visit = visits.id where visits.id between 100 and 110"
+    without = pages_for(x, join)
+    x.cmd("create index on bought (visit)")
+    beside = pages_for(x, join)
+    check("index: a join finds the rows beside by it", beside[0] == without[0] and len(beside[0]) == 5 and beside[1] * 2 < without[1], (beside, without))
+    shown = x.cmd("show table visits")
+    check("show table: says the indexes of a table", shown[1][-3:] == [")", "create index on visits (town)", "create index on visits (year)"], shown)
+    listed = [(row["name"], row["index"]) for row in x.table("select name, index from columns where table_name = 'visits'")]
+    check("index: the view of the columns says which have one", listed == [("id", ""), ("town", "yes"), ("year", "yes"), ("words", ""), ("more", ""), ("again", "")], listed)
+    said = [x.cmd(line) for line in ("create index on visits (year)", "create index by_year on visits (words)", "create index on visits (id)", "create index on tasks (name)", "drop index on visits (words)")]
+    wanted = ["visits (year) has an index already.", "An index has no name: create index on t (c), drop index on t (c).", "id needs no index: the rows are kept in its order.", "tasks is a view of the system and cannot be changed.", "visits (words) has no index."]
+    check("index: what is wrong is said", said == [(False, [line]) for line in wanted], said)
+    # a column that takes no value twice has its index with it
+    x.cmd("create table towns (name text unique, people int)")
+    x.cmd("insert into towns values ('paris', 2100), ('oslo', 700)")
+    unique = (x.cmd("insert into towns values ('oslo', 1)"), x.cmd("drop index on towns (name)"), x.table("select index from columns where table_name = 'towns' and name = 'name'"))
+    check("index: a unique column has one from the start, and keeps it", unique == ((False, ["Column name takes no value twice: row 2 has that one."]), (False, ["Column name takes no value twice: its index stays with it."]), [{"index": "yes"}]), unique)
+    check("disk check: reads every index against its table", x.cmd("disk check")[0], x.cmd("disk check"))
+    time.sleep(0.2)
+    x.cut()
+with Xila(disk=index_disk) as x:
+    again = pages_for(x, queries[0].replace("2000", "2001"))
+    check("index: after a power cut it is there and leads to the rows", again[0] == [{"id": "12"}, {"id": "212"}, {"id": "412"}, {"id": "612"}] and again[1] * 2 < whole[0][1] and x.cmd("disk check")[0], again)
+    used = lambda: int({row["item"]: row["value"] for row in x.table("disk")}["used"].split()[0])
+    before = used()
+    dropped = x.cmd("drop index on visits (year)")
+    time.sleep(0.2)
+    back = pages_for(x, queries[0])
+    check("drop index: the pages are given back, and the query reads the table again", dropped == (True, ["Index removed from visits (year)."]) and used() < before and back[1] >= whole[0][1] and back[0][0] == {"id": "5"} and x.cmd("disk check")[0], (dropped, before, used(), back))
 
 # What the user chose is kept from one start to the next, in a table.
 kept_disk = blank_disk(os.path.join(ROOT, "build", "settings.img"))

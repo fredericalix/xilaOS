@@ -1,6 +1,6 @@
 # Architecture
 
-XilaOS is about 34,000 lines of Rust in four crates, plus 3,100 lines
+XilaOS is about 35,000 lines of Rust in four crates, plus 3,200 lines
 of Python and shell for building and testing. No boot loader and no C
 are linked in. One crate, `xila-tls`, rests on libraries from the
 registry, for the arithmetic of TLS and the checking of certificates;
@@ -22,7 +22,7 @@ nothing else does.
                  │ tables, rows, transactions       │
                  ▼                                  ▼
  ┌──────────────────────────────────────────────────────────────────┐
- │ db/   xila-db   2,600 lines                                      │
+ │ db/   xila-db   4,000 lines                                      │
  │ the storage engine: copy-on-write B-trees on pages of a volume   │
  └──────────────────────────────────────────────────────────────────┘
 ```
@@ -34,7 +34,7 @@ it, as `tcp.rs` is. It is described with the network, in
 
 | Crate | Builds for | Allocates | Tested by |
 |---|---|---|---|
-| `xila-db` | host and UEFI, `no_std` + `alloc` | yes | 25 unit tests, power cuts included |
+| `xila-db` | host and UEFI, `no_std` + `alloc` | yes | 35 unit tests, power cuts included |
 | `xila-tls` | host and UEFI, `no_std` | not itself; the `rsa` library it uses does, while it checks a signature | 14 unit tests against a server played by the tests, then OpenSSL in `tools/check.py` |
 | `xila-core` | host and UEFI, `no_std` outside tests | no: fixed-size buffers only (`System::db` aside) | more than 200 unit tests |
 | `xila-kernel` | UEFI only | yes, through its own allocator | `tools/check.py`: more than 300 checks on the whole system in QEMU |

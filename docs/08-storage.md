@@ -112,7 +112,7 @@ disk (`sealed`).
 |---|---|---|
 | 0 | 4 | CRC-32C of the rest |
 | 4 | 8 | magic: `XilaOSdb` |
-| 12 | 4 | format version: 2 (1 is read too, see the catalog below) |
+| 12 | 4 | format version: 3 (1 and 2 are read too, see the catalog below) |
 | 16 | 4 | page size: 4096 |
 | 20 | 8 | `txn`: number of the transaction this header commits |
 | 28 | 8 | `pages`: pages of the volume the database may use |
@@ -231,16 +231,20 @@ The list of free pages is written nowhere. When a volume is opened,
 a bitmap in memory (`Store::taken`, one bit per page):
 
 1. the pages of the catalog tree;
-2. for each table the catalog describes, the pages of its tree.
+2. for each table the catalog describes, the pages of its tree;
+3. for each index of the table, the pages of its tree and of the trees
+   of ids below it.
 
 Every other page is free. So no crash can lose a page, and none can
 free a page that is in use: there is no free list to get out of step
 with the trees. A page reached twice, or outside the volume, is
 `Error::Damaged`.
 
-The walk does not read the leaves (`tree::pages` stops at the branches
-of level 1, which name their leaves), so its cost is a small part of
-the size of the database: one page in about 255.
+The walk does not read the leaves of a table (`tree::pages` stops at
+the branches of level 1, which name their leaves), so its cost is a
+small part of the size of the database: one page in about 255. It does
+read the leaves of an index, since they are what names the trees of
+ids: an index is small beside its table.
 
 A free page is found by scanning the bitmap from a hint, the lowest
 page that may be free.
@@ -285,9 +289,9 @@ Three choices keep it short:
 - **Pages are not merged.** A leaf is given back when it is empty, and
   a root with a single page below it is dropped. A table from which
   many rows were removed keeps pages that are partly empty.
-- **There is one tree per table, by id.** No secondary index exists:
-  a query reads the whole table, unless it says where the id must be
-  (`range`).
+- **The tree of a table is by id.** A query reads the whole table,
+  unless it says where the id must be (`range`) or a column has an
+  [index](#indexes), which is one more tree.
 
 `check` verifies, for a whole tree, that keys rise, that every key is
 on the right side of the keys above it, that leaves are all at the same
@@ -338,37 +342,89 @@ which is not built yet.
  columns after id (1)
  then for each:  kind (1)  scale (1)  name length (1)  name
 
- and, only when a column asks something or the table has a check:
- for each column after id:  rules (1)  [value by default, as a field of a record]
+ and, only when a column asks something or has an index, or the table has a check:
+ for each column after id:  rules (1)  [value by default, as a field of a record]  [root of the index (8)]
  checks (1)
  then for each:  length (1)  text
 ```
 
 The byte of rules has one bit for each: 1 for `not null`, 2 for
-`unique`, 4 when a value by default follows. A check is kept as the
+`unique`, 4 when a value by default follows, 8 when the root of an
+index follows (0 for an index that is empty). A check is kept as the
 text that was typed, 60 bytes at most, four at most: the engine does
 not read it. The engine holds `not null` and `unique` itself, in
 `insert` and in every form of `update` (`Error::Missing`,
-`Error::Twice`); with no index, `unique` reads the table. The value by
-default and the checks are for whoever makes the rows: the SQL
-statements.
+`Error::Twice`), by asking the index a unique column is given when its
+table is made; a unique column without one (a table of version 2) reads
+the table. The value by default and the checks are for whoever makes
+the rows: the SQL statements.
 
-**Versions.** Version 1 of the format had no second part. A table that
-asks nothing is described in version 2 exactly as it was in version 1,
-so a volume of version 1 is read as it is, and nothing is converted:
-only the headers differ. The first commit writes a header that says 2,
-the second leaves none that says 1. Code that only knows version 1 then
-takes the volume for something that is not a XilaOS database and leaves
-it alone, which is the point: it would have dropped what the columns
-ask without knowing. (Between those two commits such code would still
-open the volume, at the state before the last commit.) A header of a
-version above 2 is treated the same way by this code.
+**Versions.** Version 1 of the format had no second part; version 2
+had it without indexes; version 3 is this one. A table that asks
+nothing and has no index is described in version 3 exactly as it was in
+version 1, and one without an index as in version 2, so a volume of an
+older version is read as it is, and nothing is converted: only the
+headers differ. The first commit writes a header that says 3, the
+second leaves none that says less. Code that only knows an older
+version then takes the volume for something that is not a XilaOS
+database and leaves it alone, which is the point: it would have dropped
+what the columns ask, or left the indexes behind the rows, without
+knowing. (Between those two commits such code would still open the
+volume, at the state before the last commit.) A header of a version
+above 3 is treated the same way by this code.
 
 So the root of a table's tree lives in the catalog, and the root of the
 catalog lives in the header. A commit that changed one row of one table
 writes: the leaf, the branches above it, the leaf of the catalog that
 holds the table's record (its root changed), the branches above that,
 and one header.
+
+### Indexes
+
+An index (`index.rs`) is one more tree of the store, named by the
+catalog, that leads from a value of a column to the rows that have it.
+The trees go from a number to bytes, so a value is first turned into a
+number, its *mark*:
+
+- a whole number or a decimal (in the units of its column): the number
+  itself, with its sign bit turned so that the negative ones come
+  first. The order of the marks is the order of the numbers, and an
+  index finds a span of them with `tree::range`;
+- a text: FNV-1a over all of its bytes. Texts that start alike have
+  marks that have nothing in common, which is what addresses and paths
+  need; two different texts may have the same mark, seldom. So an index
+  finds one text, not what lies between two, and what it gives is rows
+  that *may* have the value: whoever asks looks at each (`holder` for
+  `unique`, the condition of the query for SQL).
+
+A row without a value in the column is in no index.
+
+Under a mark, the record says which rows have it:
+
+```text
+ 1  then the ids (8 each), in order: up to 32 of them
+ 2  root (8)  count (8): a tree of its own whose keys are the ids
+```
+
+A column where each row has its own value costs one small record per
+row; a value a thousand rows share costs one tree. A tree of ids stays
+one until it is empty.
+
+Every change of an index goes through `tree::set` in the open
+transaction, like the rows: `insert`, `update_each_ids` and
+`delete_ids` change the row, then what each index says of it. A row and
+its marks are committed together or not at all, and `rollback` brings
+back the roots with the tables. `Database::verify` reads each index
+against its table: every row is there under the mark of its value, once,
+and nothing else is.
+
+`Database::scan_by` is how rows are read by an index. It asks the index
+for the ids, gives up if there are more than half as many as the table
+has leaves (`tree::leaves`, from the root alone; eight are always few)
+and reads the table instead, since each row may then cost a page of its
+own reached from the root; otherwise it reads the rows leaf by leaf, in
+the order of their ids, so that rows lying in one page are read with it
+once.
 
 ## Transactions
 
@@ -492,8 +548,9 @@ What the engine does not do:
   Catching it needs the checksum of a page kept in the page that points
   at it, as ZFS does.
 - **A disk that lies about `flush`.**
-- **Indexes.** One tree per table, by id. Every query reads the whole
-  table, and `where id = 5` does too.
+- **Indexes** on several columns, and an order among texts: an index
+  finds one text, not those that start with it. Nothing chooses between
+  two indexes, and `update` and `delete` do not use them.
 - **Snapshots.** Keeping an old root would be enough to see the
   database as it was. The format allows it; nothing uses it.
 - **Concurrent transactions.** One writer, and readers wait for it.

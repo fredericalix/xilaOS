@@ -45,7 +45,7 @@ columns of any of them, and of the stored tables too.
 | View | Columns | What it shows |
 |---|---|---|
 | `tables` | `name`, `kind`, `columns`, `rows`, `about` | Every table. `kind` is `system` or `stored`. |
-| `columns` | `table_name`, `position`, `name`, `type`, `rules` | The columns of every table, in order. `rules` is what a column of a stored table asks of its values: `not null unique`, `default 1`. |
+| `columns` | `table_name`, `position`, `name`, `type`, `rules`, `index` | The columns of every table, in order. `rules` is what a column of a stored table asks of its values: `not null unique`, `default 1`. `index` is `yes` for a column that has an index. |
 | `tasks` | `id`, `name`, `state`, `ran_ms`, `share` | The kernel tasks: their state, the time each ran, and its share of the processor in %. |
 | `settings` | `name`, `value` | The settings in use: `mood`, `energy`, `theme`, `keymap`, `screen`. |
 | `screens` | `id`, `name`, `shown` | The virtual screens; `shown` is `yes` for the one on display. |
@@ -204,6 +204,8 @@ XilaOS|all:/>select day, sum(amount) as total from expenses group by day order b
 CREATE TABLE name (column type [rule ...], ... [, CHECK (condition)])
     rule: NOT NULL | UNIQUE | DEFAULT value | CHECK (condition)
 DROP TABLE name
+CREATE INDEX ON name (column)
+DROP INDEX ON name (column)
 INSERT INTO name [(column, ...)] VALUES (value, ...) [, (value, ...)] ...
 UPDATE name SET column = expression [, ...] [WHERE condition]
 DELETE FROM name [WHERE condition]
@@ -290,9 +292,9 @@ Refused by a check: code is null or code > 99
   parts set code = code + 100` is taken though, row after row, a code
   passes through the value another row still has; two rows may exchange
   their values in one statement.
-- **`unique` reads the table.** There is no index yet: each row added
-  to a table with a `unique` column reads all of its rows, and an
-  `update` that changes such a column reads them once.
+- **`unique` has an index.** A column that takes no value twice gets
+  its [index](#indexes) with the table, and a row is let in by asking
+  the index, not by reading the table.
 - **A check cannot name `id`**: a row has its id only once it is in the
   table.
 - **No key to declare.** `id` is the key of every table, given by the
@@ -327,6 +329,63 @@ XilaOS|all:/>select name, type, rules from columns where table_name = 'parts'
 `not null` and `unique` are held by the storage engine itself, for
 whoever writes rows; the value by default and the checks are held by the
 SQL statements, which are the only way to a table that has them.
+
+### Indexes
+
+The rows of a table are kept in the order of their `id`, so a query that
+says where the `id` must be goes straight to them. For any other column,
+a query reads the whole table, unless the column has an index:
+
+```
+XilaOS|all:/>create index on visits (year)
+Index made on visits (year), from 800 rows.
+XilaOS|all:/>select id from visits where year = 2000
+   id
+   11
+   211
+   411
+   611
+XilaOS|all:/>drop index on visits (year)
+Index removed from visits (year).
+```
+
+The query gives the same rows with or without it; what changes is the
+pages of the disk it reads (the `pages read` row of `disk` counts
+them). In a table of 800 rows over some thirty pages, the four rows of
+one year cost less than half of what reading the table costs; the gain
+grows with the table.
+
+- **An index is on one column, and has no name**: a column has one or
+  has none. `create index by_year on visits (year)` is refused.
+- **What it finds.** For a whole number: one value, a span (`year
+  between 2000 and 2004`, `year > 2020`), a list (from the smallest to
+  the largest of an `in`). For a decimal and for a text: one value
+  (`town = 'oslo'`, `cost = 12.5`), not what lies between two. As for
+  the `id`, what counts is what the condition says at its top, joined
+  by `and`: `year = 2000 or town = 'lima'` reads the table.
+- **A join uses it** to find the rows of the second table beside each
+  row of the first: `from visits join bought on bought.visit =
+  visits.id` reads, with an index on `bought (visit)`, a few pages for
+  each visit, and without one the whole of `bought` each time.
+- **When many rows have the value, the table is read instead.** Each
+  row found by an index may lie in a page of its own, reached from the
+  top of the tree. So when the rows are more than half as many as the
+  table has pages (eight are always few), the query reads the table as
+  it lies, which is then faster. An index on a column where a quarter
+  of the rows share each value changes nothing but the writes.
+- **It costs at every write**: a row added, changed or removed is added
+  to, or taken from, each index of its table, in the same transaction.
+- **The first column that can serve is used**: a query uses the `id`
+  when the condition bounds it, else the first column in the order of
+  the table that has an index and that the condition bounds. There is
+  no choosing between two indexes.
+- **`update` and `delete` do not use them yet**: they go to rows by
+  their `id` or read the table.
+- **A row without a value is in no index**: `where year is null` reads
+  the table.
+- **`unique` brings its own**, which `drop index` refuses to remove.
+- `show table` writes the indexes after the table, as the statements
+  that would make them, and the view `columns` has `yes` under `index`.
 
 ## Expressions
 
@@ -528,6 +587,10 @@ Column label takes no value twice: row 2 has that one.
 Refused by a check: count >= 0
 A check cannot name id: a row has it only once it is in the table.
 A table keeps 4 checks at most, of 60 characters each.
+visits (year) has an index already.
+An index has no name: create index on t (c), drop index on t (c).
+id needs no index: the rows are kept in its order.
+Column name takes no value twice: its index stays with it.
 One INSERT adds eight rows at most.
 A text takes 48 characters at most, for now.
 This calculation is too long.
@@ -568,8 +631,8 @@ What SQL has and this one does not:
 - more than one column in `GROUP BY`, more than one key in `ORDER BY`;
 - `insert into ... select`;
 - `alter table`, keys of one's own, references from a table to another,
-  indexes, `unique` over several columns, a calculation as a value by
-  default;
+  indexes and `unique` over several columns, indexes with a name, a
+  calculation as a value by default;
 - `begin`, `commit`, `rollback`;
 - dates and times as a type, and objects larger than a text.
 
@@ -579,8 +642,8 @@ and `where id = 5`, `where id between 10 and 20`, `where id in (3, 9)` or
 `where id > 100 and label = 'x'` go down the tree to those rows and read
 nothing else. `update` and `delete` do the same. What counts is what the
 condition says at its top, joined by `and`: `id = 5 or label = 'x'` reads
-everything. There is no other index yet. The `pages read` row of `disk`
-tells what a query cost.
+everything. A column that has an [index](#indexes) is reached the same
+way by `select`. The `pages read` row of `disk` tells what a query cost.
 
 ## How it is implemented
 

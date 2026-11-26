@@ -312,6 +312,19 @@ pub(crate) fn leaf(store: &mut Store, root: u64, first: u64, last: u64, found: &
     Ok(())
 }
 
+/// About how many leaves a tree has, from its root alone: the number
+/// itself for a tree of one or two levels, and for a taller one what it
+/// would be with pages half full below the root.
+pub(crate) fn leaves(store: &mut Store, root: u64) -> Result<u64, Error> {
+    if root == 0 {
+        return Ok(0);
+    }
+    Ok(match load(store, root)? {
+        Node::Leaf(_) => 1,
+        Node::Branch { level, children, .. } => (children.len() as u64).saturating_mul((MAX_CHILDREN as u64 / 2).saturating_pow(level.saturating_sub(1) as u32)),
+    })
+}
+
 /// Calls `each` with every page of a tree. Leaves are not read, except a
 /// root that is one: finding the pages of a table costs a small part of
 /// reading the table.

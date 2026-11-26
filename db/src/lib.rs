@@ -27,6 +27,7 @@
 extern crate alloc;
 
 mod disk;
+mod index;
 mod store;
 #[cfg(test)]
 mod testing;
@@ -166,21 +167,30 @@ pub struct Column {
     pub not_null: bool,
     pub unique: bool,
     pub default: Option<Kept>,
+    /// The root of the index of the column, if it has one: 0 for an index
+    /// that is empty.
+    index: Option<u64>,
 }
 
 impl Column {
     fn plain(name: Vec<u8>, kind: Kind) -> Column {
-        Column { name, kind, not_null: false, unique: false, default: None }
+        Column { name, kind, not_null: false, unique: false, default: None, index: None }
     }
 
     fn ruled(&self) -> bool {
-        self.not_null || self.unique || self.default.is_some()
+        self.not_null || self.unique || self.default.is_some() || self.index.is_some()
+    }
+
+    /// Whether an index leads from a value of this column to its rows.
+    pub fn indexed(&self) -> bool {
+        self.index.is_some()
     }
 }
 
 const RULE_NOT_NULL: u8 = 1;
 const RULE_UNIQUE: u8 = 2;
 const RULE_DEFAULT: u8 = 4;
+const RULE_INDEX: u8 = 8;
 /// Conditions a table keeps, at most, and the longest one.
 pub const MAX_CHECKS: usize = 4;
 pub const MAX_CHECK: usize = 60;
@@ -263,10 +273,11 @@ impl Table {
 
     /// The table as the catalog keeps it: name, root, next id, rows, then
     /// the columns after `id` with their type. When a column has a rule or
-    /// the table a condition, more follows: for each column after `id` a
-    /// byte of rules and, if it says so, the value by default; then the
-    /// number of conditions, and each after its length. A table that has
-    /// none of this is described as version 1 of the format did.
+    /// an index, or the table a condition, more follows: for each column
+    /// after `id` a byte of rules and, if it says so, the value by default
+    /// and the root of the index; then the number of conditions, and each
+    /// after its length. A table that has none of this is described as
+    /// version 1 of the format did.
     fn describe(&self) -> Vec<u8> {
         let mut record = Vec::new();
         record.push(self.name.len() as u8);
@@ -288,11 +299,14 @@ impl Table {
             return record;
         }
         for column in &self.columns[1..] {
-            let rules = [(column.not_null, RULE_NOT_NULL), (column.unique, RULE_UNIQUE), (column.default.is_some(), RULE_DEFAULT)];
+            let rules = [(column.not_null, RULE_NOT_NULL), (column.unique, RULE_UNIQUE), (column.default.is_some(), RULE_DEFAULT), (column.index.is_some(), RULE_INDEX)];
             record.push(rules.iter().filter(|(set, _)| *set).map(|(_, bit)| bit).sum());
             if let Some(default) = &column.default {
                 // a value that is too long was refused when the table was made
                 record.extend_from_slice(&encode(&[default.field()]).unwrap_or_else(|_| [TAG_NULL].to_vec()));
+            }
+            if let Some(root) = column.index {
+                record.extend_from_slice(&root.to_le_bytes());
             }
         }
         record.push(self.checks.len() as u8);
@@ -327,12 +341,15 @@ impl Table {
         if !reader.0.is_empty() {
             for column in &mut columns[1..] {
                 let rules = reader.byte()?;
-                if rules & !(RULE_NOT_NULL | RULE_UNIQUE | RULE_DEFAULT) != 0 {
+                if rules & !(RULE_NOT_NULL | RULE_UNIQUE | RULE_DEFAULT | RULE_INDEX) != 0 {
                     return None;
                 }
                 (column.not_null, column.unique) = (rules & RULE_NOT_NULL != 0, rules & RULE_UNIQUE != 0);
                 if rules & RULE_DEFAULT != 0 {
                     column.default = Some(reader.kept().filter(|default| fits(column.kind, &default.field()))?);
+                }
+                if rules & RULE_INDEX != 0 {
+                    column.index = Some(reader.number()?);
                 }
             }
             let count = reader.byte()? as usize;
@@ -560,6 +577,9 @@ impl Database {
         }
         for table in &tables {
             tree::pages(store, table.root, &mut |store, page| store.mark(page))?;
+            for root in table.columns.iter().filter_map(|column| column.index) {
+                index::pages(store, root, &mut |store, page| store.mark(page))?;
+            }
         }
         Ok(tables)
     }
@@ -670,7 +690,8 @@ impl Database {
                 // it must fit in the catalog, and in a row
                 encode(&[*default])?;
             }
-            made.push(Column { name: column.to_ascii_lowercase(), kind: *kind, not_null: rule.not_null, unique: rule.unique, default: rule.default.as_ref().map(Kept::of) });
+            // a column that takes no value twice has an index to know it by
+            made.push(Column { name: column.to_ascii_lowercase(), kind: *kind, not_null: rule.not_null, unique: rule.unique, default: rule.default.as_ref().map(Kept::of), index: rule.unique.then_some(0) });
         }
         let table = Table {
             name: name.to_ascii_lowercase(),
@@ -701,6 +722,9 @@ impl Database {
         self.begin();
         let store = ready(self.store.get_mut(), self.limit)?;
         tree::release(store, self.tables[table].root)?;
+        for root in self.tables[table].columns.iter().filter_map(|column| column.index) {
+            index::release(store, root)?;
+        }
         let gone = self.tables.remove(table);
         self.removed.push(gone.key);
         Ok(())
@@ -739,13 +763,27 @@ impl Database {
         found.rows += 1;
         found.changed = true;
         self.log.push(Logged { table, id, change: Change::Insert });
+        for (at, column) in found.columns.iter_mut().enumerate().skip(1) {
+            if let (Some(root), Some(mark)) = (column.index, fields.get(at - 1).and_then(index::mark)) {
+                column.index = Some(index::add(store, root, mark, id)?);
+            }
+        }
         Ok(id)
     }
 
-    /// The row that has this value in this column, if one does. It reads
-    /// the whole table: no index says it yet.
+    /// The row that has this value in this column, if one does. Without
+    /// an index on the column it reads the whole table.
     fn holder(&self, table: usize, column: usize, value: &Field) -> Result<Option<u64>, Error> {
         let mut found = None;
+        if self.tables[table].columns[column].index.is_some() {
+            // the index gives the rows that may have it; each says whether it does
+            self.scan_by(table, column, value, value, false, &mut |fields| {
+                if let (true, None, Field::Int(id)) = (fields[column] == *value, found, fields[0]) {
+                    found = Some(id as u64);
+                }
+            })?;
+            return Ok(found);
+        }
         self.scan(table, &mut |fields| {
             if let (true, None, Field::Int(id)) = (fields[column] == *value, found, fields[0]) {
                 found = Some(id as u64);
@@ -845,10 +883,14 @@ impl Database {
         let kinds: Vec<Kind> = self.tables[table].columns.iter().map(|column| column.kind).collect();
         let not_null: Vec<bool> = self.tables[table].columns.iter().map(|column| column.not_null).collect();
         let unique: Vec<usize> = (1..kinds.len()).filter(|column| self.tables[table].columns[*column].unique).collect();
+        let indexed: Vec<usize> = (1..kinds.len()).filter(|column| self.tables[table].columns[*column].index.is_some()).collect();
         // what each changed row has in the columns that take no value
         // twice, and whether any of those values is a new one
         let mut values: Vec<(usize, Kept, u64)> = Vec::new();
         let mut moved = false;
+        // what the indexes must forget and learn: column, the mark that
+        // was, the mark that will be, the row
+        let mut marks: Vec<(usize, Option<u64>, Option<u64>, u64)> = Vec::new();
         // the new records are worked out first: the tree is not changed
         // while it is read
         let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -878,6 +920,12 @@ impl Database {
                                 moved |= new[column] != fields[column];
                             }
                         }
+                        for &column in &indexed {
+                            let (was, will) = (index::mark(&fields[column]), index::mark(&new[column]));
+                            if was != will {
+                                marks.push((column, was, will, id as u64));
+                            }
+                        }
                         records.push((id as u64, record));
                     }
                     Err(error) => failed = Some(error),
@@ -895,24 +943,43 @@ impl Database {
             if let Some(pair) = values.windows(2).find(|pair| pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1) {
                 return Err(Error::Twice(pair[0].0, pair[0].2));
             }
+            // and no row that stays as it is has one of them. With an
+            // index, the rows that may have a value are asked; without
+            // one (a table of before indexes), the whole table is read.
             let mut twice = None;
-            self.scan(table, &mut |fields| {
-                let Field::Int(id) = fields[0] else {
-                    return;
-                };
-                // a row that changes is among the values already
-                if twice.is_some() || records.binary_search_by_key(&(id as u64), |(id, _)| *id).is_ok() {
-                    return;
-                }
-                for &column in &unique {
-                    if fields[column] != Field::Null {
-                        let held = Kept::of(&fields[column]);
-                        if values.binary_search_by(|(other, value, _)| (*other, value).cmp(&(column, &held))).is_ok() {
-                            twice = Some(Error::Twice(column, id as u64));
+            let changes = |id: u64| records.binary_search_by_key(&id, |(id, _)| *id).is_ok();
+            for (column, value, _) in values.iter().filter(|(column, ..)| indexed.contains(column)) {
+                let value = value.field();
+                self.scan_by(table, *column, &value, &value, false, &mut |fields| {
+                    if let (true, None, Field::Int(id)) = (fields[*column] == value, twice, fields[0]) {
+                        if !changes(id as u64) {
+                            twice = Some(Error::Twice(*column, id as u64));
                         }
                     }
+                })?;
+                if twice.is_some() {
+                    break;
                 }
-            })?;
+            }
+            if twice.is_none() && unique.iter().any(|column| !indexed.contains(column)) {
+                self.scan(table, &mut |fields| {
+                    let Field::Int(id) = fields[0] else {
+                        return;
+                    };
+                    // a row that changes is among the values already
+                    if twice.is_some() || changes(id as u64) {
+                        return;
+                    }
+                    for &column in unique.iter().filter(|column| !indexed.contains(column)) {
+                        if fields[column] != Field::Null {
+                            let held = Kept::of(&fields[column]);
+                            if values.binary_search_by(|(other, value, _)| (*other, value).cmp(&(column, &held))).is_ok() {
+                                twice = Some(Error::Twice(column, id as u64));
+                            }
+                        }
+                    }
+                })?;
+            }
             if let Some(error) = twice {
                 return Err(error);
             }
@@ -925,7 +992,133 @@ impl Database {
             found.changed = true;
             self.log.push(Logged { table, id: *id, change: Change::Update });
         }
+        // all the marks that were go before any that will be: a row may
+        // take the value another one leaves
+        for forget in [true, false] {
+            for &(column, was, will, id) in &marks {
+                let Some(root) = found.columns[column].index else {
+                    continue;
+                };
+                found.columns[column].index = Some(match (forget, was, will) {
+                    (true, Some(was), _) => index::remove(store, root, was, id)?,
+                    (false, _, Some(will)) => index::add(store, root, will, id)?,
+                    _ => root,
+                });
+            }
+        }
         Ok(records.len())
+    }
+
+    /// Calls `visit` with the rows whose value in a column is from `first`
+    /// to `last`, both included, in the order of their ids, and maybe with
+    /// others: whoever asks looks at each row. With an index on the
+    /// column, and when the rows are few enough for it to be worth it,
+    /// only the pages that hold them are read. Otherwise every row is
+    /// given: without an index, for texts that are not one and the same
+    /// (an index knows a text, not what lies between two), and when the
+    /// rows are more than half as many as the table has pages (eight are
+    /// always few): each may be in a page of its own, reached from the
+    /// top of the tree, and the table is then read faster as it lies.
+    /// `apart` says that `visit` reads tables.
+    pub fn scan_by(&self, table: usize, column: usize, first: &Field, last: &Field, apart: bool, visit: &mut dyn FnMut(&[Field])) -> Result<(), Error> {
+        let found = &self.tables[table];
+        let whole = |visit: &mut dyn FnMut(&[Field])| if apart { self.scan_apart(table, Ids::ALL, visit) } else { self.scan_ids(table, Ids::ALL, visit) };
+        let Some(root) = found.columns.get(column).and_then(|column| column.index) else {
+            return whole(visit);
+        };
+        if matches!(first, Field::Text(_)) && first != last {
+            return whole(visit);
+        }
+        // nothing is from no value to no value
+        let (Some(first), Some(last)) = (index::mark(first), index::mark(last)) else {
+            return Ok(());
+        };
+        let mut ids = Vec::new();
+        let few = {
+            let mut slot = self.store.try_borrow_mut().map_err(|_| Error::Busy)?;
+            let Some(store) = slot.as_mut() else {
+                return Ok(());
+            };
+            let most = (tree::leaves(store, found.root)? / 2).max(8);
+            index::ids(store, root, first, last, most as usize, &mut ids)?
+        };
+        if !few {
+            return whole(visit);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        // leaf by leaf: rows that lie in the same page are read with it once
+        let count = found.columns.len();
+        let mut at = 0;
+        while at < ids.len() {
+            let mut leaf = Vec::new();
+            {
+                let mut slot = self.store.try_borrow_mut().map_err(|_| Error::Busy)?;
+                let Some(store) = slot.as_mut() else {
+                    return Ok(());
+                };
+                tree::leaf(store, found.root, ids[at], u64::MAX, &mut leaf)?;
+            }
+            // an index that names a row the table does not have is damaged
+            let last = leaf.last().map(|(id, _)| *id).filter(|last| *last >= ids[at]).ok_or(Error::Damaged(root))?;
+            while at < ids.len() && ids[at] <= last {
+                let record = leaf.binary_search_by_key(&ids[at], |(id, _)| *id).map(|row| &leaf[row].1).map_err(|_| Error::Damaged(root))?;
+                let mut fields = [Field::Null; MAX_COLUMNS];
+                fields[0] = Field::Int(ids[at] as i64);
+                decode(record, &mut fields[1..count]);
+                visit(&fields[..count]);
+                at += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives a column an index, made from the rows the table has. A change
+    /// of its own, as making a table is: nothing may be waiting.
+    pub fn index(&mut self, table: usize, column: usize) -> Result<(), Error> {
+        if !self.log.is_empty() {
+            return Err(Error::Busy);
+        }
+        if column == 0 || column >= self.tables[table].columns.len() {
+            return Err(Error::Key);
+        }
+        if self.tables[table].columns[column].index.is_some() {
+            return Err(Error::Exists);
+        }
+        let mut marks = Vec::new();
+        self.scan(table, &mut |fields| {
+            if let (Some(mark), Field::Int(id)) = (index::mark(&fields[column]), fields[0]) {
+                marks.push((mark, id as u64));
+            }
+        })?;
+        self.begin();
+        let store = ready(self.store.get_mut(), self.limit)?;
+        let mut root = 0;
+        for (mark, id) in marks {
+            root = index::add(store, root, mark, id)?;
+        }
+        let found = &mut self.tables[table];
+        found.columns[column].index = Some(root);
+        found.changed = true;
+        Ok(())
+    }
+
+    /// Takes its index from a column. The pages of the index are free
+    /// once this is committed.
+    pub fn unindex(&mut self, table: usize, column: usize) -> Result<(), Error> {
+        if !self.log.is_empty() {
+            return Err(Error::Busy);
+        }
+        let Some(root) = self.tables[table].columns.get(column).and_then(|column| column.index) else {
+            return Ok(());
+        };
+        self.begin();
+        let store = ready(self.store.get_mut(), self.limit)?;
+        index::release(store, root)?;
+        let found = &mut self.tables[table];
+        found.columns[column].index = None;
+        found.changed = true;
+        Ok(())
     }
 
     /// Removes the rows `pick` accepts. Returns how many.
@@ -936,9 +1129,17 @@ impl Database {
     /// As `delete`, for the rows whose ids are among `among` only.
     pub fn delete_ids(&mut self, table: usize, among: Ids, pick: &mut dyn FnMut(&[Field]) -> bool) -> Result<usize, Error> {
         let mut ids = Vec::new();
+        let indexed: Vec<usize> = (1..self.tables[table].columns.len()).filter(|column| self.tables[table].columns[*column].index.is_some()).collect();
+        // what the indexes say of the rows that go: column, mark, row
+        let mut marks: Vec<(usize, u64, u64)> = Vec::new();
         self.scan_ids(table, among, &mut |fields| {
             if let (true, Field::Int(id)) = (pick(fields), fields[0]) {
                 ids.push(id as u64);
+                for &column in &indexed {
+                    if let Some(mark) = index::mark(&fields[column]) {
+                        marks.push((column, mark, id as u64));
+                    }
+                }
             }
         })?;
         self.begin();
@@ -958,6 +1159,20 @@ impl Database {
                 Err(error) => {
                     result = Err(error);
                     break;
+                }
+            }
+        }
+        if result.is_ok() {
+            for (column, mark, id) in marks {
+                let Some(root) = found.columns[column].index else {
+                    continue;
+                };
+                match index::remove(store, root, mark, id) {
+                    Ok(root) => found.columns[column].index = Some(root),
+                    Err(error) => {
+                        result = Err(error);
+                        break;
+                    }
                 }
             }
         }
@@ -1049,6 +1264,25 @@ impl Database {
             let found = tree::check(store, table.root, &mut each)?;
             if found.keys != table.rows || found.last.is_some_and(|last| last >= table.next_id) {
                 return Err(Error::Damaged(table.root));
+            }
+            // an index says of every row what the row says, and nothing else
+            for (at, column) in table.columns.iter().enumerate() {
+                let Some(root) = column.index else {
+                    continue;
+                };
+                let held = index::check(store, root, &mut each)?;
+                let mut rows = Vec::new();
+                tree::walk(store, table.root, &mut |id, record| {
+                    let mut fields = [Field::Null; MAX_COLUMNS];
+                    decode(record, &mut fields[1..table.columns.len()]);
+                    if let Some(mark) = index::mark(&fields[at]) {
+                        rows.push((mark, id));
+                    }
+                })?;
+                rows.sort_unstable();
+                if held != rows {
+                    return Err(Error::Damaged(root));
+                }
             }
         }
         if seen.len() as u64 != store.used() {
@@ -1488,6 +1722,192 @@ mod tests {
         assert_eq!(db.create_with(b"t", &plain, &[b""]), Err(Error::Checks));
         // nothing was started: a table can be made right after
         assert!(db.create_with(b"t", &plain, &[b"a > 0"]).is_ok());
+    }
+
+    /// The ids of the rows `scan_by` gives for values from `first` to
+    /// `last`: those that have such a value, and maybe others.
+    fn given(db: &Database, table: usize, column: usize, first: Field, last: Field) -> Vec<i64> {
+        let mut ids = Vec::new();
+        db.scan_by(table, column, &first, &last, false, &mut |fields| {
+            if let Field::Int(id) = fields[0] {
+                ids.push(id);
+            }
+        })
+        .unwrap();
+        ids
+    }
+
+    /// Of those, the rows that do have such a value: what whoever asks keeps.
+    fn by(db: &Database, table: usize, column: usize, first: Field, last: Field) -> Vec<i64> {
+        let within = |field: &Field| match (field, &first, &last) {
+            (Field::Int(n), Field::Int(first), Field::Int(last)) | (Field::Dec(n), Field::Dec(first), Field::Dec(last)) => first <= n && n <= last,
+            (Field::Text(text), Field::Text(first), Field::Text(last)) => first <= text && text <= last,
+            _ => false,
+        };
+        let mut ids = Vec::new();
+        db.scan_by(table, column, &first, &last, false, &mut |fields| {
+            if let (true, Field::Int(id)) = (within(&fields[column]), fields[0]) {
+                ids.push(id);
+            }
+        })
+        .unwrap();
+        ids
+    }
+
+    #[test]
+    fn an_index_leads_from_a_value_to_its_rows() {
+        let mut db = Database::new();
+        let town = db.create(b"town", &[(b"street", Kind::Text), (b"number", Kind::Int), (b"rent", Kind::Dec(2))]).unwrap();
+        for (street, number, rent) in [("mill lane", 3, 45000), ("mill lane", 7, 51050), ("mill lane east", -2, 45000), ("quay", 3, -100), ("", 0, 0)] {
+            db.insert(town, &[Field::Text(street.as_bytes()), Field::Int(number), Field::Dec(rent)]).unwrap();
+        }
+        db.insert(town, &[Field::Null, Field::Null, Field::Null]).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        // without an index every row is given: whoever asks looks at each
+        assert_eq!(given(&db, town, 2, Field::Int(3), Field::Int(3)), [1, 2, 3, 4, 5, 6]);
+        for column in 1..=3 {
+            db.index(town, column).unwrap();
+            db.commit(&mut |_, _, _| {}).unwrap();
+        }
+        assert_eq!(db.index(town, 2), Err(Error::Exists));
+        assert_eq!(db.index(town, 0), Err(Error::Key));
+        assert!(db.tables()[town].columns[1..].iter().all(Column::indexed) && !db.tables()[town].columns[0].indexed());
+        // numbers: the value, a span of values, negative ones in their
+        // place; only those rows are given
+        assert_eq!(given(&db, town, 2, Field::Int(3), Field::Int(3)), [1, 4]);
+        assert_eq!(given(&db, town, 2, Field::Int(-5), Field::Int(2)), [3, 5]);
+        assert_eq!(given(&db, town, 2, Field::Int(i64::MIN), Field::Int(i64::MAX)), [1, 2, 3, 4, 5]);
+        assert_eq!(given(&db, town, 2, Field::Int(8), Field::Int(100)), Vec::<i64>::new());
+        assert_eq!(given(&db, town, 3, Field::Dec(45000), Field::Dec(45000)), [1, 3]);
+        assert_eq!(given(&db, town, 3, Field::Dec(-100), Field::Dec(0)), [4, 5]);
+        // a text: the rows that have it, whatever others start with
+        assert_eq!(given(&db, town, 1, Field::Text(b"mill lane"), Field::Text(b"mill lane")), [1, 2]);
+        assert_eq!(given(&db, town, 1, Field::Text(b"mill lane east"), Field::Text(b"mill lane east")), [3]);
+        assert_eq!(given(&db, town, 1, Field::Text(b"quay"), Field::Text(b"quay")), [4]);
+        assert_eq!(given(&db, town, 1, Field::Text(b""), Field::Text(b"")), [5]);
+        assert_eq!(given(&db, town, 1, Field::Text(b"mill"), Field::Text(b"mill")), Vec::<i64>::new());
+        // between two texts an index knows nothing: every row is given
+        assert_eq!(given(&db, town, 1, Field::Text(b"n"), Field::Text(b"z")), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(by(&db, town, 1, Field::Text(b"n"), Field::Text(b"z")), [4]);
+        // a row without a value is in no index; from nothing to nothing there is nothing
+        assert_eq!(given(&db, town, 1, Field::Null, Field::Null), Vec::<i64>::new());
+        // the index follows the rows: changed, removed, added
+        db.update(town, &mut |fields| fields[0] == Field::Int(1), &[(2, Field::Int(9)), (1, Field::Null)]).unwrap();
+        db.delete(town, &mut |fields| fields[0] == Field::Int(4)).unwrap();
+        db.insert(town, &[Field::Text(b"quay"), Field::Int(3), Field::Null]).unwrap();
+        assert_eq!(given(&db, town, 2, Field::Int(3), Field::Int(3)), [7]);
+        assert_eq!(given(&db, town, 2, Field::Int(9), Field::Int(9)), [1]);
+        assert_eq!(given(&db, town, 1, Field::Text(b"mill lane"), Field::Text(b"mill lane")), [2]);
+        assert_eq!(given(&db, town, 1, Field::Text(b"quay"), Field::Text(b"quay")), [7]);
+        // undone, the index is what it was
+        db.rollback();
+        assert_eq!(given(&db, town, 2, Field::Int(3), Field::Int(3)), [1, 4]);
+        assert_eq!(db.verify(), Ok(()));
+        // without its index a column is read whole again, and the pages are given back
+        let with = db.used();
+        db.unindex(town, 2).unwrap();
+        db.unindex(town, 2).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert!(db.used() < with && !db.tables()[town].columns[2].indexed());
+        assert_eq!(given(&db, town, 2, Field::Int(3), Field::Int(3)), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(db.verify(), Ok(()));
+        // the catalog says which columns have one
+        let table = &db.tables()[town];
+        let back = Table::described(table.key, &table.describe()).unwrap();
+        assert_eq!(back.columns.iter().map(|column| column.index).collect::<Vec<_>>(), table.columns.iter().map(|column| column.index).collect::<Vec<_>>());
+        assert_eq!(back.columns.iter().map(Column::indexed).collect::<Vec<_>>(), [false, true, false, true]);
+    }
+
+    #[test]
+    fn a_value_many_rows_share_gets_a_tree_of_its_own_and_gives_it_back() {
+        let mut db = Database::new();
+        let votes = db.create(b"votes", &[(b"choice", Kind::Text), (b"n", Kind::Int)]).unwrap();
+        db.index(votes, 1).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        let empty = db.used();
+        // far more rows with one value than the record of a value holds
+        let many = 40 * index::INLINE as i64;
+        for n in 0..many {
+            db.insert(votes, &[Field::Text(if n % 2 == 0 { b"yes" } else { b"no" }), Field::Int(n)]).unwrap();
+        }
+        db.insert(votes, &[Field::Text(b"maybe"), Field::Int(-1)]).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert_eq!(db.verify(), Ok(()));
+        let yes = by(&db, votes, 1, Field::Text(b"yes"), Field::Text(b"yes"));
+        assert_eq!((yes.len() as i64, yes[0], yes[1], yes[yes.len() - 1]), (many / 2, 1, 3, many - 1));
+        // one row among all of those is found by reading a few pages; half
+        // of the table is read as the table lies
+        let cost = |db: &Database, choice: &[u8]| {
+            let before = db.storage().looked;
+            let found = given(db, votes, 1, Field::Text(choice), Field::Text(choice)).len() as i64;
+            (found, db.storage().looked - before)
+        };
+        let (maybe, yes) = (cost(&db, b"maybe"), cost(&db, b"yes"));
+        assert_eq!((maybe.0, yes.0), (1, many + 1));
+        assert!(maybe.1 <= 6 && maybe.1 * 2 < yes.1, "{maybe:?} {yes:?}");
+        assert_eq!(by(&db, votes, 1, Field::Text(b"maybe"), Field::Text(b"maybe")), [many + 1]);
+        // rows change their value, and go, a few at a time and then all
+        db.update(votes, &mut |fields| matches!(fields[2], Field::Int(n) if n % 4 == 0), &[(1, Field::Text(b"no"))]).unwrap();
+        db.delete(votes, &mut |fields| matches!(fields[2], Field::Int(n) if n % 4 == 1)).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert_eq!(db.verify(), Ok(()));
+        assert_eq!(by(&db, votes, 1, Field::Text(b"yes"), Field::Text(b"yes")).len() as i64, many / 4);
+        assert_eq!(by(&db, votes, 1, Field::Text(b"no"), Field::Text(b"no")).len() as i64, many / 2);
+        db.delete(votes, &mut |_| true).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert_eq!(db.verify(), Ok(()));
+        assert_eq!((db.used(), db.tables()[votes].columns[1].index), (empty, Some(0)));
+        // and with the table go the pages of its indexes
+        for n in 0..many {
+            db.insert(votes, &[Field::Text(b"yes"), Field::Int(n)]).unwrap();
+        }
+        db.commit(&mut |_, _, _| {}).unwrap();
+        db.remove(votes).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert_eq!((db.used(), db.verify()), (0, Ok(())));
+    }
+
+    #[test]
+    fn a_column_that_takes_no_value_twice_knows_it_by_its_index() {
+        let (mut db, parts) = ruled();
+        assert!(db.tables()[parts].columns[1].indexed() && db.tables()[parts].columns[2].indexed() && !db.tables()[parts].columns[3].indexed());
+        // texts that start alike are not the same text
+        assert_eq!(db.insert(parts, &[Field::Text(b"washer, large"), Field::Null]), Ok(4));
+        assert_eq!(db.insert(parts, &[Field::Text(b"washer, small"), Field::Null]), Ok(5));
+        assert_eq!(db.insert(parts, &[Field::Text(b"washer, large"), Field::Null]), Err(Error::Twice(1, 4)));
+        db.commit(&mut |_, _, _| {}).unwrap();
+        // a thousand rows, of some length so that the table is many pages:
+        // none reads the table to be let in, as each does in the same
+        // table without its indexes
+        let label = |n: i64| format!("part {n:<200}");
+        let thousand = |db: &mut Database, parts: usize| {
+            let before = db.storage().looked;
+            for n in 0..1000i64 {
+                let label = label(n);
+                db.insert(parts, &[Field::Text(label.as_bytes()), Field::Int(1000 + n)]).unwrap();
+            }
+            db.commit(&mut |_, _, _| {}).unwrap();
+            db.storage().looked - before
+        };
+        let (mut plain, same) = ruled();
+        for column in 1..=2 {
+            plain.unindex(same, column).unwrap();
+            plain.commit(&mut |_, _, _| {}).unwrap();
+        }
+        plain.insert(same, &[Field::Text(b"washer, large"), Field::Null]).unwrap();
+        plain.insert(same, &[Field::Text(b"washer, small"), Field::Null]).unwrap();
+        let (with, without) = (thousand(&mut db, parts), thousand(&mut plain, same));
+        assert!(with * 3 < without, "{with} pages read with the indexes, {without} without");
+        assert_eq!(db.insert(parts, &[Field::Text(label(500).as_bytes()), Field::Null]), Err(Error::Twice(1, 506)));
+        assert_eq!(db.insert(parts, &[Field::Text(b"part 500"), Field::Null]), Ok(1006));
+        assert_eq!(db.update(parts, &mut |fields| fields[0] == Field::Int(7), &[(2, Field::Int(1999))]), Err(Error::Twice(2, 1005)));
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert_eq!(db.verify(), Ok(()));
+        // without its index the column still takes no value twice: it reads the table
+        db.unindex(parts, 1).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert_eq!(db.insert(parts, &[Field::Text(label(500).as_bytes()), Field::Null]), Err(Error::Twice(1, 506)));
+        assert_eq!(db.update(parts, &mut |fields| fields[0] == Field::Int(7), &[(1, Field::Text(b"bolt"))]), Err(Error::Twice(1, 1)));
     }
 
     #[test]

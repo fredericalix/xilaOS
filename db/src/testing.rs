@@ -176,7 +176,7 @@ fn commit(db: &mut Database) -> Result<(), Error> {
 pub fn dump(db: &Database) -> Vec<String> {
     let mut lines = Vec::new();
     for (index, table) in db.tables().iter().enumerate() {
-        let columns: Vec<String> = table.columns.iter().map(|c| format!("{}:{:?}", String::from_utf8_lossy(&c.name), c.kind)).collect();
+        let columns: Vec<String> = table.columns.iter().map(|c| format!("{}:{:?}{}", String::from_utf8_lossy(&c.name), c.kind, if c.indexed() { " indexed" } else { "" })).collect();
         lines.push(format!("table {} ({}) {} rows", String::from_utf8_lossy(&table.name), columns.join(", "), table.rows()));
         db.scan(index, &mut |fields| {
             let cells: Vec<String> = fields
@@ -309,6 +309,70 @@ fn a_power_cut_while_rows_change_leaves_the_old_state_or_the_new() {
             },
         ],
         true,
+    );
+}
+
+/// A database whose one table has two indexes: on a number few rows
+/// share, and on a text that many do, so that both forms of an index are
+/// there: ids in the record of a value, and a tree of ids of its own.
+fn library() -> Shared {
+    let platter = Platter::new(512);
+    let mut db = open(&platter).unwrap();
+    let unique = Rule { unique: true, ..Rule::default() };
+    let books = db.create_with(b"books", &[(b"code", Kind::Int, unique), (b"shelf", Kind::Text, Rule::default()), (b"title", Kind::Text, Rule::default())], &[]).unwrap();
+    commit(&mut db).unwrap();
+    db.index(books, 2).unwrap();
+    commit(&mut db).unwrap();
+    for n in 0..120i64 {
+        let shelf: &[u8] = if n % 3 == 0 { b"north" } else { b"south wall, by the window" };
+        db.insert(books, &[Field::Int(1000 - n), Field::Text(shelf), Field::Text(&text(b't', 40 + n as usize))]).unwrap();
+    }
+    commit(&mut db).unwrap();
+    platter
+}
+
+#[test]
+fn a_power_cut_while_indexed_rows_change_leaves_the_old_state_or_the_new() {
+    // after every cut `verify` reads each index against its table: a row
+    // and what the indexes say of it are there together or not at all
+    cut_everywhere(
+        &library(),
+        &[
+            |db| {
+                for n in 0..50 {
+                    db.insert(0, &[Field::Int(n), Field::Text(b"east"), Field::Null])?;
+                }
+                commit(db)
+            },
+            |db| {
+                // every third row moves to a shelf that has a tree of ids, and takes another code
+                db.update_each(0, &mut |fields, put| {
+                    if let (Field::Int(id), Field::Int(code)) = (fields[0], fields[1]) {
+                        if id % 3 == 1 {
+                            put(&[fields[0], Field::Int(code + 5000), Field::Text(b"south wall, by the window"), fields[3]]);
+                        }
+                    }
+                })?;
+                commit(db)
+            },
+            |db| {
+                db.delete(0, &mut |fields| matches!(fields[0], Field::Int(id) if id % 2 == 0))?;
+                commit(db)
+            },
+            |db| {
+                db.unindex(0, 2)?;
+                commit(db)
+            },
+            |db| {
+                db.index(0, 3)?;
+                commit(db)
+            },
+            |db| {
+                db.remove(0)?;
+                commit(db)
+            },
+        ],
+        false,
     );
 }
 
@@ -475,11 +539,11 @@ fn versions(platter: &Shared) -> Vec<u32> {
 }
 
 #[test]
-fn a_volume_of_version_1_is_read_and_is_of_version_2_once_it_is_written() {
+fn a_volume_of_an_older_version_is_read_and_is_of_this_one_once_it_is_written() {
     // tables without anything asked of their columns are, byte for byte,
     // what version 1 wrote: only the headers say the version
     let platter = office();
-    assert_eq!(versions(&platter), [2, 2]);
+    assert_eq!(versions(&platter), [3, 3]);
     assert_eq!(dated(&platter, 1), 2);
     assert_eq!(versions(&platter), [1, 1]);
     let before = dump(&open(&platter).unwrap());
@@ -489,20 +553,22 @@ fn a_volume_of_version_1_is_read_and_is_of_version_2_once_it_is_written() {
     assert_eq!(db.verify(), Ok(()));
     assert_eq!((db.tables().len(), db.tables()[0].rows(), db.tables()[0].checks.len()), (2, 40, 0));
     assert_eq!(versions(&platter), [1, 1]);
+    // (version 2 is read the same way: its tables may ask things of their
+    // columns, and none has an index)
     // the first commit says the new version, the second leaves no header of the old
     db.insert(notes(&db), &[Field::Text(b"written by the new one"), Field::Int(41)]).unwrap();
     commit(&mut db).unwrap();
-    assert_eq!(versions(&platter), [2, 1]);
+    assert_eq!(versions(&platter), [3, 1]);
     let made = db.create_with(b"ruled", &[(b"x", Kind::Int, Rule { not_null: true, ..Rule::default() })], &[]).unwrap();
     db.insert(made, &[Field::Int(1)]).unwrap();
     commit(&mut db).unwrap();
-    assert_eq!(versions(&platter), [2, 2]);
+    assert_eq!(versions(&platter), [3, 3]);
     let db = open(&platter).unwrap();
     assert_eq!(db.verify(), Ok(()));
     assert_eq!(dump(&db)[..before.len() - 3].len(), before.len() - 3);
     assert_eq!((db.tables()[0].rows(), db.tables().len(), db.tables()[2].columns[1].not_null), (41, 3, true));
     // a version this code does not know is something else, and is left alone
-    assert_eq!(dated(&platter, 3), 2);
+    assert_eq!(dated(&platter, 4), 2);
     assert_eq!(open(&platter).err(), Some(Error::Foreign));
     assert_eq!(dated(&platter, 0), 0);
 }
@@ -661,7 +727,7 @@ fn dump_model(model: &Model, db: &Database) -> Vec<String> {
     for table in db.tables() {
         let name = String::from_utf8_lossy(&table.name).into_owned();
         let rows = &model[&name];
-        lines.push(format!("table {name} (id:Int, a:Int, b:Text) {} rows", rows.len()));
+        lines.push(format!("table {name} (id:Int, a:Int indexed, b:Text indexed) {} rows", rows.len()));
         for (id, (a, b)) in rows {
             lines.push(format!("Int({id}) Int({a}) {}x{:?}", b.len(), b.first()));
         }
@@ -681,7 +747,10 @@ fn many_changes_at_random_match_a_plain_map() {
         let table = db.find(name.as_bytes());
         let odd = dice.roll(4) as i64;
         let result = match (dice.roll(100), table) {
-            (0..=5, None) => db.create(name.as_bytes(), &[(b"a", Kind::Int), (b"b", Kind::Text)]).map(|_| {
+            // both columns have an index: few rows share a number, many a
+            // text that starts alike, and `verify` reads each index
+            // against its table after every commit
+            (0..=5, None) => db.create(name.as_bytes(), &[(b"a", Kind::Int), (b"b", Kind::Text)]).and_then(|table| db.index(table, 1).and_then(|_| db.index(table, 2))).map(|_| {
                 model.insert(name, BTreeMap::new());
             }),
             (6, Some(table)) => db.remove(table).map(|_| {

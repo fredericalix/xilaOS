@@ -17,7 +17,7 @@ use crate::theme::THEMES;
 /// The tables that are views of the live state of the system.
 pub const TABLES: [TableDef; 9] = [
     TableDef { name: b"tables", columns: &[b"name", b"kind", b"columns", b"rows", b"about"], kinds: b"ttiit", about: b"all tables: views of the system, stored tables" },
-    TableDef { name: b"columns", columns: &[b"table_name", b"position", b"name", b"type", b"rules"], kinds: b"tittt", about: b"the columns of every table" },
+    TableDef { name: b"columns", columns: &[b"table_name", b"position", b"name", b"type", b"rules", b"index"], kinds: b"titttt", about: b"the columns of every table" },
     TableDef { name: b"tasks", columns: &[b"id", b"name", b"state", b"ran_ms", b"share"], kinds: b"ittii", about: b"what runs, and its share of the processor in %" },
     TableDef { name: b"settings", columns: &[b"name", b"value"], kinds: b"tt", about: b"mood, theme, keyboard, screen" },
     TableDef { name: b"screens", columns: &[b"id", b"name", b"shown"], kinds: b"itt", about: b"the virtual screens" },
@@ -88,6 +88,7 @@ pub(crate) fn rules<const N: usize>(column: &xila_db::Column, into: &mut crate::
 pub fn stored_schema(table: &xila_db::Table, index: usize) -> Schema {
     let mut schema = Schema::new(TABLES.len() + index, &table.name, true);
     for column in &table.columns {
+        schema.indexed[schema.count.min(MAX_COLUMNS - 1)] = column.indexed();
         schema.add(&column.name, column.kind);
     }
     schema
@@ -149,6 +150,25 @@ impl Source for System {
     fn scan_apart(&self, table: usize, first: i64, last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
         self.read(table, first, last, true, visit)
     }
+
+    fn scan_by(&self, table: usize, column: usize, first: &Value, last: &Value, apart: bool, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
+        let found = table.checked_sub(TABLES.len()).and_then(|index| Some((index, self.db.tables().get(index)?)));
+        let Some((index, stored)) = found else {
+            return self.read(table, i64::MIN, i64::MAX, apart, visit);
+        };
+        let schema = stored_schema(stored, index);
+        // the values as the column keeps them; one it cannot keep is in no row,
+        // but saying so is for the condition: every row is given to it
+        let (Ok(first), Ok(last)) = (crate::change::field(&schema, column, first), crate::change::field(&schema, column, last)) else {
+            return self.read(table, i64::MIN, i64::MAX, apart, visit);
+        };
+        self.db.scan_by(index, column, &first, &last, apart, &mut |fields| visit(&row_from(fields, &schema.kinds))).map_err(|error| {
+            if matches!(error, xila_db::Error::Damaged(_)) {
+                self.damaged.set(self.damaged.get() + 1);
+            }
+            engine_error(error, None)
+        })
+    }
 }
 
 impl System {
@@ -197,7 +217,7 @@ impl System {
                 for def in TABLES.iter() {
                     for (position, (name, kind)) in def.columns.iter().zip(def.kinds).enumerate() {
                         let kind: &[u8] = if *kind == b'i' { b"int" } else { b"text" };
-                        visit(&row(&[text(def.name), number(position as u64 + 1), text(name), text(kind), Value::Null]));
+                        visit(&row(&[text(def.name), number(position as u64 + 1), text(name), text(kind), Value::Null, Value::Null]));
                     }
                 }
                 for table in stored.iter().filter(|table| !kept_apart(&table.name)) {
@@ -206,7 +226,9 @@ impl System {
                         let mut asked = Text::new();
                         rules(column, &mut asked);
                         let asked = if asked.is_empty() { Value::Null } else { Value::Text(asked) };
-                        visit(&row(&[text(&table.name), number(position as u64 + 1), text(&column.name), Value::Text(kind_name(column.kind)), asked]));
+                        // the rows of a table are kept in the order of their id: it needs no index
+                        let index = if column.indexed() { text(b"yes") } else { Value::Null };
+                        visit(&row(&[text(&table.name), number(position as u64 + 1), text(&column.name), Value::Text(kind_name(column.kind)), asked, index]));
                     }
                 }
             }
