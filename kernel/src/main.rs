@@ -60,6 +60,18 @@ struct Shared {
     answer: xila_core::remote::Answer,
     /// The page being given to a browser.
     page: xila_core::web::Page,
+    /// The call to the companion's model that is going on, and the room
+    /// for what is sent and what comes back, made at the first question.
+    call: Option<Thinking>,
+    room: Option<(Box<[u8]>, Box<[u8]>)>,
+}
+
+/// A question to the companion's model on its way: the asking, the TLS
+/// it goes through if it does, and how long what is sent is.
+struct Thinking {
+    ask: ask::Ask,
+    tls: Option<Box<xila_tls::Client>>,
+    length: usize,
 }
 
 /// What draws on the screen.
@@ -73,7 +85,7 @@ struct Stage {
 }
 
 static SHARED: task::Mutex<Shared> =
-    task::Mutex::new(Shared { ui: Ui::new(), sys: System::new(), stage: None, disks: disk::Disks::new(), system: &[], nic: None, answer: xila_core::remote::Answer::new(), page: xila_core::web::Page::new() });
+    task::Mutex::new(Shared { ui: Ui::new(), sys: System::new(), stage: None, disks: disk::Disks::new(), system: &[], nic: None, answer: xila_core::remote::Answer::new(), page: xila_core::web::Page::new(), call: None, room: None });
 
 /// A value written once while the kernel starts, before any other task
 /// exists, and only read afterwards.
@@ -354,7 +366,7 @@ extern "C" fn interface(boot: usize) -> ! {
     loop {
         {
             let mut shared = SHARED.lock();
-            let Shared { ui, sys, stage, disks, system, nic, answer, page } = &mut *shared;
+            let Shared { ui, sys, stage, disks, system, nic, answer, page, call, room } = &mut *shared;
             let Some(stage) = stage else {
                 fatal(format_args!("the screen is gone"));
             };
@@ -410,9 +422,10 @@ extern "C" fn interface(boot: usize) -> ! {
                         sys.net.message(call.from, call.port, remote::PORT, &message[..length], sys.ticks, nic);
                     }
                 }
-                // the pages for browsers: a little of what there is to do,
-                // then what the conversations have to say
+                // the pages for browsers, and the companion's model: a little
+                // of what there is to do, then what the conversations have to say
                 xila_core::web::step(sys, page);
+                companion(sys, nic, call, room);
                 sys.net.speak(sys.ticks, nic);
                 if now / 100 != second {
                     nic.count();
@@ -657,6 +670,77 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
     }
 }
 
+/// Does a little of the companion's asking: calls its model when a
+/// question waits, carries the bytes of a call that is going on, and
+/// gives what came back to `companion::heard`, which either ends the
+/// question or wants the model called again. One pass at each tick: the
+/// machine goes on living while the model thinks.
+fn companion(sys: &mut System, nic: &mut e1000::Nic, call: &mut Option<Thinking>, room: &mut Option<(Box<[u8]>, Box<[u8]>)>) {
+    use xila_core::companion::{self, Stage, Trouble};
+    if sys.companion.stage != Stage::Calling {
+        return;
+    }
+    let (request, answer) = room.get_or_insert_with(|| (alloc::vec![0u8; companion::REQUEST].into_boxed_slice(), alloc::vec![0u8; companion::ANSWER].into_boxed_slice()));
+    let now = sys.ticks;
+    let Some(going) = call else {
+        let who = companion::who(&sys.db);
+        let Some(place) = ask::place(who.place.bytes()) else {
+            return companion::give_up(sys, Trouble::NoPlace);
+        };
+        // the address of the model's server, by its name if it has one:
+        // asked for again at each tick until it is known
+        let to = match place.ip {
+            Some(to) => to,
+            None => match sys.net.name(place.machine, now, nic) {
+                dns::Lookup::Found(to) => to,
+                dns::Lookup::Asking => return,
+                dns::Lookup::Failed(why) => return companion::heard(sys, Err(ask::Failed::Name(why))),
+            },
+        };
+        let Some(length) = companion::request(sys, request) else {
+            return companion::give_up(sys, Trouble::TooLong);
+        };
+        let tls = match place.secret {
+            false => None,
+            true => {
+                let mut chance = [0u8; 64];
+                if !arch::random(&mut chance) {
+                    return companion::heard(sys, Err(ask::Failed::NoChance));
+                }
+                let Some(date) = sys.now() else {
+                    return companion::heard(sys, Err(ask::Failed::NoClock));
+                };
+                // the clock counts from the year 2000, certificates from 1970
+                Some(Box::new(xila_tls::Client::new(place.machine, &chance, date + 946_684_800, xila_tls::public_roots())))
+            }
+        };
+        let lines = companion::lines(sys, place.secret);
+        let question = ask::Question { how: b"POST", lines: lines.bytes(), bytes: &request[..length] };
+        match ask::Ask::start(&mut sys.net.tcp, to, &place, &question, now) {
+            Ok(mut ask) => {
+                // a model may think for a while before it says anything
+                ask.patience = companion::PATIENCE;
+                *call = Some(Thinking { ask, tls, length });
+            }
+            Err(why) => companion::heard(sys, Err(why)),
+        }
+        return;
+    };
+    let step = going.ask.step(&mut sys.net.tcp, going.tls.as_deref_mut(), &request[..going.length], answer, now);
+    match step {
+        ask::Step::Going => {}
+        ask::Step::Done(status) => {
+            let kept = going.ask.kept;
+            *call = None;
+            companion::heard(sys, Ok((status, &answer[..kept])));
+        }
+        ask::Step::Failed(why) => {
+            *call = None;
+            companion::heard(sys, Err(why));
+        }
+    }
+}
+
 /// Finds the address of the machine named `System::asked_machine`: in
 /// what is known, or by asking the name server and waiting for its
 /// answer. The machine does nothing else meanwhile, three seconds at
@@ -727,7 +811,7 @@ fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, p
         }
         let at = now(sys);
         sys.net.tick(at, nic);
-        let step = asking.step(&mut sys.net.tcp, tls.as_deref_mut(), &mut start, at);
+        let step = asking.step(&mut sys.net.tcp, tls.as_deref_mut(), question.bytes, &mut start, at);
         sys.net.speak(at, nic);
         match step {
             ask::Step::Going => core::hint::spin_loop(),
@@ -960,6 +1044,23 @@ extern "C" fn serial_shell(_: usize) -> ! {
                         }
                         ok
                     };
+                    // A question to the companion: this prompt waits for
+                    // the answer, and the rest of the machine does not.
+                    let mut ok = ok;
+                    loop {
+                        {
+                            let mut shared = SHARED.lock();
+                            let sys = &mut shared.sys;
+                            if !xila_core::companion::waits(sys, events::SERIAL) {
+                                break;
+                            }
+                            if let Some(told) = xila_core::companion::tell(sys, events::SERIAL, &mut SerialOut { serial: &serial }) {
+                                ok &= told;
+                                break;
+                            }
+                        }
+                        task::sleep(1);
+                    }
                     serial.write(if ok { b"#ok\n" } else { b"#error\n" });
                     serial.write(PROMPT);
                     line.clear();

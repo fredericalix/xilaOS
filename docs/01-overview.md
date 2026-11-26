@@ -126,6 +126,7 @@ and an interactive web mock-up called Trame, kept in
 | [Hardware and graphics](11-hardware.md) | Drivers, the display path, the Intel chip. |
 | [Development and testing](12-development.md) | The serial protocol, the tools, the checks. |
 | [Status and roadmap](13-status-and-roadmap.md) | What is done, what is not, what is designed, the work plan. |
+| [The companion](14-the-companion.md) | What to ask it, what it sees, what is kept, how it is built. |
 
 ## Licence
 

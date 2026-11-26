@@ -983,8 +983,10 @@ import threading
 asked_of_us = []
 
 
+import json
 LONG = b"".join(b"line %d of a long page\n" % n for n in range(400))
 asked_by, sent_to_us = [], []
+model_asked, model_says = [], []
 
 
 class Served(http.server.BaseHTTPRequestHandler):
@@ -1033,6 +1035,8 @@ class Served(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         text = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/v1/chat/completions":
+            return self.model(text)
         sent_to_us.append((self.path, self.headers.get("Content-Type"), text))
         body = b"you sent " + text + b"\nto " + self.path.encode() + b"\n"
         self.send_response(200)
@@ -1040,6 +1044,32 @@ class Served(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def model(self, text):
+        """A made-up model: says what `model_says` holds next, as a model's server would."""
+        try:
+            asked = json.loads(text)
+        except ValueError:
+            asked = None
+        model_asked.append((dict(self.headers), asked))
+        answer = model_says.pop(0) if model_says else {"said": "I have nothing to say."}
+        time.sleep(answer.get("wait", 0))
+        body = answer.get("raw")
+        if body is None:
+            message = {"role": "assistant", "content": answer.get("said"), "refusal": None}
+            if answer.get("queries"):
+                # what it wants run: JSON written as a text, as models do
+                message["tool_calls"] = [{"type": "function", "index": n, "id": "call_%d" % n, "function": {"name": "select", "arguments": json.dumps({"query": query})}} for n, query in enumerate(answer["queries"])]
+            body = b"\n   \n" + json.dumps({"id": "gen-test", "choices": [{"index": 0, "finish_reason": "stop", "message": message}], "usage": {"cost": 0.00002}}).encode()
+        self.protocol_version = "HTTP/1.1"
+        self.close_connection = True
+        self.send_response(answer.get("status", 200))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for at in range(0, len(body), 100):
+            self.wfile.write(b"%x\r\n" % len(body[at:at + 100]) + body[at:at + 100] + b"\r\n")
+        self.wfile.write(b"0\r\n\r\n")
 
     def log_message(self, *words):
         pass
@@ -1321,6 +1351,92 @@ if openssl:
     listening.close()
     for server in (curve, rsa, old, other, aes):
         server.kill()
+# The companion. Its model is a made-up one on this machine, which says
+# what the checks tell it to: the way to it is plain HTTP, so no key goes.
+with Xila(net="e1000e") as x:
+    for _ in range(40):
+        if net_says().get("address") == "10.0.2.15":
+            break
+        time.sleep(0.25)
+    x.cmd("create table notes (label text, stars int)")
+    x.cmd("insert into notes values ('rent', 3), ('holidays', 5)")
+    told = {row["item"]: row["value"] for row in x.table("companion")}
+    check("companion: who it is before anything is asked", (told.get("name"), told.get("at"), told.get("key"), told.get("now")) == ("Xila", "https://openrouter.ai/api/v1/chat/completions", "openrouter: not set, see key", "nothing asked"), told)
+    check("ask: without a key the model of the Internet is not asked", x.cmd("ask hello?") == (False, ["No key opens the model. Type key set openrouter and the key."]), x.cmd("ask hello?"))
+    # who the companion is is a row of a table: here, one whose model is ours
+    x.cmd("create table companions (name text, place text, model text, key text, character text)")
+    x.cmd("insert into companions values ('Xila', 'http://%s/v1/chat/completions', 'made-up/model', 'openrouter', 'You are brief.')" % there)
+    x.cmd("key set openrouter sk-test-never-sent-in-clear")
+    model_says[:] = [{"said": "Hello. I am a made-up model \u2014 \u00e0 votre service."}]
+    ok, lines = x.cmd("ask are you there?", timeout=30)
+    check("ask: the companion says what the model says, in the characters XilaOS has", ok and lines == ["Hello. I am a made-up model - ? votre service."], lines)
+    headers, asked = model_asked[0] if model_asked else ({}, None)
+    told = asked["messages"] if asked else []
+    check("ask: the model was sent who it is, the question and its tool", asked and asked["model"] == "made-up/model" and [m["role"] for m in told] == ["system", "user"] and told[0]["content"].startswith("Your name is Xila. You live inside XilaOS") and told[0]["content"].endswith(" Your character: You are brief.") and told[1]["content"] == "are you there?" and asked["tools"][0]["function"]["name"] == "select", asked)
+    check("ask: the key does not go where the way is not sealed", "Authorization" not in headers and headers.get("Content-Type") == "application/json" and "sk-test" not in json.dumps(asked), headers)
+    model_says[:] = [{"said": "Let me look.", "queries": ["select count(*) from notes", "select label from notes where stars > 4"]}, {"said": "You have 2 notes.\nThe best one is holidays."}]
+    ok, lines = x.cmd("ask how many notes do I have, and which is best?", timeout=30)
+    check("ask: the model looks at the tables, then answers", ok and lines == ["Let me look.", "You have 2 notes.", "The best one is holidays."], lines)
+    again = model_asked[-1][1]["messages"] if model_asked[-1][1] else []
+    check("ask: it was sent back what its queries gave, each under the number of its query",
+          [m["role"] for m in again[-4:]] == ["user", "assistant", "tool", "tool"] and [m["content"] for m in again[-2:]] == ["count\n2", "label\nholidays"]
+          and [c["id"] for c in again[-3]["tool_calls"]] == [m["tool_call_id"] for m in again[-2:]] and json.loads(again[-3]["tool_calls"][0]["function"]["arguments"]) == {"query": "select count(*) from notes"}, again[-4:])
+    check("ask: and what was said before", [m["content"] for m in again[1:3]] == ["are you there?", "Hello. I am a made-up model - ? votre service."], again[1:3])
+    talk = [(row["turn"], row["who"]) for row in x.table("select turn, who, text from talk order by id")]
+    check("talk: everything that is said is kept, turn by turn", talk == [("1", "you"), ("1", "xila"), ("2", "you"), ("2", "xila"), ("2", "select"), ("2", "select"), ("2", "result"), ("2", "result"), ("2", "xila")], talk)
+    model_says[:] = [{"queries": ["delete from notes", "select * from kept_keys", "drop table notes"]}, {"said": "I cannot."}]
+    x.cmd("ask empty my notes", timeout=30)
+    sent = model_asked[-1][1]["messages"]
+    check("ask: the model can only read, and not where keys are kept", [m["content"][:6] for m in sent[-3:]] == ["error:"] * 3 and x.table("select count(*) from notes")[0]["count"] == "2" and "sk-test" not in json.dumps([asked for _, asked in model_asked]), sent[-3:])
+    model_says[:] = [{"status": 401, "raw": b'{"error":{"message":"No auth credentials found","code":401}}'}]
+    check("ask: a server that refuses is quoted, and the question fails", x.cmd("ask hello?", timeout=30) == (False, ["The model's server refused (401): No auth credentials found."]))
+    model_says[:] = [{"raw": b"<html>not a model</html>"}]
+    check("ask: what is not a model's answer is said not to be", x.cmd("ask hello?", timeout=30) == (False, ["What the model's server said is not an answer."]))
+    x.cmd("update companions set place = 'http://10.0.2.2:1/v1'")
+    check("ask: a model that cannot be reached", x.cmd("ask hello?", timeout=30) == (False, ["The model's server does not answer."]))
+    x.cmd("update companions set place = 'http://%s/v1/chat/completions'" % there)
+    # The machine lives while the model thinks: asked at the keyboard, the
+    # answer comes to the screen, and the serial prompt answers meanwhile.
+    model_says[:] = [{"said": "Slow but sure.", "wait": 3}]
+    x.type("ask take your time")
+    x.key("ret", 0.3)
+    start = time.time()
+    told = {row["item"]: row["value"] for row in x.table("companion")}
+    alive = x.cmd("tasks")[0] and x.table("select count(*) from notes")[0]["count"] == "2" and time.time() - start < 2
+    check("ask: while the model thinks the machine goes on, and says the companion is answering", alive and told.get("now", "").startswith("answering, for "), (told, time.time() - start))
+    check("ask: a second question waits for the first", x.cmd("ask and me?") == (False, ["The companion is still answering the last question."]))
+    for _ in range(60):
+        if any("Slow but sure." in row for row in x.peek()):
+            break
+        time.sleep(0.2)
+    took = time.time() - start
+    screen = [row for row in x.peek() if row.strip()]
+    check("ask: the answer comes to the screen that asked, when the model gives it", any("Slow but sure." in row for row in screen) and 2.5 < took < 12, (screen[-4:], took))
+    told = {row["item"]: row["value"] for row in x.table("companion")}
+    check("companion: says who it is and what it has done", (told.get("model"), told.get("key"), told.get("character"), told.get("now"), told.get("queries run for it")) == ("made-up/model", "openrouter: kept", "You are brief.", "nothing asked", "5"), told)
+
+# And the real one, when there is a key for it and a way to the Internet.
+model_key = os.environ.get("OPENROUTER_API_KEY", "")
+if not model_key and os.path.exists(os.path.join(ROOT, ".env.local")):
+    for line in open(os.path.join(ROOT, ".env.local")):
+        if line.startswith("OPENROUTER_API_KEY="):
+            model_key = line.split("=", 1)[1].strip().strip('"')
+if online and model_key:
+    with Xila(net="e1000e", cpu="max") as x:
+        for _ in range(40):
+            if net_says().get("address") == "10.0.2.15":
+                break
+            time.sleep(0.25)
+        x.cmd("net names " + public)
+        x.cmd("key set openrouter " + model_key)
+        x.cmd("create table notes (label text, stars int)")
+        x.cmd("insert into notes values ('rent', 3), ('holidays', 5), ('taxes', 1)")
+        ok, lines = x.cmd("ask how many rows has the table notes? Answer with the number only.", timeout=180)
+        check("ask: a real model, through TLS, reads the tables and answers", ok and "3" in " ".join(lines), lines)
+        ran = [row["text"] for row in x.table("select text from talk where who = 'select'")]
+        check("ask: and it looked before answering", any("notes" in query for query in ran), ran)
+else:
+    print("skip  ask: a real model (needs the Internet and a key, in OPENROUTER_API_KEY or .env.local)")
 serving.shutdown()
 mute.close()
 

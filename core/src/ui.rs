@@ -352,6 +352,11 @@ impl Ui {
             self.terms[0].line(line.bytes(), role::TERM_PROMPT);
             self.dirty = true;
         }
+        // The companion's answer to what was asked here, when it has come.
+        if crate::companion::tell(sys, events::SCREEN, &mut TermOut { term: &mut self.terms[0] }).is_some() {
+            self.terms[0].scroll = 0;
+            self.dirty = true;
+        }
         let lost = sys.events.take_lost(events::SCREEN);
         if lost > 0 {
             let mut line = FixedStr::<COLS>::new();
@@ -760,6 +765,29 @@ mod tests {
         ui.render(&mut sys);
         assert_eq!(body(&ui), ["XilaOS|all:/>mood calm", "Mood is calm.", "XilaOS|all:/>"]);
         assert!(row(&ui, 2).contains("mood [calm]"));
+    }
+
+    #[test]
+    fn the_companion_answers_on_the_screen_when_the_model_has() {
+        let (mut ui, mut sys) = start();
+        sys.net.ip = Some([10, 0, 2, 15]);
+        crate::secrets::set(&mut sys.db, b"openrouter", b"sk-or-v1-secret").unwrap();
+        type_text(&mut ui, &mut sys, "ask are you there?");
+        ui.key(&mut sys, key(Key::Enter));
+        ui.tick(&mut sys, 1);
+        ui.render(&mut sys);
+        // asked: the prompt is free again, and nothing is said yet
+        assert_eq!(body(&ui), ["XilaOS|all:/>ask are you there?", "XilaOS|all:/>"]);
+        type_text(&mut ui, &mut sys, "mood calm");
+        ui.key(&mut sys, key(Key::Enter));
+        // the model answers: at the next tick it is on the screen
+        crate::companion::heard(&mut sys, Ok((200, br#"{"choices":[{"message":{"content":"I am.\nAlways."}}]}"#)));
+        ui.tick(&mut sys, 1);
+        ui.render(&mut sys);
+        assert_eq!(body(&ui), ["XilaOS|all:/>ask are you there?", "XilaOS|all:/>mood calm", "Mood is calm.", "I am.", "Always.", "XilaOS|all:/>"]);
+        ui.tick(&mut sys, 1);
+        ui.render(&mut sys);
+        assert_eq!(body(&ui).len(), 6, "said once");
     }
 
     #[test]

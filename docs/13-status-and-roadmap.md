@@ -42,14 +42,15 @@ were also tried on the real machine.
 | TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | not tried |
 | HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | not tried |
 | Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | not tried |
+| The companion, first form: `ask`, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 26 November 2026: about 29,500 lines, 275
-unit tests, 415 system checks.
+about 300 system checks. On 26 November 2026: about 29,500 lines, 288
+unit tests, 434 system checks.
 
 ## Known limits of what is done
 
@@ -105,7 +106,7 @@ The system is meant to grow in layers. Layer 0 (the base) and layer 1
 | 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet, TCP/IP, DNS and TLS for the side that calls |
 | 4. Sound | Audio driver, mixing, MP3, ambiences | Not started |
 | 5. Applications | Spreadsheet, database front end, a HyperCard-like, mail, text web browser, IRC, HTTP server, a port of Doom | Not started |
-| 6. Agents | AI companions with their own access rights to the data | A first companion is under way, without access rights |
+| 6. Agents | AI companions with their own access rights to the data | A first companion answers and reads the tables; it does not act yet, and has no access rights |
 | 7. Later | Wi-Fi, USB, RISC-V | Not started |
 
 ### The intentions behind it
@@ -292,15 +293,30 @@ of its own and with a command, `ask`; what is said is kept as long
 lines of a table, of which SQL shows the first 48 characters, as for
 `programs`; and it is called Xila.
 
-What is left:
+A fourth came the same day, the companion in its first form: `ask`,
+at the screen or on the serial port; a model that reads the tables
+with one tool, `select`, and cannot change anything; what is said kept
+in the table `talk`, as long lines; who it is in the table
+`companions`. The model is called a little at each tick, so nothing
+waits for it but who asked. It is described in
+[The companion](14-the-companion.md).
 
-4. **Longer texts, and waiting without holding the system.** A text
-   holds 48 characters today, and a command that waits for the network
-   holds everything: a model that thinks for half a minute would stop
-   the machine for half a minute.
-5. **The companion itself**: its screen, the conversation, reading the
-   tables.
-6. **Acting, notes, events.**
+What is left, in order:
+
+5. **Its screen**, where the conversation scrolls and what is typed is
+   for the companion.
+6. **Acting, notes, events**: commands it runs and data it changes,
+   each written in a table, with a command that stops it and four
+   commands refused to it; notes of its own; reactions to changes in
+   a table, to the state of the system and to the clock; a call from
+   a XilaScript program.
+
+Two things of the plan were not needed in the form they had: texts
+longer than 48 characters in SQL (what is said is kept as long lines
+that the storage engine reads, as for programs; SQL still shows 48),
+and a task of its own for what waits (the call to the model advances
+at each tick of the interface task). Both stay in the lists below for
+what else needs them.
 
 A trial of TLS, thrown away afterwards, came before it was built: a
 real handshake with the model's server and one question to the model

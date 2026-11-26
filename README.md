@@ -52,11 +52,14 @@ end
 - **A character interface**, 80 by 50, drawn by the system with the
   font of V2_OS, driven by the keyboard only, with day and night
   themes.
-- **A preemptive kernel** in stable Rust with no external crate: tasks,
-  memory, its own page tables, drivers for SATA, virtio, Intel
-  Ethernet and the Intel HD Graphics of 2011-2012.
-- **A network stack of its own**: ARP, IPv4, ICMP, UDP, DHCP, TCP; a
-  prompt over the network; the tables as read-only web pages.
+- **A preemptive kernel** in stable Rust: tasks, memory, its own page
+  tables, drivers for SATA, virtio, Intel Ethernet and the Intel HD
+  Graphics of 2011-2012.
+- **A network stack of its own**: ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP,
+  and TLS 1.3 for what it asks of the Internet; a prompt over the
+  network; the tables as read-only web pages.
+- **A companion**, Xila: `ask how many tasks are running?`. A model of
+  the Internet answers, and reads the tables of the machine to do so.
 - **Self-installation**: `install` partitions a disk, writes a FAT32
   start-up partition and reads it all back.
 

@@ -126,15 +126,14 @@ enum Stage {
     Over,
 }
 
-pub struct Ask<'a> {
+pub struct Ask {
     id: Id,
     /// When something was last said or heard.
     since: u64,
     /// Ticks of silence that are waited through; `PATIENCE` unless set.
     pub patience: u64,
     head: FixedStr<HEAD>,
-    bytes: &'a [u8],
-    /// How much of the head, then of the bytes, is said.
+    /// How much of the head, then of the bytes that go along, is said.
     sent: usize,
     stage: Stage,
     line: FixedStr<LINE>,
@@ -159,11 +158,12 @@ fn has_line(lines: &[u8], name: &[u8]) -> bool {
     lines.split(|byte| *byte == b'\n').any(|line| line.len() > name.len() && line[..name.len()].eq_ignore_ascii_case(name) && line[name.len()] == b':')
 }
 
-impl<'a> Ask<'a> {
+impl Ask {
     /// Calls the machine of a place at the address `to` and asks it a
     /// question. The machine is told the name it is asked by, as it was
     /// written, since one address may serve the pages of several names.
-    pub fn start(tcp: &mut Tcp, to: Ip, place: &Place, question: &Question<'a>, now: u64) -> Result<Ask<'a>, Failed> {
+    /// The bytes of the question are not kept: `step` is given them again.
+    pub fn start(tcp: &mut Tcp, to: Ip, place: &Place, question: &Question, now: u64) -> Result<Ask, Failed> {
         let Question { how, lines, bytes } = *question;
         let mut head = FixedStr::<HEAD>::new();
         let path: &[u8] = if place.path.is_empty() { b"/" } else { place.path };
@@ -193,19 +193,19 @@ impl<'a> Ask<'a> {
         }
         head.push_bytes(b"\r\n");
         let id = tcp.connect(to, place.port, now).ok_or(Failed::NoRoom)?;
-        Ok(Ask { id, bytes, ..Ask::unasked(head, now) })
+        Ok(Ask { id, ..Ask::unasked(head, now) })
     }
 
     /// Everything but the call itself.
-    fn unasked(head: FixedStr<HEAD>, now: u64) -> Ask<'a> {
-        Ask { id: 0, since: now, patience: PATIENCE, head, bytes: &[], sent: 0, stage: Stage::Status, line: FixedStr::new(), lines: 0, heard: false, status: 0, length: None, chunked: false, kept: 0, total: 0, step: Step::Going }
+    fn unasked(head: FixedStr<HEAD>, now: u64) -> Ask {
+        Ask { id: 0, since: now, patience: PATIENCE, head, sent: 0, stage: Stage::Status, line: FixedStr::new(), lines: 0, heard: false, status: 0, length: None, chunked: false, kept: 0, total: 0, step: Step::Going }
     }
 
     /// What is left to say: the rest of the head, then the rest of the bytes.
-    fn unsaid(&self) -> &[u8] {
+    fn unsaid<'a>(&'a self, bytes: &'a [u8]) -> &'a [u8] {
         match self.sent.checked_sub(self.head.len()) {
             None => &self.head.bytes()[self.sent..],
-            Some(sent) => &self.bytes[sent..],
+            Some(sent) => bytes.get(sent..).unwrap_or(&[]),
         }
     }
 
@@ -343,11 +343,12 @@ impl<'a> Ask<'a> {
     }
 
     /// Does a little of the asking: says what is not said yet, reads what
-    /// has come, and keeps what was asked for in `into`, the same buffer
-    /// at every call (`kept` bytes of it are filled). To be called often,
-    /// with `Net::speak` after it. With `secret`, a TLS client started for
-    /// the machine that is asked, all of it goes through TLS.
-    pub fn step(&mut self, tcp: &mut Tcp, mut secret: Option<&mut xila_tls::Client>, into: &mut [u8], now: u64) -> Step {
+    /// has come, and keeps what was asked for in `into`. `said` is the
+    /// bytes of the question, and `into` where the answer goes: the same
+    /// two at every call (`kept` bytes of `into` are filled). To be called
+    /// often, with `Net::speak` after it. With `secret`, a TLS client
+    /// started for the machine that is asked, all of it goes through TLS.
+    pub fn step(&mut self, tcp: &mut Tcp, mut secret: Option<&mut xila_tls::Client>, said: &[u8], into: &mut [u8], now: u64) -> Step {
         if self.step != Step::Going {
             return self.step;
         }
@@ -358,9 +359,9 @@ impl<'a> Ask<'a> {
             match secret.as_deref_mut() {
                 None => {
                     if tcp.connected(id) {
-                        let said = tcp.write(id, self.unsaid());
-                        self.sent += said;
-                        moved += said;
+                        let count = tcp.write(id, self.unsaid(said));
+                        self.sent += count;
+                        moved += count;
                     }
                     let count = tcp.read(id, &mut bytes);
                     self.take(&bytes[..count], into);
@@ -376,13 +377,13 @@ impl<'a> Ask<'a> {
                     let read = tls.read(&mut bytes);
                     self.take(&bytes[..read], into);
                     // the question, once the handshake is over
-                    let said = if tls.state() == State::Open { tls.write(self.unsaid()) } else { 0 };
-                    self.sent += said;
+                    let asked = if tls.state() == State::Open { tls.write(self.unsaid(said)) } else { 0 };
+                    self.sent += asked;
                     // and what TLS has to send, as TCP has room for it
                     let room = if tcp.connected(id) { tcp.room(id).min(bytes.len()) } else { 0 };
                     let out = tls.output(&mut bytes[..room]);
                     tcp.write(id, &bytes[..out]);
-                    moved += count + read + said + out;
+                    moved += count + read + asked + out;
                     if let (State::Failed(why), Step::Going) = (tls.state(), self.step) {
                         self.step = Step::Failed(Failed::Secret(why));
                     }
@@ -485,7 +486,15 @@ mod tests {
         let mut tcp = Tcp::new();
         let said = |tcp: &mut Tcp, place: Place, question: Question| {
             let ask = Ask::start(tcp, TO, &place, &question, 0).unwrap_or_else(|_| panic!());
-            String::from_utf8([ask.head.bytes(), ask.bytes].concat()).unwrap()
+            // said in order: the head, then the bytes, wherever the saying has got
+            let mut ask = ask;
+            let mut all = Vec::new();
+            while !ask.unsaid(question.bytes).is_empty() {
+                let piece = &ask.unsaid(question.bytes)[..ask.unsaid(question.bytes).len().min(7)];
+                all.extend_from_slice(piece);
+                ask.sent += piece.len();
+            }
+            String::from_utf8(all).unwrap()
         };
         assert_eq!(said(&mut tcp, at(b"192.168.1.20", 8000, b"/notes", false), Question::GET), "GET /notes HTTP/1.1\r\nHost: 192.168.1.20:8000\r\nUser-Agent: XilaOS/0.1\r\nConnection: close\r\n\r\n");
         // asked by its name, the machine is told that name

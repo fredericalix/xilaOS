@@ -701,7 +701,7 @@ fn name_server(server: crate::net::Ip, port: u16) -> Text {
 }
 
 /// Why the address of a name was not found, for the user.
-fn unnamed(why: crate::dns::Failed) -> &'static [u8] {
+pub(crate) fn unnamed(why: crate::dns::Failed) -> &'static [u8] {
     use crate::dns::Failed;
     match why {
         Failed::NoServer => b"The network named no server to ask for names. Type net names and an address.",
@@ -713,7 +713,7 @@ fn unnamed(why: crate::dns::Failed) -> &'static [u8] {
 
 /// Why a machine could not be asked through TLS, for the user. Nothing
 /// was asked of it, or nothing of what it said is shown.
-fn unsure(why: crate::ask::Failed) -> FixedStr<COLS> {
+pub(crate) fn unsure(why: crate::ask::Failed) -> FixedStr<COLS> {
     use crate::ask::Failed;
     use xila_tls::{Error, Refused};
     let text: &[u8] = match why {
@@ -968,6 +968,8 @@ pub struct System {
     /// What `net get` asks for, of which machine (as it was written, an
     /// address or a name), and the kernel's answer: the port, then how
     /// it went and the start of what was said.
+    /// The companion: what it is asked, and how far its answer is.
+    pub companion: crate::companion::Companion,
     pub asked_machine: crate::dns::Name,
     pub asked_path: FixedStr<200>,
     pub asked_text: Text,
@@ -1061,6 +1063,7 @@ impl System {
             system_bytes: 0,
             installed: None,
             fetched: None,
+            companion: crate::companion::Companion::new(),
             asked_machine: FixedStr::new(),
             asked_path: FixedStr::new(),
             asked_text: Text::new(),
@@ -1128,8 +1131,8 @@ impl System {
 }
 
 /// Names of the commands, for completion.
-pub const NAMES: [&[u8]; 51] = [
-    b"about", b"cancel", b"city", b"clear", b"create", b"delete", b"devices", b"disk", b"display", b"drop", b"else", b"end", b"every", b"for", b"help",
+pub const NAMES: [&[u8]; 53] = [
+    b"about", b"ask", b"cancel", b"city", b"clear", b"companion", b"create", b"delete", b"devices", b"disk", b"display", b"drop", b"else", b"end", b"every", b"for", b"help",
     b"if", b"insert", b"install", b"key", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"peek", b"program", b"programs", b"qr", b"reboot",
     b"remote", b"return",
     b"run", b"say", b"screen", b"select", b"show", b"spin", b"stop", b"tables", b"tasks", b"theme", b"time", b"unlisten", b"update",
@@ -1159,7 +1162,7 @@ pub fn prompt(sys: &System, session: usize) -> &'static [u8] {
 /// The prompt while a block is open: as wide as the other.
 pub const CONTINUE: &[u8] = b"          ..>";
 
-const HELP_COMMANDS: [&[u8]; 35] = [
+const HELP_COMMANDS: [&[u8]; 37] = [
     b"XilaOS commands:",
     b"   tables                     - Lists the tables: the system's and yours.",
     b"   select ...                 - Reads a table: select name from tasks",
@@ -1186,7 +1189,9 @@ const HELP_COMMANDS: [&[u8]; 35] = [
     b"   mood [calm|auto|intense]   - Sets the mood. Auto follows your typing.",
     b"   theme [day|night]          - Changes the colors.",
     b"   keymap [us|fr]             - Changes the keyboard layout.",
-    b"   key [set n k|forget n]     - Keys to services: kept, never shown again.",
+    b"   key [set n k|forget n]     - Keys to services, never shown.",
+    b"   ask question               - Asks the companion.",
+    b"   companion                  - Who the companion is.",
     b"   time                       - The date and the time, by the machine's clock.",
     b"   uptime                     - Time since the system started.",
     b"   city                       - Lists the blocks of the city and their heights.",
@@ -1291,6 +1296,8 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
         b"theme" => theme(sys, arg, out),
         b"keymap" => keymap(sys, arg, out),
         b"key" => key(sys, arg, out),
+        b"ask" => ask(sys, arg, out),
+        b"companion" => companion(sys, arg, out),
         b"uptime" => uptime(sys, out),
         b"time" => time(sys, out),
         b"tasks" => tasks(sys, out),
@@ -2332,6 +2339,56 @@ fn trim_end(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
+/// `ask how many tasks are running?`: a question to the companion. Its
+/// answer comes when the model has given it: on the screen it is shown
+/// then, and the prompt is free meanwhile; the serial port waits for it.
+fn ask(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    // the answer has to find its way back: those two sessions know how
+    if sys.session != crate::events::SCREEN && sys.session != crate::events::SERIAL {
+        out.line(Style::Error, b"ask is typed at the machine itself, or on its serial port.");
+        return false;
+    }
+    match crate::companion::ask(sys, arg) {
+        Ok(()) => true,
+        Err(message) => {
+            out.line(Style::Error, message.bytes());
+            false
+        }
+    }
+}
+
+/// Who the companion is, and what it is doing.
+fn companion(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    if !arg.is_empty() {
+        out.line(Style::Error, b"companion takes nothing after it. To change who it is: update companions set ...");
+        return false;
+    }
+    let who = crate::companion::who(&sys.db);
+    let mut t = Table::new(b"companion", &[b"item", b"value"]);
+    t.row(&[b"name", who.name.bytes()]);
+    t.row(&[b"model", who.model.bytes()]);
+    t.row(&[b"at", who.place.bytes()]);
+    let mut key = Text::from_bytes(who.key.bytes());
+    key.push_bytes(if crate::secrets::get(&sys.db, who.key.bytes()).is_some() { b": kept" } else { b": not set, see key" });
+    t.row(&[b"key", key.bytes()]);
+    if !who.character.is_empty() {
+        t.row(&[b"character", who.character.bytes()]);
+    }
+    let mut text = Text::new();
+    let _ = match sys.companion.stage {
+        crate::companion::Stage::Idle => write!(text, "nothing asked"),
+        crate::companion::Stage::Calling => write!(text, "answering, for {} s", sys.ticks.saturating_sub(sys.companion.since) / 100),
+    };
+    t.row(&[b"now", text.bytes()]);
+    for (item, count) in [(&b"calls to the model"[..], sys.companion.calls), (b"queries run for it", sys.companion.queries)] {
+        text.clear();
+        let _ = write!(text, "{count}");
+        t.row(&[item, text.bytes()]);
+    }
+    out.table(&t);
+    true
+}
+
 /// The keys that open services to this machine: `key` lists their names,
 /// `key set openrouter sk-...` keeps one, `key forget openrouter` forgets
 /// it. A key is never shown: not here, not by SQL, not to a browser.
@@ -3305,6 +3362,83 @@ pub mod tests {
     }
 
     #[test]
+    fn the_companion_is_asked_and_tells_who_asked() {
+        use crate::companion::{heard, tell, waits, Outcome, Stage};
+        let mut sys = System::new();
+        // who it is before anything was asked: what it will be
+        assert_eq!(
+            run_line(&mut sys, "companion").1.lines,
+            [
+                "   item                value",
+                "   name                Xila",
+                "   model               deepseek/deepseek-v4.1-flash-1017",
+                "   at                  https://openrouter.ai/api/v1/chat/completions",
+                "   key                 openrouter: not set, see key",
+                "   now                 nothing asked",
+                "   calls to the model  0",
+                "   queries run for it  0",
+            ]
+        );
+        assert_eq!(run_line(&mut sys, "companion now").1.lines, ["companion takes nothing after it. To change who it is: update companions set ..."]);
+        assert_eq!(run_line(&mut sys, "ask").1.lines, ["Type ask and what you want to know: ask how many tasks are running?"]);
+        assert_eq!(run_line(&mut sys, "ask hello?").1.lines, ["No key opens the model. Type key set openrouter and the key."]);
+        run_line(&mut sys, "key set openrouter sk-or-v1-secret");
+        assert_eq!(run_line(&mut sys, "ask hello?").1.lines, ["This machine has no address on the network yet. Type net to see why."]);
+        sys.net.ip = Some([10, 0, 2, 15]);
+        // from the network the answer would not find its way back
+        sys.session = crate::events::NETWORK;
+        assert_eq!(run_line(&mut sys, "ask hello?").1.lines, ["ask is typed at the machine itself, or on its serial port."]);
+        sys.session = crate::events::SERIAL;
+        // asked: nothing is said yet, and the one who asked waits
+        let (ok, out) = run_line(&mut sys, "ask how are you, in a few words?");
+        assert!(ok && out.lines.is_empty());
+        assert!(waits(&sys, crate::events::SERIAL) && !waits(&sys, crate::events::SCREEN));
+        let mut told = Lines::default();
+        assert_eq!((tell(&mut sys, crate::events::SERIAL, &mut told), tell(&mut sys, crate::events::SCREEN, &mut told)), (None, None));
+        sys.ticks += 250;
+        assert_eq!(run_line(&mut sys, "companion").1.lines[4..6], ["   key                 openrouter: kept", "   now                 answering, for 2 s"]);
+        assert_eq!(run_line(&mut sys, "ask and now?").1.lines, ["The companion is still answering the last question."]);
+        // the answer comes: long lines are cut at spaces, and the lines of the model are kept
+        let long = "word ".repeat(30);
+        let answer = format!(r#"{{"choices":[{{"message":{{"content":"Fine.\n{}end\n\nA last line with a tab\there."}}}}]}}"#, long);
+        heard(&mut sys, Ok((200, answer.as_bytes())));
+        assert_eq!((sys.companion.stage, sys.companion.outcome), (Stage::Idle, Some(Outcome::Said(1))));
+        assert!(waits(&sys, crate::events::SERIAL));
+        assert_eq!(tell(&mut sys, crate::events::SCREEN, &mut told), None, "not the one who asked");
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(true));
+        assert_eq!(told.lines, ["Fine.".to_string(), "word ".repeat(15).trim_end().to_string(), "word ".repeat(15) + "end", String::new(), "A last line with a tab here.".to_string()]);
+        assert!(told.lines.iter().all(|line| line.len() < COLS) && told.errors == 0);
+        // told once
+        assert!(!waits(&sys, crate::events::SERIAL));
+        // what it says before it looks, and what it answers after, are apart; a long answer is one
+        run_line(&mut sys, "ask and the notes?");
+        heard(&mut sys, Ok((200, br#"{"choices":[{"message":{"content":"Let me look.","tool_calls":[{"id":"a","function":{"name":"select","arguments":"{\"query\":\"select 1\"}"}}]}}]}"#)));
+        let long = "x".repeat(950);
+        heard(&mut sys, Ok((200, format!(r#"{{"choices":[{{"message":{{"content":"Found: {long}"}}}}]}}"#).as_bytes())));
+        let mut told = Lines::default();
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(true));
+        // (a line is cut at its last space, or where the screen ends when it has none)
+        assert_eq!(told.lines[..3], ["Let me look.".to_string(), "Found:".to_string(), "x".repeat(79)]);
+        assert_eq!(told.lines[2..].concat(), long);
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), None);
+        // a question that fails is a command that fails, in the server's own words when it has some
+        run_line(&mut sys, "ask hello?");
+        heard(&mut sys, Ok((402, br#"{"error":{"message":"This request requires more credits than the key has left, or the account is not allowed to use this model at all today","code":402}}"#)));
+        let mut told = Lines::default();
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(false));
+        assert_eq!(told.lines.len(), 2);
+        assert!(told.lines[0].starts_with("The model's server refused (402): This request requires more credits") && told.errors == 2, "{:?}", told.lines);
+        for why in [crate::ask::Failed::Silent, crate::ask::Failed::Name(crate::dns::Failed::NoSuchName), crate::ask::Failed::NoChance, crate::ask::Failed::Cut] {
+            run_line(&mut sys, "ask hello?");
+            heard(&mut sys, Err(why));
+            let mut told = Lines::default();
+            assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(false));
+            assert!(told.lines.len() == 1 && told.lines[0].len() > 20 && told.lines[0].len() < COLS, "{:?}", told.lines);
+        }
+        assert_eq!(run_line(&mut sys, "companion").1.lines[6], "   calls to the model  8");
+    }
+
+    #[test]
     fn net_tells_of_the_card_the_cable_and_the_address() {
         let mut sys = System::new();
         assert_eq!(run_line(&mut sys, "net").1.lines, ["XilaOS drives no network card of this machine. Type devices to see what it has."]);
@@ -3810,7 +3944,7 @@ pub mod tests {
         assert_eq!(complete(b"he"), (1, FixedStr::from_bytes(b"help ")));
         let (n, common) = complete(b"m");
         assert_eq!((n, common.bytes()), (2, &b"m"[..]));
-        assert_eq!(complete(b"c").0, 4);
+        assert_eq!(complete(b"c").0, 5);
         assert_eq!(complete(b"u").0, 3);
         assert_eq!(complete(b"wh"), (1, FixedStr::from_bytes(b"while ")));
         let mut sorted = NAMES;

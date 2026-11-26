@@ -125,7 +125,17 @@ pub fn row_from(fields: &[Field], kinds: &[Kind]) -> Row {
             (Field::Int(n), _) => Value::Int(n),
             (Field::Dec(units), Some(Kind::Dec(scale))) => Value::Dec(units, *scale),
             (Field::Dec(units), _) => Value::Int(units),
-            (Field::Text(text), _) => Value::text(text),
+            // A text kept by other means than SQL (a line of a program, of
+            // what the companion said) may be long and hold what ends a line
+            // or sets cells apart: SQL shows its start, and a space for each
+            // of those, which would break a table on the serial port.
+            (Field::Text(text), _) => {
+                let mut shown = Text::new();
+                for &byte in text.iter().take(48) {
+                    shown.push(if byte < 0x20 { b' ' } else { byte });
+                }
+                Value::Text(shown)
+            }
         };
     }
     row

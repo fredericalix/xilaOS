@@ -525,6 +525,8 @@ sensitive to case. `?` is another name for `help`, and `cls` for `clear`.
 | `mood [calm\|auto\|intense]` | Says or sets the mood. Auto follows the typing. |
 | `keymap [us\|fr]` | Says or changes the keyboard layout. |
 | `key`, `key set name key`, `key forget name` | Lists the keys to services by name; keeps one; forgets one. A key is never shown. |
+| `ask question` | Asks the companion, which reads the tables to answer. See [The companion](14-the-companion.md). |
+| `companion` | Who the companion is, and what it is doing. |
 | `qr command` | Runs a command and shows what it says as a QR code. |
 | `peek` | Writes the characters on the screen, one line per row. |
 

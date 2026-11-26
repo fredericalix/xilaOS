@@ -29,6 +29,9 @@ The same content as one file: [xilaos.pdf](xilaos.pdf) (rebuild it with
 11. [Hardware and graphics](11-hardware.md): drivers, the display path,
     the Intel chip.
 
+14. [The companion](14-the-companion.md): what to ask it, what it
+    sees, what is kept, how it is built.
+
 ## Working on it
 
 12. [Development and testing](12-development.md): the serial protocol,

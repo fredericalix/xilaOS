@@ -127,7 +127,10 @@ storage engine allocates.
 | `change.rs` | 647 | `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`. |
 | `city.rs` | 529 | The city: the scene from the system state, the isometric drawing. |
 | `gpt.rs` | 529 | GPT partition tables: reading, describing, the layout `install` writes. |
+| `companion.rs` | 520 | The companion: what is sent to its model, what is made of the answer, what is kept. (Its tests are as long again.) |
 | `dns.rs` | 520 | Names: the question to a name server, its answer, the names kept. |
+| `json.rs` | 250 | JSON written into a buffer and read where it lies, with no tree. |
+| `secrets.rs` | 100 | Keys to services, in a table SQL does not know. |
 | `web.rs` | 517 | The read-only pages of tables for a browser. |
 | `remote.rs` | 464 | The prompt over the network: the code, the message format. |
 | `grid.rs` | 406 | The grid of cells, change tracking, choosing a screen mode. |
