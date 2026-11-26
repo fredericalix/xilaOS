@@ -32,6 +32,7 @@ pub mod mem;
 pub mod net;
 pub mod qr;
 pub mod remote;
+pub mod secrets;
 pub mod settings;
 pub mod shell;
 pub mod sql;

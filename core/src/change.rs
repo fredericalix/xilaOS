@@ -72,6 +72,9 @@ fn stored(db: &Database, name: &[u8]) -> Result<Schema, Message> {
     if catalog::find(name).is_some() {
         return Err(error(name, b" is a view of the system and cannot be changed."));
     }
+    if catalog::kept_apart(name) {
+        return Err(error(name, b" is kept apart by the system: SQL neither reads nor changes it."));
+    }
     match db.find(name) {
         Some(index) => Ok(stored_schema(&db.tables()[index], index)),
         None => {
@@ -124,7 +127,7 @@ fn field<'a>(schema: &Schema, column: usize, value: &'a Value) -> Result<Field<'
 
 fn create(db: &mut Database, lexer: &mut Lexer) -> Result<Done, Message> {
     let name = lexer.word(b"a name for the table")?;
-    if catalog::find(name).is_some() {
+    if catalog::find(name).is_some() || catalog::kept_apart(name) {
         return Err(error(name, b" is a table of the system. Pick another name."));
     }
     lexer.expect(b"(")?;

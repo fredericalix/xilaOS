@@ -83,6 +83,15 @@ impl LineEditor {
         line
     }
 
+    /// Forgets the line that was just taken: it held something that is
+    /// not to be shown again.
+    pub fn forget(&mut self) {
+        if self.history_len > 0 {
+            self.history.copy_within(1..HISTORY, 0);
+            self.history_len -= 1;
+        }
+    }
+
     /// Shows the previous line of the history.
     pub fn older(&mut self) {
         let next = self.recalled.map_or(0, |i| i + 1);

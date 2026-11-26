@@ -261,6 +261,10 @@ impl Ui {
             Key::Tab => self.complete(),
             Key::Enter => {
                 let line = self.editor.take();
+                if shell::typed(line.bytes()) != line {
+                    // it holds a secret: the arrow keys do not bring it back
+                    self.editor.forget();
+                }
                 self.run(sys, line.bytes());
             }
             _ => {}
@@ -273,7 +277,8 @@ impl Ui {
         term.scroll = 0;
         term.new_row();
         term.put(shell::prompt(sys, events::SCREEN), role::TERM_PROMPT);
-        term.put(line, role::TERM_CMD);
+        // as it may be shown: a key that is set is not
+        term.put(shell::typed(line).bytes(), role::TERM_CMD);
         sys.session = events::SCREEN;
         shell::exec(sys, line, &mut TermOut { term });
         sys.nudge(50);
@@ -755,6 +760,28 @@ mod tests {
         ui.render(&mut sys);
         assert_eq!(body(&ui), ["XilaOS|all:/>mood calm", "Mood is calm.", "XilaOS|all:/>"]);
         assert!(row(&ui, 2).contains("mood [calm]"));
+    }
+
+    #[test]
+    fn a_key_that_is_typed_is_not_shown_again() {
+        let (mut ui, mut sys) = start();
+        type_text(&mut ui, &mut sys, "key set openrouter sk-or-v1-secret");
+        ui.key(&mut sys, key(Key::Enter));
+        ui.render(&mut sys);
+        let shown: Vec<String> = (0..ui.grid.rows).map(|at| row(&ui, at)).collect();
+        // the screen keeps stars in place of the key
+        assert!(shown.iter().any(|row| row.contains("key set openrouter ********")), "{shown:?}");
+        assert!(shown.iter().any(|row| row.contains("The key openrouter is kept. It is never shown.")));
+        assert!(!shown.iter().any(|row| row.contains("sk-or")), "{shown:?}");
+        // and the arrow that brings lines back does not bring that one
+        type_text(&mut ui, &mut sys, "mood calm");
+        ui.key(&mut sys, key(Key::Enter));
+        ui.key(&mut sys, key(Key::Up));
+        assert_eq!(ui.editor.bytes(), b"mood calm");
+        ui.key(&mut sys, key(Key::Up));
+        assert_eq!(ui.editor.bytes(), b"mood calm", "nothing older to bring back");
+        // the key itself is kept
+        assert_eq!(crate::secrets::get(&sys.db, b"openrouter").unwrap().bytes(), b"sk-or-v1-secret");
     }
 
     #[test]

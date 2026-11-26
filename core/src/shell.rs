@@ -1128,9 +1128,9 @@ impl System {
 }
 
 /// Names of the commands, for completion.
-pub const NAMES: [&[u8]; 50] = [
+pub const NAMES: [&[u8]; 51] = [
     b"about", b"cancel", b"city", b"clear", b"create", b"delete", b"devices", b"disk", b"display", b"drop", b"else", b"end", b"every", b"for", b"help",
-    b"if", b"insert", b"install", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"peek", b"program", b"programs", b"qr", b"reboot",
+    b"if", b"insert", b"install", b"key", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"peek", b"program", b"programs", b"qr", b"reboot",
     b"remote", b"return",
     b"run", b"say", b"screen", b"select", b"show", b"spin", b"stop", b"tables", b"tasks", b"theme", b"time", b"unlisten", b"update",
     b"uptime", b"vars", b"web", b"while",
@@ -1159,7 +1159,7 @@ pub fn prompt(sys: &System, session: usize) -> &'static [u8] {
 /// The prompt while a block is open: as wide as the other.
 pub const CONTINUE: &[u8] = b"          ..>";
 
-const HELP_COMMANDS: [&[u8]; 34] = [
+const HELP_COMMANDS: [&[u8]; 35] = [
     b"XilaOS commands:",
     b"   tables                     - Lists the tables: the system's and yours.",
     b"   select ...                 - Reads a table: select name from tasks",
@@ -1186,6 +1186,7 @@ const HELP_COMMANDS: [&[u8]; 34] = [
     b"   mood [calm|auto|intense]   - Sets the mood. Auto follows your typing.",
     b"   theme [day|night]          - Changes the colors.",
     b"   keymap [us|fr]             - Changes the keyboard layout.",
+    b"   key [set n k|forget n]     - Keys to services: kept, never shown again.",
     b"   time                       - The date and the time, by the machine's clock.",
     b"   uptime                     - Time since the system started.",
     b"   city                       - Lists the blocks of the city and their heights.",
@@ -1289,6 +1290,7 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
         b"mood" => mood(sys, arg, out),
         b"theme" => theme(sys, arg, out),
         b"keymap" => keymap(sys, arg, out),
+        b"key" => key(sys, arg, out),
         b"uptime" => uptime(sys, out),
         b"time" => time(sys, out),
         b"tasks" => tasks(sys, out),
@@ -2309,6 +2311,95 @@ fn keymap(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     })
 }
 
+/// A line as it may be shown on a screen and kept in the history of the
+/// prompt: the same, unless it sets a key, whose value becomes stars.
+pub fn typed(line: &[u8]) -> crate::line::Line {
+    let mut shown = crate::line::Line::from_bytes(line);
+    let (first, rest) = split_word(trim(line));
+    let (second, rest) = split_word(trim(rest));
+    let (_, value) = split_word(trim(rest));
+    let value = trim(value);
+    if first.eq_ignore_ascii_case(b"key") && second.eq_ignore_ascii_case(b"set") && !value.is_empty() {
+        // everything after the name, whatever it is
+        shown = crate::line::Line::from_bytes(&line[..line.len() - value.len() - (line.len() - trim_end(line).len())]);
+        shown.push_bytes(b"********");
+    }
+    shown
+}
+
+fn trim_end(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().rposition(|byte| *byte != b' ').map_or(0, |at| at + 1);
+    &bytes[..end]
+}
+
+/// The keys that open services to this machine: `key` lists their names,
+/// `key set openrouter sk-...` keeps one, `key forget openrouter` forgets
+/// it. A key is never shown: not here, not by SQL, not to a browser.
+fn key(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    let (word, rest) = split_word(arg);
+    let (name, value) = split_word(trim(rest));
+    let value = trim(value);
+    if arg.is_empty() {
+        let mut t = Table::new(b"keys", &[b"name", b"key"]);
+        crate::secrets::names(&sys.db, &mut |name| t.row(&[name, b"kept, never shown"]));
+        if t.rows == 0 {
+            out.line(Style::Out, b"No key is kept. To keep one: key set openrouter and the key.");
+            return true;
+        }
+        out.table(&t);
+        return true;
+    }
+    if word.eq_ignore_ascii_case(b"set") {
+        // from the network it would have crossed it in clear already
+        if sys.session == crate::events::NETWORK {
+            out.line(Style::Error, b"key set is typed at the machine itself: the network would see the key.");
+            return false;
+        }
+        if !xila_db::good_name(name) || !crate::secrets::good_value(value) {
+            out.line(Style::Error, b"Type key set, a name, and the key, which holds no space: key set openrouter sk-...");
+            return false;
+        }
+        return match crate::secrets::set(&mut sys.db, name, value) {
+            Ok(replaced) => {
+                let mut line = FixedStr::<COLS>::from_bytes(b"The key ");
+                line.push_bytes(name);
+                line.push_bytes(if replaced { b" is replaced. It is never shown." } else { b" is kept. It is never shown." });
+                out.line(Style::Done, line.bytes());
+                true
+            }
+            Err(xila_db::Error::BadName) => {
+                out.line(Style::Error, b"A table named kept_keys is in the way: it is not the one keys are kept in.");
+                false
+            }
+            Err(why) => {
+                out.line(Style::Error, crate::change::engine_error(why, None).bytes());
+                false
+            }
+        };
+    }
+    if word.eq_ignore_ascii_case(b"forget") && xila_db::good_name(name) && value.is_empty() {
+        return match crate::secrets::forget(&mut sys.db, name) {
+            Ok(true) => {
+                let mut line = FixedStr::<COLS>::from_bytes(b"The key ");
+                line.push_bytes(name);
+                line.push_bytes(b" is forgotten.");
+                out.line(Style::Done, line.bytes());
+                true
+            }
+            Ok(false) => {
+                out.line(Style::Error, b"No key is kept under that name. Type key to list them.");
+                false
+            }
+            Err(why) => {
+                out.line(Style::Error, crate::change::engine_error(why, None).bytes());
+                false
+            }
+        };
+    }
+    out.line(Style::Error, b"After key: nothing, set with a name and the key, or forget with a name.");
+    false
+}
+
 /// Says the date and the time.
 fn time(sys: &mut System, out: &mut dyn Out) -> bool {
     let Some(now) = sys.now() else {
@@ -3151,6 +3242,66 @@ pub mod tests {
         assert!(sys.web.code().is_none() && !sys.net.tcp.listens(crate::web::PORT));
         let (ok, out) = run_line(&mut sys, "web maybe");
         assert!(!ok && out.lines == ["Type web, web on or web off."]);
+    }
+
+    #[test]
+    fn keys_are_kept_and_never_shown() {
+        let mut sys = System::new();
+        assert_eq!(run_line(&mut sys, "key").1.lines, ["No key is kept. To keep one: key set openrouter and the key."]);
+        for wrong in ["key set", "key set openrouter", "key set open router sk", "key set 1x sk-or", "key set openrouter caf\u{e9}"] {
+            let (ok, out) = run_line(&mut sys, wrong);
+            assert!(!ok, "{wrong}");
+            assert_eq!(out.lines, ["Type key set, a name, and the key, which holds no space: key set openrouter sk-..."], "{wrong}");
+        }
+        for wrong in ["key show openrouter", "key forget", "key forget open router", "key openrouter"] {
+            assert_eq!(run_line(&mut sys, wrong).1.lines, ["After key: nothing, set with a name and the key, or forget with a name."], "{wrong}");
+        }
+        assert_eq!(run_line(&mut sys, "key forget openrouter").1.lines, ["No key is kept under that name. Type key to list them."]);
+        let (ok, out) = run_line(&mut sys, "key set openrouter sk-or-v1-secret");
+        assert!(ok);
+        assert_eq!(out.lines, ["The key openrouter is kept. It is never shown."]);
+        assert_eq!(run_line(&mut sys, "key set OpenRouter sk-or-v1-secret-two").1.lines, ["The key OpenRouter is replaced. It is never shown."]);
+        run_line(&mut sys, "create table notes (label text)");
+        assert_eq!(run_line(&mut sys, "key").1.lines, ["   name        key", "   OpenRouter  kept, never shown"]);
+        // SQL does not know where keys are kept: nothing lists the table, reads it or changes it
+        let statements = [
+            "key", "tables", "select * from tables", "select * from columns", "select * from kept_keys", "select value from kept_keys", "select * from notes join kept_keys on 1 = 1",
+            "drop table kept_keys", "delete from kept_keys", "insert into kept_keys values ('a', 'b')", "update kept_keys set value = 'x'", "create table kept_keys (n int)", "create table KEPT_KEYS (n int)",
+            "disk", "mem", "city",
+        ];
+        for statement in statements {
+            let (ok, out) = run_line(&mut sys, statement);
+            assert!(!out.lines.iter().any(|line| line.contains("sk-or")), "{statement}: {:?}", out.lines);
+            if statement != "key" {
+                assert!(!out.lines.iter().any(|line| line.contains("kept_keys")) || !ok, "{statement} lists it: {:?}", out.lines);
+            }
+            if statement.to_ascii_lowercase().contains("kept_keys") {
+                assert!(!ok, "{statement}");
+            }
+        }
+        // nor does the language, which reads tables the same way
+        run_line(&mut sys, "for k in select * from kept_keys");
+        run_line(&mut sys, "say k");
+        let (ok, out) = run_line(&mut sys, "end");
+        assert!(!ok && !out.lines.iter().any(|line| line.contains("sk-or")), "{:?}", out.lines);
+        assert_eq!(run_line(&mut sys, "delete from kept_keys").1.lines, ["kept_keys is kept apart by the system: SQL neither reads nor changes it."]);
+        assert_eq!(run_line(&mut sys, "create table kept_keys (n int)").1.lines, ["kept_keys is a table of the system. Pick another name."]);
+        assert_eq!(run_line(&mut sys, "select count(*) from tables where kind = 'stored'").1.lines[1], "   1");
+        // after all that the key is still there, whole
+        assert_eq!(crate::secrets::get(&sys.db, b"openrouter").unwrap().bytes(), b"sk-or-v1-secret-two");
+        // from the network a key would cross it in clear: it is set at the machine
+        sys.session = crate::events::NETWORK;
+        assert_eq!(run_line(&mut sys, "key set other secret").1.lines, ["key set is typed at the machine itself: the network would see the key."]);
+        assert_eq!(run_line(&mut sys, "key").1.lines.len(), 2);
+        sys.session = crate::events::SCREEN;
+        assert_eq!(run_line(&mut sys, "key forget openrouter").1.lines, ["The key openrouter is forgotten."]);
+        assert_eq!(run_line(&mut sys, "key").1.lines, ["No key is kept. To keep one: key set openrouter and the key."]);
+        // what a screen shows of a line that sets a key, and keeps in its history
+        assert_eq!(typed(b"key set openrouter sk-or-v1-secret").bytes(), b"key set openrouter ********");
+        assert_eq!(typed(b"  KEY  SET  openrouter   sk-or two words  ").bytes(), b"  KEY  SET  openrouter   ********");
+        for plain in ["key set openrouter", "key forget openrouter", "key", "select 'key set a b'", "keymap fr", ""] {
+            assert_eq!(typed(plain.as_bytes()).bytes(), plain.as_bytes(), "{plain}");
+        }
     }
 
     #[test]

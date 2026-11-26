@@ -72,7 +72,7 @@ pub fn scene(sys: &System) -> [Plot; PLOTS] {
     ];
     // Home: the tables the user made. A block grows with the rows of its
     // table and is lit for a few seconds when the table is read or changed.
-    for table in sys.db.tables() {
+    for table in sys.db.tables().iter().filter(|table| !crate::catalog::kept_apart(&table.name)) {
         let touched = table.read_at.max(table.written_at);
         plots[HOME].add(&table.name, 5 + (table.rows() as u64 * 2).min(35), touched != 0 && sys.ticks.saturating_sub(touched) < 300);
     }

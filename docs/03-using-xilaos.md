@@ -301,6 +301,35 @@ Settings ............ 3 kept from before, in the table kept_settings
 
 Without a disk the tables live in memory, and the settings are lost with them.
 
+## Keys to services
+
+A service of the Internet is opened by a key: a long word that says who
+asks, and pays for what is asked. `key set` keeps one under a name:
+
+```
+XilaOS|all:/>key set openrouter ********
+The key openrouter is kept. It is never shown.
+XilaOS|all:/>key
+   name        key
+   openrouter  kept, never shown
+```
+
+The stars are what the screen shows of the line once it is entered: the
+key itself is what was typed. The line is not kept in the history of
+the prompt either. `key forget openrouter` forgets it.
+
+A key is never shown again, by anything. `key` lists names only. SQL
+does not know the table keys are kept in: it is not listed, and cannot
+be read, changed, dropped or made, so neither a `select`, a program,
+the pages for browsers nor the companion can show a key. From the
+prompt over the network `key set` is refused, since the key would have
+crossed the network in clear to get there.
+
+What this is not: a vault. The disk is not encrypted, and a key is
+written on it as it was typed, for whoever reads the disk from another
+system. On the serial port, the line that sets a key is echoed like
+any other.
+
 ## Looking at the system
 
 ![Completion, time, tasks and about](screenshots/ui-system.png)
@@ -495,6 +524,7 @@ sensitive to case. `?` is another name for `help`, and `cls` for `clear`.
 | `theme [day\|night]` | Says or changes the colors. |
 | `mood [calm\|auto\|intense]` | Says or sets the mood. Auto follows the typing. |
 | `keymap [us\|fr]` | Says or changes the keyboard layout. |
+| `key`, `key set name key`, `key forget name` | Lists the keys to services by name; keeps one; forgets one. A key is never shown. |
 | `qr command` | Runs a command and shows what it says as a QR code. |
 | `peek` | Writes the characters on the screen, one line per row. |
 

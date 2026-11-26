@@ -939,10 +939,13 @@ with Xila(net="e1000e", web=browsed) as x:
     code = opened.group(1) if opened else "?"
     x.cmd("create table notes (title text, stars int)")
     x.cmd("insert into notes values ('<i>tags</i> & such', 4)")
+    x.cmd("key set openrouter sk-test-on-the-web")
     status, text = page("/%s/" % code)
     listed = set(re.findall(r'<td><a href="/%s/t/(\w+)">\1</a></td>' % code, text))
     names = {row["name"] for row in x.table("select name from tables")}
     check("web: the first page lists every table, with a link to each", status == 200 and listed == names and "notes" in names and text.startswith("<!doctype html>"), (status, listed, names))
+    hidden = [page("/%s/t/%s" % (code, table)) for table in ("kept_keys", "KEPT_KEYS", "tables", "columns")]
+    check("web: no page shows a key, nor where keys are kept", "kept_keys" not in text and [status for status, _ in hidden] == [404, 404, 200, 200] and not any("sk-test" in said or "kept_keys" in said for _, said in hidden[2:]), [status for status, _ in hidden])
     status, text = page("/%s/t/notes" % code)
     check("web: the page of a table shows its rows, as text and never as a page of their own", status == 200 and "<td>&lt;i&gt;tags&lt;/i&gt; &amp; such</td><td>4</td>" in text and "<i>" not in text and "<p>1 row.</p>" in text, text[-300:])
     status, text = page("/%s/t/commands" % code)
@@ -1352,6 +1355,34 @@ with Xila(more=["-rtc", "base=2026-03-04T23:59:45"]) as x:
     x.cmd("every day at noon")
     ok, lines = x.cmd("end")
     check("every day at: wants a time", not ok and lines == ["Write: every 5 minutes (or seconds, hours, days), or every day at 8:00"], lines)
+
+# Keys to services: kept on the disk, and shown by nothing.
+keys_disk = blank_disk(os.path.join(ROOT, "build", "keys.img"))
+with Xila(disk=keys_disk) as x:
+    check("key: none is kept at first", x.cmd("key") == (True, ["No key is kept. To keep one: key set openrouter and the key."]), x.cmd("key"))
+    ok, lines = x.cmd("key set openrouter sk-test-0123456789")
+    check("key set: a key is kept", ok and lines == ["The key openrouter is kept. It is never shown."], lines)
+    x.cmd("create table mine (n int)")
+    check("key: lists the names, never the keys", x.table("key") == [{"name": "openrouter", "key": "kept, never shown"}], x.cmd("key"))
+    shown = []
+    for command in ("tables", "select * from tables", "select * from columns", "city", "disk", "disk check", "mem", "select * from kept_keys", "select * from mine join kept_keys on 1 = 1"):
+        shown += x.cmd(command, timeout=60)[1]
+    check("key: nothing lists where keys are kept, and nothing shows one", not any("sk-test" in line or "kept_keys" in line.replace("Unknown table: kept_keys", "") for line in shown), [line for line in shown if "kept" in line or "sk-" in line])
+    refused = [x.cmd(statement)[0] for statement in ("select * from kept_keys", "drop table kept_keys", "delete from kept_keys", "update kept_keys set value = 'x'", "insert into kept_keys values ('a', 'b')", "create table kept_keys (n int)")]
+    check("key: SQL can neither read, change, drop nor make that table", refused == [False] * 6, refused)
+    # typed at the keyboard: the screen keeps stars, and the arrow does not bring the line back
+    x.type("key set typed abc123")
+    x.key("ret", 0.4)
+    screen = x.peek()
+    check("key set: typed at the keyboard, the screen shows stars in its place", any("key set typed ********" in row for row in screen) and not any("abc123" in row for row in screen), [row for row in screen if "key" in row])
+    x.key("up", 0.3)
+    check("key set: and the arrow that brings lines back does not bring that one", not any("abc123" in row or "key set" in row.split(">")[-1] for row in x.peek()[-3:]), x.peek()[-3:])
+    time.sleep(0.3)
+with Xila(disk=keys_disk) as x:
+    check("key: kept from one start to the next", sorted(row["name"] for row in x.table("key")) == ["openrouter", "typed"], x.cmd("key"))
+    ok, lines = x.cmd("key forget typed")
+    check("key forget: a key is forgotten", ok and lines == ["The key typed is forgotten."] and x.table("key") == [{"name": "openrouter", "key": "kept, never shown"}], lines)
+    check("key forget: wants a key that is kept", x.cmd("key forget typed") == (False, ["No key is kept under that name. Type key to list them."]))
 
 # What the user chose is kept from one start to the next, in a table.
 kept_disk = blank_disk(os.path.join(ROOT, "build", "settings.img"))

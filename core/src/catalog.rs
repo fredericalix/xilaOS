@@ -92,12 +92,19 @@ fn number(n: u64) -> Value {
     Value::Int(n as i64)
 }
 
+/// Whether a stored table is kept apart from SQL: not listed, not read,
+/// not changed. The table of keys is the one.
+pub fn kept_apart(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(crate::secrets::TABLE)
+}
+
 impl Source for System {
     fn schema(&self, name: &[u8]) -> Option<Schema> {
         if let Some(index) = find(name) {
             return Some(TABLES[index].schema(index));
         }
-        let index = self.db.find(name)?;
+        // the table of keys is nobody's to read: SQL does not know it
+        let index = self.db.find(name).filter(|_| !kept_apart(name))?;
         Some(stored_schema(&self.db.tables()[index], index))
     }
 
@@ -140,13 +147,13 @@ impl System {
                 for (i, def) in TABLES.iter().enumerate() {
                     let mut rows = 0;
                     if i == 0 {
-                        rows = TABLES.len() + stored.len();
+                        rows = TABLES.len() + stored.iter().filter(|table| !kept_apart(&table.name)).count();
                     } else {
                         self.scan(i, &mut |_| rows += 1)?;
                     }
                     visit(&row(&[text(def.name), text(b"system"), number(def.columns.len() as u64), number(rows as u64), text(def.about)]));
                 }
-                for table in stored {
+                for table in stored.iter().filter(|table| !kept_apart(&table.name)) {
                     visit(&row(&[text(&table.name), text(b"stored"), number(table.columns.len() as u64), number(table.rows() as u64), Value::Null]));
                 }
             }
@@ -157,7 +164,7 @@ impl System {
                         visit(&row(&[text(def.name), number(position as u64 + 1), text(name), text(kind)]));
                     }
                 }
-                for table in stored {
+                for table in stored.iter().filter(|table| !kept_apart(&table.name)) {
                     for (position, column) in table.columns.iter().enumerate() {
                         visit(&row(&[text(&table.name), number(position as u64 + 1), text(&column.name), Value::Text(kind_name(column.kind))]));
                     }

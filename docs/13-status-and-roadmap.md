@@ -41,14 +41,15 @@ were also tried on the real machine.
 | Names (DNS): `net name`, `net names`, `net get` by name | yes | not tried |
 | TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | not tried |
 | HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | not tried |
+| Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 26 November 2026: about 29,500 lines, 270
-unit tests, 404 system checks.
+about 300 system checks. On 26 November 2026: about 29,500 lines, 275
+unit tests, 415 system checks.
 
 ## Known limits of what is done
 
@@ -284,6 +285,13 @@ The steps, in order. Each is merged once verified. Three were done on
   cut short known from a whole one. `net post` tries it by hand; a
   megabyte from the model's server is read in a quarter of a second.
 
+What the author decided for the companion itself, on 26 November 2026:
+its key is kept apart and never shown (`key`, done that day; the disk
+is not encrypted, so this is not a vault); one talks to it on a screen
+of its own and with a command, `ask`; what is said is kept as long
+lines of a table, of which SQL shows the first 48 characters, as for
+`programs`; and it is called Xila.
+
 What is left:
 
 4. **Longer texts, and waiting without holding the system.** A text
@@ -465,9 +473,6 @@ author's agreement. The order that was agreed:
 - What exactly is taken from OS/400: typed objects, single-level
   storage, or both.
 - One user, or several.
-- Where the key that opens the model to the companion is kept: there
-  is no vault for secrets, and the tables can be read from a browser
-  after `web on`.
 - Which states of the system are events the companion hears.
 - How a HyperCard-like is driven with the keyboard alone.
 - Where a tenth system view goes: the `data` plot of the city has
