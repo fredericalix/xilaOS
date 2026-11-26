@@ -1232,7 +1232,7 @@ const HELP_LANGUAGE: [&[u8]; 23] = [
     b"   every 5 minutes ... end    - Runs again and again: seconds, hours, days.",
     b"   every day at 8:00 ... end  - Runs once a day, by the clock of the machine.",
     b"   programs                   - Lists the programs.",
-    b"   show name                  - Shows the lines of a program.",
+    b"   show name                  - Shows a program; show table t, a table.",
     b"   drop program name          - Removes a program.",
     b"   return                     - Leaves the program.",
     b"   vars                       - Lists the names that have a value.",
@@ -1324,6 +1324,8 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
         b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"program") => crate::lang::remove(sys, trim(split_word(arg).1), out),
         b"create" | b"drop" | b"insert" | b"update" | b"delete" => change(sys, line, out),
         b"programs" => crate::lang::list(sys, out),
+        // a table as the statement that would make it; `show table` alone is a program of that name
+        b"show" if split_word(arg).0.eq_ignore_ascii_case(b"table") && !trim(split_word(arg).1).is_empty() => crate::change::written(&sys.db, trim(split_word(arg).1), out),
         b"show" => crate::lang::show(sys, arg, out),
         b"vars" => crate::lang::vars(sys, out),
         b"listen" => listen(sys, arg, out),
@@ -3451,7 +3453,7 @@ pub mod tests {
         let statements = [
             "key", "tables", "select * from tables", "select * from columns", "select * from kept_keys", "select value from kept_keys", "select * from notes join kept_keys on 1 = 1",
             "drop table kept_keys", "delete from kept_keys", "insert into kept_keys values ('a', 'b')", "update kept_keys set value = 'x'", "create table kept_keys (n int)", "create table KEPT_KEYS (n int)",
-            "disk", "mem", "city",
+            "disk", "mem", "city", "show table kept_keys", "show table KEPT_KEYS",
         ];
         for statement in statements {
             let (ok, out) = run_line(&mut sys, statement);
@@ -3801,6 +3803,25 @@ pub mod tests {
         // nothing to answer: nothing failed
         assert!(served(&mut sys, &mut Lines::default()));
         assert_eq!((out.errors, out.lines.concat()), (1, "192.168.1.9 did not answer within a second.".to_string()));
+    }
+
+    #[test]
+    fn show_table_writes_the_statement_that_would_make_it() {
+        let mut sys = System::new();
+        assert!(run_line(&mut sys, "create table notes (label text not null, stars int default 3 check (stars between 1 and 5))").0);
+        let (ok, out) = run_line(&mut sys, "show table Notes");
+        assert!(ok);
+        assert_eq!(out.lines, ["create table notes (", "    label text not null,", "    stars int default 3,", "    check (stars between 1 and 5)", ")"]);
+        // typed again, it makes the same table
+        assert!(run_line(&mut sys, "drop table notes").0);
+        assert!(run_line(&mut sys, &out.lines.join(" ")).0);
+        assert_eq!(run_line(&mut sys, "show table notes").1.lines, out.lines);
+        assert_eq!(run_line(&mut sys, "insert into notes (label) values ('rent')").1.lines, ["1 row added to notes, with id 1."]);
+        assert_eq!(run_line(&mut sys, "update notes set stars = 6").1.lines, ["Refused by a check: stars between 1 and 5"]);
+        // a view of the system is not made by a statement; a program may be called table
+        let (ok, out) = run_line(&mut sys, "show table tasks");
+        assert!(!ok && out.lines == ["tasks is a view of the system and cannot be changed."]);
+        assert_eq!(run_line(&mut sys, "show table").1.lines, ["Unknown program: table. Type programs to list them."]);
     }
 
     #[test]

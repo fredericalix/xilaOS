@@ -1,7 +1,9 @@
 //! The SQL statements that change stored tables.
 //!
 //! ```text
-//! CREATE TABLE name (column type, ...)      type: int, decimal, decimal(p,s), text
+//! CREATE TABLE name (column type [rule ...], ... [, CHECK (condition)])
+//!     type: int, decimal, decimal(p,s), text
+//!     rule: NOT NULL, UNIQUE, DEFAULT value, CHECK (condition)
 //! DROP TABLE name
 //! INSERT INTO name [(column, ...)] VALUES (value, ...) [, (value, ...)]
 //! UPDATE name SET column = value [, ...] [WHERE ...]
@@ -11,10 +13,19 @@
 //! A value is a number, a `'text'` or NULL. Every table has an `id` column
 //! that the engine fills. A statement is one transaction: it is applied
 //! whole or, if anything is wrong, not at all.
+//!
+//! What a column asks of its values is kept by the engine with the table.
+//! The engine itself refuses a row without a value where NOT NULL asks
+//! for one, and a value that another row has where UNIQUE says so: that
+//! holds for whoever writes rows. The value by DEFAULT and the conditions
+//! of CHECK are of this file: it gives the first to a row an INSERT does
+//! not give a value, and works out the second for every row an INSERT or
+//! an UPDATE writes. A condition that cannot be known, because a value
+//! is missing, lets the row in.
 
 use core::fmt::Write;
 
-use xila_db::{Change, Database, Error};
+use xila_db::{Change, Database, Error, Rule, MAX_CHECK, MAX_CHECKS};
 
 use crate::catalog::{self, stored_schema};
 use crate::shell::Text;
@@ -51,6 +62,20 @@ pub(crate) fn engine_error(error: Error, schema: Option<&Schema>) -> Message {
         Error::Disk => b"The disk does not answer. Nothing was changed.",
         Error::Stopped => b"A write to the disk failed earlier. Restart before changing anything.",
         Error::Foreign | Error::TooSmall => b"The disk cannot hold the database.",
+        Error::Checks => b"A table keeps 4 checks at most, of 60 characters each.",
+        Error::Missing(column) | Error::Twice(column, _) => {
+            let mut message = Message::from_bytes(b"Column ");
+            if let Some(schema) = schema {
+                message.push_bytes(schema.columns[column.min(MAX_COLUMNS - 1)].bytes());
+            }
+            match error {
+                Error::Twice(_, id) => {
+                    let _ = write!(message, " takes no value twice: row {id} has that one.");
+                }
+                _ => message.push_bytes(b" must have a value."),
+            }
+            return message;
+        }
         Error::Damaged(page) => {
             let mut message = Message::new();
             let _ = write!(message, "The database is damaged: page {page} cannot be read.");
@@ -125,15 +150,129 @@ fn field<'a>(schema: &Schema, column: usize, value: &'a Value) -> Result<Field<'
     }
 }
 
-fn create(db: &mut Database, lexer: &mut Lexer) -> Result<Done, Message> {
+/// A value written alone: a number, a `'text'` or NULL.
+fn constant(lexer: &mut Lexer) -> Result<Value, Message> {
+    let start = lexer.at;
+    let negative = lexer.symbol(b"-");
+    match lexer.next() {
+        Token::Number(_) | Token::Decimal(..) => {}
+        Token::String(_) if !negative => {}
+        Token::Word(word) if !negative && word.eq_ignore_ascii_case(b"null") => {}
+        other => return Err(unexpected(b"a number, a 'text' or NULL", other)),
+    }
+    // read as any value is, so that it is the same value
+    let mut alone = Lexer::new(&lexer.text[start..lexer.at]);
+    expr::parse(&mut alone, Names::without(&NO_VARS, b"A value is expected, not the name "))?.eval(&[Value::Null; MAX_COLUMNS])
+}
+
+/// The condition of a CHECK, after its opening parenthesis: the text up
+/// to the parenthesis that closes it. It is read as a condition once all
+/// the columns are known.
+fn enclosed<'a>(lexer: &mut Lexer<'a>) -> Result<&'a [u8], Message> {
+    let (text, start) = (lexer.text, lexer.at);
+    let (mut depth, mut at, mut quoted) = (1, start, false);
+    while at < text.len() {
+        match text[at] {
+            // a quote written twice inside a text opens and closes nothing
+            b'\'' => quoted = !quoted,
+            b'(' if !quoted => depth += 1,
+            b')' if !quoted => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            break;
+        }
+        at += 1;
+    }
+    if depth != 0 {
+        return Err(Message::from_bytes(b"A check is closed by a parenthesis: check (n > 0)."));
+    }
+    lexer.at = at + 1;
+    let inside = text[start..at].trim_ascii();
+    if inside.is_empty() || inside.len() > MAX_CHECK {
+        let mut message = Message::new();
+        let _ = write!(message, "A check is a condition of {MAX_CHECK} characters at most.");
+        return Err(message);
+    }
+    Ok(inside)
+}
+
+/// The conditions of a table, read once for a statement that writes rows.
+struct Checks {
+    conditions: [Expr; MAX_CHECKS],
+    texts: [FixedStr<MAX_CHECK>; MAX_CHECKS],
+    count: usize,
+}
+
+impl Checks {
+    fn of(db: &Database, schema: &Schema) -> Result<Checks, Message> {
+        let mut checks = Checks { conditions: [Expr::NONE; MAX_CHECKS], texts: [FixedStr::new(); MAX_CHECKS], count: 0 };
+        for text in db.tables()[schema.table - catalog::TABLES.len()].checks.iter().take(MAX_CHECKS) {
+            checks.texts[checks.count] = FixedStr::from_bytes(text);
+            checks.conditions[checks.count] = condition_of(text, schema)?;
+            checks.count += 1;
+        }
+        Ok(checks)
+    }
+
+    /// Refuses a row one of the conditions is known not to hold for, and
+    /// says which.
+    fn hold(&self, row: &[Value]) -> Result<(), Message> {
+        for (condition, text) in self.conditions[..self.count].iter().zip(&self.texts) {
+            if condition.fails(row)? {
+                return Err(error(b"Refused by a check: ", text.bytes()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reads the text of a check as a condition on the columns of its table.
+fn condition_of(text: &[u8], schema: &Schema) -> Result<Expr, Message> {
+    let mut alone = Lexer::new(text);
+    let condition = expr::parse(&mut alone, Names::of(schema, &NO_VARS))?;
+    alone.end()?;
+    Ok(condition)
+}
+
+/// Takes `(condition)` after the word CHECK, and keeps the condition.
+fn check<'a>(lexer: &mut Lexer<'a>, checks: &mut [&'a [u8]; MAX_CHECKS], count: &mut usize) -> Result<(), Message> {
+    lexer.expect(b"(")?;
+    let condition = enclosed(lexer)?;
+    if *count == MAX_CHECKS {
+        return Err(engine_error(Error::Checks, None));
+    }
+    checks[*count] = condition;
+    *count += 1;
+    Ok(())
+}
+
+fn create<'a>(db: &mut Database, lexer: &mut Lexer<'a>) -> Result<Done, Message> {
     let name = lexer.word(b"a name for the table")?;
     if catalog::find(name).is_some() || catalog::kept_apart(name) {
         return Err(error(name, b" is a table of the system. Pick another name."));
     }
     lexer.expect(b"(")?;
-    let mut columns: [(&[u8], Kind); MAX_COLUMNS] = [(b"", Kind::Int); MAX_COLUMNS];
+    // the table as it will be, to read the values by default and the checks
+    let mut schema = Schema::new(0, name, true);
+    schema.add(b"id", Kind::Int);
+    let mut columns: [(&[u8], Kind, Rule); MAX_COLUMNS] = [(b"", Kind::Int, Rule { not_null: false, unique: false, default: None }); MAX_COLUMNS];
+    let mut defaults: [Option<Value>; MAX_COLUMNS] = [None; MAX_COLUMNS];
     let mut count = 0;
+    let mut checks: [&'a [u8]; MAX_CHECKS] = [b""; MAX_CHECKS];
+    let mut check_count = 0;
     loop {
+        // a condition among the columns: `check (...)`, where a column
+        // called check would be followed by its type
+        let before = lexer.at;
+        if lexer.keyword(b"check") && lexer.peek() == Token::Symbol(b"(") {
+            check(lexer, &mut checks, &mut check_count)?;
+            if !lexer.symbol(b",") {
+                break;
+            }
+            continue;
+        }
+        lexer.at = before;
         let column = lexer.word(b"a column name")?;
         let kind = lexer.word(b"a type: int, decimal or text")?;
         let mut lower = FixedStr::<12>::new();
@@ -169,10 +308,31 @@ fn create(db: &mut Database, lexer: &mut Lexer) -> Result<Done, Message> {
                 kind = Kind::Dec(scale as u8);
             }
         }
-        if count == MAX_COLUMNS {
+        if count == MAX_COLUMNS - 1 {
             return Err(engine_error(Error::ColumnCount, None));
         }
-        columns[count] = (column, kind);
+        schema.add(column, kind);
+        // what the column asks of its values, in any order
+        let mut rule = Rule { not_null: false, unique: false, default: None };
+        loop {
+            if lexer.keyword(b"not") {
+                if !lexer.keyword(b"null") {
+                    return Err(unexpected(b"NULL", lexer.peek()));
+                }
+                rule.not_null = true;
+            } else if lexer.keyword(b"unique") {
+                rule.unique = true;
+            } else if lexer.keyword(b"default") {
+                defaults[count] = Some(constant(lexer)?);
+            } else if lexer.keyword(b"check") {
+                check(lexer, &mut checks, &mut check_count)?;
+            } else if lexer.keyword(b"primary") {
+                return Err(Message::from_bytes(b"Every table has id for its key, given by the system: no other is declared."));
+            } else if !lexer.keyword(b"null") {
+                break;
+            }
+        }
+        columns[count] = (column, kind, rule);
         count += 1;
         if !lexer.symbol(b",") {
             break;
@@ -180,9 +340,67 @@ fn create(db: &mut Database, lexer: &mut Lexer) -> Result<Done, Message> {
     }
     lexer.expect(b")")?;
     lexer.end()?;
-    let index = db.create(name, &columns[..count]).map_err(|e| engine_error(e, None))?;
+    if count == 0 {
+        return Err(engine_error(Error::ColumnCount, None));
+    }
+    // a value by default is one the column takes
+    for (at, default) in defaults[..count].iter().enumerate() {
+        if let Some(default) = default {
+            columns[at].2.default = Some(field(&schema, at + 1, default)?);
+        }
+    }
+    // a check is a condition on the columns of this table, read now so
+    // that what is wrong with it is said when the table is made
+    for check in &checks[..check_count] {
+        if condition_of(check, &schema)?.names(0) {
+            return Err(Message::from_bytes(b"A check cannot name id: a row has it only once it is in the table."));
+        }
+    }
+    let index = db.create_with(name, &columns[..count], &checks[..check_count]).map_err(|e| engine_error(e, Some(&schema)))?;
     let table = Name::from_bytes(&db.tables()[index].name);
     Ok(Done { message: error(b"Table ", table.bytes()).also(b" created."), table, event: Some(b"create") })
+}
+
+/// Writes the statement that would make a stored table as it is: its
+/// columns, what they ask, its checks.
+pub fn written(db: &Database, name: &[u8], out: &mut dyn crate::shell::Out) -> bool {
+    let schema = match stored(db, name) {
+        Ok(schema) => schema,
+        Err(message) => {
+            out.line(crate::shell::Style::Error, message.bytes());
+            return false;
+        }
+    };
+    let table = &db.tables()[schema.table - catalog::TABLES.len()];
+    let mut line = FixedStr::<160>::from_bytes(b"create table ");
+    line.push_bytes(&table.name);
+    line.push_bytes(b" (");
+    out.line(crate::shell::Style::Out, line.bytes());
+    let items = table.columns.len() - 1 + table.checks.len();
+    for item in 0..items {
+        line.clear();
+        line.push_bytes(b"    ");
+        match table.columns.get(item + 1) {
+            Some(column) => {
+                line.push_bytes(&column.name);
+                line.push(b' ');
+                line.push_bytes(catalog::kind_name(column.kind).bytes());
+                let mut asked = FixedStr::<96>::new();
+                catalog::rules(column, &mut asked);
+                line.push_bytes(if asked.is_empty() { b"" } else { b" " });
+                line.push_bytes(asked.bytes());
+            }
+            None => {
+                line.push_bytes(b"check (");
+                line.push_bytes(&table.checks[item + 1 - table.columns.len()]);
+                line.push(b')');
+            }
+        }
+        line.push_bytes(if item + 1 < items { b"," } else { b"" });
+        out.line(crate::shell::Style::Out, line.bytes());
+    }
+    out.line(crate::shell::Style::Out, b")");
+    true
 }
 
 fn drop(db: &mut Database, lexer: &mut Lexer) -> Result<Done, Message> {
@@ -230,6 +448,13 @@ fn insert(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
     if !lexer.keyword(b"values") {
         return Err(unexpected(b"VALUES", lexer.peek()));
     }
+    // what a column that is given no value takes, and what every row must hold
+    let mut kept = [Field::Null; MAX_COLUMNS];
+    for (kept, column) in kept.iter_mut().zip(&db.tables()[index].columns) {
+        *kept = column.default.as_ref().map_or(Field::Null, |default| default.field());
+    }
+    let defaults = row_from(&kept[..schema.count], &schema.kinds);
+    let checks = Checks::of(db, &schema)?;
     let mut ids: Option<(u64, u64)> = None;
     let mut rows = 0;
     loop {
@@ -251,14 +476,26 @@ fn insert(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
             }
         }
         lexer.expect(b")")?;
-        let mut fields = [Field::Null; MAX_COLUMNS];
+        // the row as it will be, the id apart: what was given, and the
+        // value by default where nothing was
+        let mut row = defaults;
         for (value, target) in values.iter().zip(&targets[..target_count.min(given)]) {
-            fields[target - 1] = field(&schema, *target, value)?;
+            row[*target] = *value;
+        }
+        let mut fields = [Field::Null; MAX_COLUMNS];
+        for column in 1..schema.count {
+            fields[column - 1] = field(&schema, column, &row[column])?;
         }
         if given != target_count {
             let mut message = Message::new();
             let _ = write!(message, "{target_count} values are expected for each row, not {given}.");
             return Err(message);
+        }
+        if checks.count > 0 {
+            // as the table will keep it: a number in the digits of its column
+            let mut whole = [Field::Null; MAX_COLUMNS];
+            whole[1..schema.count].copy_from_slice(&fields[..schema.count - 1]);
+            checks.hold(&row_from(&whole[..schema.count], &schema.kinds))?;
         }
         let id = db.insert(index, &fields[..schema.count - 1]).map_err(|e| engine_error(e, Some(&schema)))?;
         ids = Some((ids.map_or(id, |(first, _)| first), id));
@@ -310,6 +547,7 @@ fn update(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
     let filter = expr::condition(lexer, &schema, vars)?;
     lexer.end()?;
     let (kinds, sets) = (schema.kinds, &sets[..count]);
+    let checks = Checks::of(db, &schema)?;
     let mut failed = None;
     // a condition on the id goes straight to those rows
     let Some(ids) = among(&filter) else {
@@ -334,6 +572,9 @@ fn update(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
             new[..fields.len()].copy_from_slice(fields);
             for (value, (column, _)) in values.iter().zip(sets) {
                 new[*column] = field(&schema, *column, value)?;
+            }
+            if checks.count > 0 {
+                checks.hold(&row_from(&new[..fields.len()], &kinds))?;
             }
             put(&new[..fields.len()]);
             Ok(())
@@ -481,6 +722,100 @@ mod tests {
         );
         assert_eq!(run(&mut sys, &["insert into expenses (amount, label) values (-0.05, 'refund')"]), "1 row added to expenses, with id 3.");
         sys
+    }
+
+    fn parts() -> System {
+        let mut sys = System::new();
+        let made = "create table parts (label text not null unique, code int unique, count int default 1 check (count >= 0), \
+                    price decimal(8,2) default 2.5 null, kind text default 'it''s', check (code is null or code > 99))";
+        assert_eq!(run(&mut sys, &[made]), "Table parts created.");
+        sys
+    }
+
+    #[test]
+    fn a_row_takes_the_values_by_default_it_is_not_given() {
+        let mut sys = parts();
+        assert_eq!(run(&mut sys, &["insert into parts (label) values ('bolt')"]), "1 row added to parts, with id 1.");
+        assert_eq!(rows(&sys, "select * from parts"), ["1|bolt||1|2.50|it's"]);
+        // nothing, said in so many words, is nothing: not the value by default
+        assert_eq!(run(&mut sys, &["insert into parts (label, count, kind) values ('nut', null, null)"]), "1 row added to parts, with id 2.");
+        assert_eq!(run(&mut sys, &["insert into parts values ('pin', 100, 3, 0.5, 'small')"]), "1 row added to parts, with id 3.");
+        assert_eq!(rows(&sys, "select * from parts where id > 1"), ["2|nut|||2.50|", "3|pin|100|3|0.50|small"]);
+        // the view of the columns says what each asks
+        assert_eq!(
+            rows(&sys, "select name, type, rules from columns where table_name = 'parts'"),
+            ["id|int|", "label|text|not null unique", "code|int|unique", "count|int|default 1", "price|decimal(18,2)|default 2.50", "kind|text|default 'it''s'"]
+        );
+        assert_eq!(rows(&sys, "select count(*) from columns where rules is not null"), ["5"]);
+    }
+
+    #[test]
+    fn a_row_that_breaks_what_a_column_asks_is_refused() {
+        let mut sys = parts();
+        run(&mut sys, &["insert into parts (label, code) values ('bolt', 100), ('nut', 200), ('pin', null), ('rivet', null)"]);
+        // a value where one is asked
+        assert_eq!(run(&mut sys, &["insert into parts (code) values (300)"]), "error: Column label must have a value.");
+        assert_eq!(run(&mut sys, &["insert into parts values (null, 300, 1, 1, 'x')"]), "error: Column label must have a value.");
+        assert_eq!(run(&mut sys, &["update parts set label = null where id = 2"]), "error: Column label must have a value.");
+        // no value twice; no value at all is not a value
+        assert_eq!(run(&mut sys, &["insert into parts (label) values ('nut')"]), "error: Column label takes no value twice: row 2 has that one.");
+        assert_eq!(run(&mut sys, &["insert into parts (label, code) values ('screw', 100)"]), "error: Column code takes no value twice: row 1 has that one.");
+        assert_eq!(run(&mut sys, &["update parts set code = 200 where id = 3"]), "error: Column code takes no value twice: row 2 has that one.");
+        assert_eq!(run(&mut sys, &["update parts set code = 500 where code is null"]), "error: Column code takes no value twice: row 3 has that one.");
+        // one statement is whole or not at all: the first rows of this one are not kept
+        assert_eq!(run(&mut sys, &["insert into parts (label) values ('a'), ('b'), ('a')"]), "error: Column label takes no value twice: row 5 has that one.");
+        assert_eq!(rows(&sys, "select count(*), max(id) from parts"), ["4|4"]);
+        // the checks, on what is added and on what is changed
+        assert_eq!(run(&mut sys, &["insert into parts (label, count) values ('screw', -1)"]), "error: Refused by a check: count >= 0");
+        assert_eq!(run(&mut sys, &["insert into parts (label, code) values ('screw', 5)"]), "error: Refused by a check: code is null or code > 99");
+        assert_eq!(run(&mut sys, &["update parts set count = count - 2"]), "error: Refused by a check: count >= 0");
+        assert_eq!(run(&mut sys, &["update parts set code = code - 50 where id = 1"]), "error: Refused by a check: code is null or code > 99");
+        // a check that cannot be known lets the row in: count has no value here
+        assert_eq!(run(&mut sys, &["update parts set count = null where id = 1"]), "1 row changed in parts.");
+        // nothing above changed anything
+        assert_eq!(rows(&sys, "select id, label, code, count from parts"), ["1|bolt|100|", "2|nut|200|1", "3|pin||1", "4|rivet||1"]);
+        // what ends with no value twice is taken, whatever it goes through
+        assert_eq!(run(&mut sys, &["update parts set code = code + 100"]), "4 rows changed in parts.");
+        assert_eq!(run(&mut sys, &["update parts set label = 'bolt' where id = 1"]), "1 row changed in parts.");
+        assert_eq!(rows(&sys, "select code from parts where code is not null"), ["200", "300"]);
+        assert_eq!(sys.db.verify(), Ok(()));
+    }
+
+    #[test]
+    fn what_is_wrong_in_what_a_table_asks_is_said_when_it_is_made() {
+        let mut sys = System::new();
+        let said = |sys: &mut System, columns: &str| run(sys, &[&format!("create table t ({columns})")]);
+        assert_eq!(said(&mut sys, "a int default 'one'"), "error: Column a takes a whole number.");
+        assert_eq!(said(&mut sys, "a int default 1.5"), "error: Column a takes a whole number.");
+        assert_eq!(said(&mut sys, "a text default 3"), "error: Column a takes a 'text' between quotes.");
+        assert_eq!(said(&mut sys, "a int default 1 + 1"), "error: Expected ), found: +");
+        assert_eq!(said(&mut sys, "a int default"), "error: Expected a number, a 'text' or NULL, found: )");
+        assert_eq!(said(&mut sys, "a int not"), "error: Expected NULL, found: )");
+        assert_eq!(said(&mut sys, "a int primary key"), "error: Every table has id for its key, given by the system: no other is declared.");
+        assert_eq!(said(&mut sys, "a int check (b > 0)"), "error: Unknown column: b");
+        assert_eq!(said(&mut sys, "a int check (id > 0)"), "error: A check cannot name id: a row has it only once it is in the table.");
+        assert_eq!(said(&mut sys, "a int check (a > 0 a)"), "error: Expected the end of the query, found: a");
+        assert_eq!(said(&mut sys, "a int check ()"), "error: A check is a condition of 60 characters at most.");
+        // the parenthesis that closes the check is then missing for the table
+        assert_eq!(said(&mut sys, "a int check (a > 0"), "error: Expected ), but the query ends.");
+        assert_eq!(run(&mut sys, &["create table t (a int check (a > 0"]), "error: A check is closed by a parenthesis: check (n > 0).");
+        assert_eq!(said(&mut sys, &format!("a int check (a > {})", "0".repeat(57))), "error: A check is a condition of 60 characters at most.");
+        assert_eq!(said(&mut sys, &["a int"; 1].iter().chain(&["check (a > 0)"; 5]).copied().collect::<Vec<_>>().join(", ")), "error: A table keeps 4 checks at most, of 60 characters each.");
+        assert_eq!(said(&mut sys, "check (1 = 1)"), "error: A table has one to seven columns, besides id.");
+        assert!(sys.db.tables().is_empty());
+        // parentheses and quotes inside a text are part of it; a column may be called check
+        assert_eq!(said(&mut sys, "a text default 'a (b' check (a <> ')' and a <> 'it''s ('), check int, n int NULL Not Null UNIQUE, check ((n + 1) * 2 > check)"), "Table t created.");
+        assert_eq!(run(&mut sys, &["insert into t (check, n) values (5, 0)"]), "error: Refused by a check: (n + 1) * 2 > check");
+        assert_eq!(run(&mut sys, &["insert into t (check, n) values (1, 1)"]), "1 row added to t, with id 1.");
+        assert_eq!(run(&mut sys, &["update t set a = ')'"]), "error: Refused by a check: a <> ')' and a <> 'it''s ('");
+        assert_eq!(rows(&sys, "select a, check, n from t"), ["a (b|1|1"]);
+        // the statement that would make it again
+        let mut out = crate::shell::tests::Lines::default();
+        assert!(written(&sys.db, b"T", &mut out));
+        assert_eq!(out.lines, ["create table t (", "    a text default 'a (b',", "    check int,", "    n int not null unique,", "    check (a <> ')' and a <> 'it''s ('),", "    check ((n + 1) * 2 > check)", ")"]);
+        let mut out = crate::shell::tests::Lines::default();
+        assert!(!written(&sys.db, b"tasks", &mut out) && !written(&sys.db, b"nowhere", &mut out));
+        assert_eq!(out.lines, ["tasks is a view of the system and cannot be changed.", "Unknown table: nowhere. Type tables to list them."]);
     }
 
     #[test]

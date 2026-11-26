@@ -92,7 +92,7 @@ tools/build.sh && python3 tools/check.py    # more than 300 checks of the whole 
 
 ## Architecture
 
-About 33,000 lines of Rust in four crates. The fourth, `tls/`, is TLS
+About 34,000 lines of Rust in four crates. The fourth, `tls/`, is TLS
 1.3 for the pages XilaOS asks for; it is the only one that rests on
 libraries from elsewhere, for the arithmetic and for the checking of
 certificates.

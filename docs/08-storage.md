@@ -112,7 +112,7 @@ disk (`sealed`).
 |---|---|---|
 | 0 | 4 | CRC-32C of the rest |
 | 4 | 8 | magic: `XilaOSdb` |
-| 12 | 4 | format version: 1 |
+| 12 | 4 | format version: 2 (1 is read too, see the catalog below) |
 | 16 | 4 | page size: 4096 |
 | 20 | 8 | `txn`: number of the transaction this header commits |
 | 28 | 8 | `pages`: pages of the volume the database may use |
@@ -337,7 +337,32 @@ which is not built yet.
  root (8)  next id (8)  rows (8)
  columns after id (1)
  then for each:  kind (1)  scale (1)  name length (1)  name
+
+ and, only when a column asks something or the table has a check:
+ for each column after id:  rules (1)  [value by default, as a field of a record]
+ checks (1)
+ then for each:  length (1)  text
 ```
+
+The byte of rules has one bit for each: 1 for `not null`, 2 for
+`unique`, 4 when a value by default follows. A check is kept as the
+text that was typed, 60 bytes at most, four at most: the engine does
+not read it. The engine holds `not null` and `unique` itself, in
+`insert` and in every form of `update` (`Error::Missing`,
+`Error::Twice`); with no index, `unique` reads the table. The value by
+default and the checks are for whoever makes the rows: the SQL
+statements.
+
+**Versions.** Version 1 of the format had no second part. A table that
+asks nothing is described in version 2 exactly as it was in version 1,
+so a volume of version 1 is read as it is, and nothing is converted:
+only the headers differ. The first commit writes a header that says 2,
+the second leaves none that says 1. Code that only knows version 1 then
+takes the volume for something that is not a XilaOS database and leaves
+it alone, which is the point: it would have dropped what the columns
+ask without knowing. (Between those two commits such code would still
+open the volume, at the state before the last commit.) A header of a
+version above 2 is treated the same way by this code.
 
 So the root of a table's tree lives in the catalog, and the root of the
 catalog lives in the header. A commit that changed one row of one table

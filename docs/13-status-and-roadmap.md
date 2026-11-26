@@ -31,6 +31,7 @@ were also tried on the real machine.
 | SQL: `SELECT`, `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`, expressions | yes | yes |
 | `disk check`: every page of the tables read from the disk and checked (until 26 November 2026 a page already in memory was not read again) | yes | not tried |
 | SQL: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; rows reached by their `id`; `JOIN` and `LEFT JOIN` of two tables | yes | not tried |
+| What a column asks: `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`; `show table`; the format of the database in version 2, version 1 read as it is | yes, a power cut and a disk of version 1 included | not tried |
 | `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | not tried |
 | LISTEN / NOTIFY | yes | yes |
 | XilaScript: variables, blocks, stored programs, `on` and `every` programs | yes | yes |
@@ -53,17 +54,17 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 26 November 2026: about 33,000 lines, 302
-unit tests, 462 system checks.
+about 300 system checks. On 27 November 2026: about 34,000 lines, 312
+unit tests, 478 system checks.
 
 ## Known limits of what is done
 
 These are not bugs; they are where the first version stopped. What is
 meant to change is in the [work plan](#work-plan) below.
 
-**SQL.** Two tables in a join at most, no subqueries. No indexes, keys or constraints: a
-query reads the whole table unless it says where the `id` must be. No
-`ALTER TABLE`. No `BEGIN` / `COMMIT`: one statement is one transaction.
+**SQL.** Two tables in a join at most, no subqueries. No indexes and no keys but `id`: a
+query reads the whole table unless it says where the `id` must be, and so
+does `unique` for each row it lets in. No `ALTER TABLE`. No `BEGIN` / `COMMIT`: one statement is one transaction.
 Eight columns per table, 32 rows per result, 48 characters per text, no
 date type. Details in
 [The database and SQL](04-sql.md).
@@ -233,7 +234,7 @@ it. Its steps are [below](#the-companion).
 |---|---|---|
 | 1. Loose ends | The small things that were off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing | Done on 23 November 2026 |
 | The companion | A first AI companion: a screen to write to it, and its reactions to what happens in the system. Names (DNS), TLS and HTTPS first, since the model it speaks through is reached over the Internet | Done on 26 November 2026, in QEMU; not tried on the T430 |
-| 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Left: constraints and indexes, which change what is written on the disk; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | Not resumed yet |
+| 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Resumed on 27 November 2026 with what a column asks: `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`, kept in the catalog (format version 2; version 1 is read). Left: indexes, which will also spare `UNIQUE` its reading of the table; `ALTER TABLE`; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | Under way |
 | 3. XilaScript | Parameters and names of a program's own; a task of its own for a program, and for the commands that wait (`net ping`, `net get`, `install from`); an editor; `insert ... select`, the values of before, more rhythms | After 2 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
 | 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
@@ -446,8 +447,9 @@ ways the emulator never shows.
 
 ### SQL
 
-- Keys, indexes, constraints (`NOT NULL`, `UNIQUE`), `ALTER TABLE`.
-  Only the `id` leads straight to a row today.
+- Indexes, `ALTER TABLE`, references from a table to another, `UNIQUE`
+  over several columns. Only the `id` leads straight to a row today,
+  and `UNIQUE` reads the table for each row.
 - Joins of more than two tables, and subqueries.
 - `BEGIN`, `COMMIT`, `ROLLBACK` at the prompt.
 - Date and time types.

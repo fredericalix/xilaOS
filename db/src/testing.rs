@@ -430,6 +430,84 @@ fn what_was_committed_is_there_after_a_restart() {
 }
 
 #[test]
+fn what_the_columns_ask_is_there_after_a_restart() {
+    let platter = Platter::new(64);
+    {
+        let mut db = open(&platter).unwrap();
+        let label = Rule { not_null: true, unique: true, default: None };
+        let count = Rule { default: Some(Field::Int(1)), ..Rule::default() };
+        let parts = db.create_with(b"parts", &[(b"label", Kind::Text, label), (b"count", Kind::Int, count)], &[b"count >= 0"]).unwrap();
+        db.insert(parts, &[Field::Text(b"bolt"), Field::Int(4)]).unwrap();
+        commit(&mut db).unwrap();
+    }
+    let mut db = open(&platter).unwrap();
+    assert_eq!(db.verify(), Ok(()));
+    let table = &db.tables()[0];
+    assert_eq!((table.columns[1].not_null, table.columns[1].unique, table.columns[2].default.clone()), (true, true, Some(Kept::Int(1))));
+    assert_eq!(table.checks, [b"count >= 0".to_vec()]);
+    // and is asked of the rows that come after it
+    assert_eq!(db.insert(0, &[Field::Text(b"bolt"), Field::Int(1)]), Err(Error::Twice(1, 1)));
+    assert_eq!(db.insert(0, &[Field::Null, Field::Int(1)]), Err(Error::Missing(1)));
+}
+
+/// Makes the headers of a volume say a version, as another XilaOS would
+/// have written them. Returns how many headers there were.
+fn dated(platter: &Shared, version: u32) -> usize {
+    let mut platter = platter.borrow_mut();
+    assert!(platter.waiting.is_empty());
+    let mut headers = 0;
+    for slot in 0..2 {
+        let mut page = platter.current(slot);
+        if crate::store::dated(&mut page, version) {
+            platter.safe.insert(slot, page);
+            headers += 1;
+        }
+    }
+    headers
+}
+
+/// The versions the headers of a volume say, the newest commit first.
+fn versions(platter: &Shared) -> Vec<u32> {
+    let platter = platter.borrow();
+    let mut found: Vec<(u64, u32)> = (0..2).map(|slot| platter.current(slot)).filter(|page| page[4..12] == *b"XilaOSdb").map(|page| (u64::from_le_bytes(page[20..28].try_into().unwrap()), u32::from_le_bytes(page[12..16].try_into().unwrap()))).collect();
+    found.sort();
+    found.iter().rev().map(|(_, version)| *version).collect()
+}
+
+#[test]
+fn a_volume_of_version_1_is_read_and_is_of_version_2_once_it_is_written() {
+    // tables without anything asked of their columns are, byte for byte,
+    // what version 1 wrote: only the headers say the version
+    let platter = office();
+    assert_eq!(versions(&platter), [2, 2]);
+    assert_eq!(dated(&platter, 1), 2);
+    assert_eq!(versions(&platter), [1, 1]);
+    let before = dump(&open(&platter).unwrap());
+    // read as it is; reading writes nothing
+    let mut db = open(&platter).unwrap();
+    assert!(!db.fresh());
+    assert_eq!(db.verify(), Ok(()));
+    assert_eq!((db.tables().len(), db.tables()[0].rows(), db.tables()[0].checks.len()), (2, 40, 0));
+    assert_eq!(versions(&platter), [1, 1]);
+    // the first commit says the new version, the second leaves no header of the old
+    db.insert(notes(&db), &[Field::Text(b"written by the new one"), Field::Int(41)]).unwrap();
+    commit(&mut db).unwrap();
+    assert_eq!(versions(&platter), [2, 1]);
+    let made = db.create_with(b"ruled", &[(b"x", Kind::Int, Rule { not_null: true, ..Rule::default() })], &[]).unwrap();
+    db.insert(made, &[Field::Int(1)]).unwrap();
+    commit(&mut db).unwrap();
+    assert_eq!(versions(&platter), [2, 2]);
+    let db = open(&platter).unwrap();
+    assert_eq!(db.verify(), Ok(()));
+    assert_eq!(dump(&db)[..before.len() - 3].len(), before.len() - 3);
+    assert_eq!((db.tables()[0].rows(), db.tables().len(), db.tables()[2].columns[1].not_null), (41, 3, true));
+    // a version this code does not know is something else, and is left alone
+    assert_eq!(dated(&platter, 3), 2);
+    assert_eq!(open(&platter).err(), Some(Error::Foreign));
+    assert_eq!(dated(&platter, 0), 0);
+}
+
+#[test]
 fn a_disk_that_holds_something_else_is_left_alone() {
     let platter = Platter::new(64);
     platter.borrow_mut().damage(1, 510);

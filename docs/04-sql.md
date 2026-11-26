@@ -45,7 +45,7 @@ columns of any of them, and of the stored tables too.
 | View | Columns | What it shows |
 |---|---|---|
 | `tables` | `name`, `kind`, `columns`, `rows`, `about` | Every table. `kind` is `system` or `stored`. |
-| `columns` | `table_name`, `position`, `name`, `type` | The columns of every table, in order. |
+| `columns` | `table_name`, `position`, `name`, `type`, `rules` | The columns of every table, in order. `rules` is what a column of a stored table asks of its values: `not null unique`, `default 1`. |
 | `tasks` | `id`, `name`, `state`, `ran_ms`, `share` | The kernel tasks: their state, the time each ran, and its share of the processor in %. |
 | `settings` | `name`, `value` | The settings in use: `mood`, `energy`, `theme`, `keymap`, `screen`. |
 | `screens` | `id`, `name`, `shown` | The virtual screens; `shown` is `yes` for the one on display. |
@@ -201,7 +201,8 @@ XilaOS|all:/>select day, sum(amount) as total from expenses group by day order b
 ## Changing: CREATE, INSERT, UPDATE, DELETE, DROP
 
 ```
-CREATE TABLE name (column type, ...)
+CREATE TABLE name (column type [rule ...], ... [, CHECK (condition)])
+    rule: NOT NULL | UNIQUE | DEFAULT value | CHECK (condition)
 DROP TABLE name
 INSERT INTO name [(column, ...)] VALUES (value, ...) [, (value, ...)] ...
 UPDATE name SET column = expression [, ...] [WHERE condition]
@@ -210,11 +211,11 @@ DELETE FROM name [WHERE condition]
 
 - **`create table`** takes one to seven columns; `id` is added in front. A
   name is a letter, then letters, digits or `_`, 24 characters at most, and
-  not the name of a system view. There are no keys, constraints or defaults
-  to declare.
+  not the name of a system view. A column may ask something of its values:
+  see [what a column asks](#what-a-column-asks).
 - **`insert`** adds one to eight rows. Without a list of columns, the values
   are those of every column after `id`, in order; with one, the columns left
-  out get nothing. A value is an expression without columns: a number, a
+  out get their value by default, or nothing. A value is an expression without columns: a number, a
   text, `null`, a calculation, a variable of the prompt, `today`.
 - **`update`** works each new value out from the row as it was before the
   statement: `set amount = amount * 1.2`. Several columns may be set at once.
@@ -241,6 +242,91 @@ Table expenses removed, with its 2 rows.
 A statement that fails changes nothing. An `insert` of three rows whose third
 row is wrong adds none of them; the ids the first two would have had are
 simply not used.
+
+### What a column asks
+
+After its type, a column may say what it asks of its values, in any
+order (the statement is typed on one line; it is cut here to be read):
+
+```
+XilaOS|all:/>create table parts (label text not null unique, code int unique,
+                 count int default 1 check (count >= 0),
+                 check (code is null or code > 99))
+Table parts created.
+```
+
+| Rule | What it asks |
+|---|---|
+| `not null` | Every row has a value in this column. |
+| `unique` | No two rows have the same value in this column. Rows without a value are not compared: any number of them may have none. Texts are compared letter for letter: `Nut` is not `nut`. |
+| `default value` | What the column takes when an `insert` names its columns and leaves this one out. A number, a `'text'` or `null`, not a calculation. `null`, written in so many words in an `insert`, stays nothing. |
+| `check (condition)` | A condition every row holds, written with the [expressions](#expressions) of a `where`, on the columns of the table. Written after a column or as an item of its own, it is the same thing: a condition on the row. |
+
+A row that breaks one of them is refused, by `insert` and by `update`
+alike, and the statement with it, whole.
+
+```
+XilaOS|all:/>insert into parts (label, code) values ('bolt', 100), ('nut', null)
+2 rows added to parts, with ids 1 to 2.
+XilaOS|all:/>select * from parts
+   id  label  code  count
+   1   bolt   100   1
+   2   nut          1
+XilaOS|all:/>insert into parts (code) values (300)
+Column label must have a value.
+XilaOS|all:/>insert into parts (label) values ('nut')
+Column label takes no value twice: row 2 has that one.
+XilaOS|all:/>insert into parts (label, count) values ('pin', -1)
+Refused by a check: count >= 0
+XilaOS|all:/>update parts set code = 5 where id = 1
+Refused by a check: code is null or code > 99
+```
+
+- **A check that cannot be known lets the row in.** `count >= 0` neither
+  holds nor fails for a row whose `count` is nothing, and the row is
+  taken, as SQL has it. To refuse it: `not null` on the column, or
+  `count is not null and count >= 0`.
+- **`unique` looks at the table as the statement leaves it.** `update
+  parts set code = code + 100` is taken though, row after row, a code
+  passes through the value another row still has; two rows may exchange
+  their values in one statement.
+- **`unique` reads the table.** There is no index yet: each row added
+  to a table with a `unique` column reads all of its rows, and an
+  `update` that changes such a column reads them once.
+- **A check cannot name `id`**: a row has its id only once it is in the
+  table.
+- **No key to declare.** `id` is the key of every table, given by the
+  system; `primary key` is refused, and there are no references from
+  one table to another yet.
+- A table keeps four checks at most, each of 60 characters at most (the
+  answer that refuses a row quotes it whole).
+- What a table asks is said when it is made and cannot be changed
+  afterwards: there is no `alter table`. To change it, make another
+  table and copy the rows.
+
+`show table` writes the statement that would make a table as it is, and
+the `rules` column of the view `columns` says the same for each column:
+
+```
+XilaOS|all:/>show table parts
+create table parts (
+    label text not null unique,
+    code int unique,
+    count int default 1,
+    check (count >= 0),
+    check (code is null or code > 99)
+)
+XilaOS|all:/>select name, type, rules from columns where table_name = 'parts'
+   name   type  rules
+   id     int
+   label  text  not null unique
+   code   int   unique
+   count  int   default 1
+```
+
+`not null` and `unique` are held by the storage engine itself, for
+whoever writes rows; the value by default and the checks are held by the
+SQL statements, which are the only way to a table that has them.
 
 ## Expressions
 
@@ -437,6 +523,11 @@ tasks is a table of the system. Pick another name.
 Unknown type: blob. Types are int, decimal and text.
 Two columns have the same name. Every table already has id.
 A table has one to seven columns, besides id.
+Column label must have a value.
+Column label takes no value twice: row 2 has that one.
+Refused by a check: count >= 0
+A check cannot name id: a row has it only once it is in the table.
+A table keeps 4 checks at most, of 60 characters each.
 One INSERT adds eight rows at most.
 A text takes 48 characters at most, for now.
 This calculation is too long.
@@ -463,6 +554,7 @@ follow from that, and from what is not built yet.
 | Functions over rows in one query | 8 |
 | A text | 48 characters |
 | A name of table or column | 24 characters |
+| Checks of a table | 4, of 60 characters each |
 | Stored tables | 64 |
 | Digits after the point | 9 in a column, 6 from a division |
 | Channels listened to | 16, over all sessions |
@@ -475,7 +567,9 @@ What SQL has and this one does not:
 - `case`, and `in` with a query in place of a list;
 - more than one column in `GROUP BY`, more than one key in `ORDER BY`;
 - `insert into ... select`;
-- `alter table`, keys, indexes, `not null`, `unique`, defaults;
+- `alter table`, keys of one's own, references from a table to another,
+  indexes, `unique` over several columns, a calculation as a value by
+  default;
 - `begin`, `commit`, `rollback`;
 - dates and times as a type, and objects larger than a text.
 

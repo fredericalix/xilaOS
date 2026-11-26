@@ -17,7 +17,7 @@ use crate::theme::THEMES;
 /// The tables that are views of the live state of the system.
 pub const TABLES: [TableDef; 9] = [
     TableDef { name: b"tables", columns: &[b"name", b"kind", b"columns", b"rows", b"about"], kinds: b"ttiit", about: b"all tables: views of the system, stored tables" },
-    TableDef { name: b"columns", columns: &[b"table_name", b"position", b"name", b"type"], kinds: b"titt", about: b"the columns of every table" },
+    TableDef { name: b"columns", columns: &[b"table_name", b"position", b"name", b"type", b"rules"], kinds: b"tittt", about: b"the columns of every table" },
     TableDef { name: b"tasks", columns: &[b"id", b"name", b"state", b"ran_ms", b"share"], kinds: b"ittii", about: b"what runs, and its share of the processor in %" },
     TableDef { name: b"settings", columns: &[b"name", b"value"], kinds: b"tt", about: b"mood, theme, keyboard, screen" },
     TableDef { name: b"screens", columns: &[b"id", b"name", b"shown"], kinds: b"itt", about: b"the virtual screens" },
@@ -52,6 +52,36 @@ pub fn kind_name(kind: Kind) -> Text {
         }
     }
     name
+}
+
+/// A value as a statement writes it: a text between quotes, with a
+/// quote inside written twice.
+pub(crate) fn literal<const N: usize>(field: xila_db::Field, kind: Kind, into: &mut crate::text::FixedStr<N>) {
+    match crate::sql::row_from(&[field], &[kind])[0] {
+        Value::Null => into.push_bytes(b"null"),
+        Value::Text(text) => {
+            into.push(b'\'');
+            for byte in text.bytes() {
+                into.push_bytes(if *byte == b'\'' { &b"''"[..] } else { core::slice::from_ref(byte) });
+            }
+            into.push(b'\'');
+        }
+        number => into.push_bytes(number.shown().bytes()),
+    }
+}
+
+/// What a column asks of its values besides their type, in the words of
+/// CREATE TABLE. Nothing when it asks nothing.
+pub(crate) fn rules<const N: usize>(column: &xila_db::Column, into: &mut crate::text::FixedStr<N>) {
+    for (set, word) in [(column.not_null, &b"not null"[..]), (column.unique, b"unique"), (column.default.is_some(), b"default ")] {
+        if set {
+            into.push_bytes(if into.is_empty() { b"" } else { b" " });
+            into.push_bytes(word);
+        }
+    }
+    if let Some(default) = &column.default {
+        literal(default.field(), column.kind, into);
+    }
 }
 
 /// Describes a stored table. Stored tables are numbered after the views.
@@ -167,12 +197,16 @@ impl System {
                 for def in TABLES.iter() {
                     for (position, (name, kind)) in def.columns.iter().zip(def.kinds).enumerate() {
                         let kind: &[u8] = if *kind == b'i' { b"int" } else { b"text" };
-                        visit(&row(&[text(def.name), number(position as u64 + 1), text(name), text(kind)]));
+                        visit(&row(&[text(def.name), number(position as u64 + 1), text(name), text(kind), Value::Null]));
                     }
                 }
                 for table in stored.iter().filter(|table| !kept_apart(&table.name)) {
                     for (position, column) in table.columns.iter().enumerate() {
-                        visit(&row(&[text(&table.name), number(position as u64 + 1), text(&column.name), Value::Text(kind_name(column.kind))]));
+                        // what the column asks, as CREATE TABLE says it; a long value by default is cut
+                        let mut asked = Text::new();
+                        rules(column, &mut asked);
+                        let asked = if asked.is_empty() { Value::Null } else { Value::Text(asked) };
+                        visit(&row(&[text(&table.name), number(position as u64 + 1), text(&column.name), Value::Text(kind_name(column.kind)), asked]));
                     }
                 }
             }

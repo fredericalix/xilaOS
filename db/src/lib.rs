@@ -100,6 +100,12 @@ pub enum Error {
     Foreign,
     /// The disk is too small for a database.
     TooSmall,
+    /// This column must have a value, and the row has none.
+    Missing(usize),
+    /// This column has no value twice, and the row with this id has it.
+    Twice(usize, u64),
+    /// More conditions than a table keeps, or one that is too long.
+    Checks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,17 +115,84 @@ pub enum Change {
     Delete,
 }
 
+/// A value that is kept: what a column says a row takes when none is given.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Kept {
+    Null,
+    Int(i64),
+    Dec(i64),
+    Text(Vec<u8>),
+}
+
+impl Kept {
+    fn of(field: &Field) -> Kept {
+        match *field {
+            Field::Null => Kept::Null,
+            Field::Int(n) => Kept::Int(n),
+            Field::Dec(n) => Kept::Dec(n),
+            Field::Text(text) => Kept::Text(text.to_vec()),
+        }
+    }
+
+    pub fn field(&self) -> Field<'_> {
+        match self {
+            Kept::Null => Field::Null,
+            Kept::Int(n) => Field::Int(*n),
+            Kept::Dec(n) => Field::Dec(*n),
+            Kept::Text(text) => Field::Text(text),
+        }
+    }
+}
+
+/// What a column asks of its values, besides their type, as it is given
+/// when a table is made.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Rule<'a> {
+    /// Every row has a value here. The engine refuses a row that has none.
+    pub not_null: bool,
+    /// No two rows have the same value here; rows without a value are not
+    /// compared. The engine refuses the second one. With no index it
+    /// reads the table to know.
+    pub unique: bool,
+    /// The value a row takes when none is given. The engine keeps it and
+    /// does not use it: whoever makes the row does.
+    pub default: Option<Field<'a>>,
+}
+
 #[derive(Clone)]
 pub struct Column {
     pub name: Vec<u8>,
     pub kind: Kind,
+    pub not_null: bool,
+    pub unique: bool,
+    pub default: Option<Kept>,
 }
+
+impl Column {
+    fn plain(name: Vec<u8>, kind: Kind) -> Column {
+        Column { name, kind, not_null: false, unique: false, default: None }
+    }
+
+    fn ruled(&self) -> bool {
+        self.not_null || self.unique || self.default.is_some()
+    }
+}
+
+const RULE_NOT_NULL: u8 = 1;
+const RULE_UNIQUE: u8 = 2;
+const RULE_DEFAULT: u8 = 4;
+/// Conditions a table keeps, at most, and the longest one.
+pub const MAX_CHECKS: usize = 4;
+pub const MAX_CHECK: usize = 60;
 
 #[derive(Clone)]
 pub struct Table {
     pub name: Vec<u8>,
     /// Column 0 is `id`.
     pub columns: Vec<Column>,
+    /// Conditions every row holds, as whoever made the table wrote them.
+    /// The engine keeps them and does not read them.
+    pub checks: Vec<Vec<u8>>,
     /// Key of the table in the catalog. Never used twice.
     key: u64,
     /// Root of the tree of the rows; 0 when there are none.
@@ -161,6 +234,21 @@ impl<'a> Reader<'a> {
         let name = self.bytes(length)?;
         good_name(name).then(|| name.to_vec())
     }
+
+    /// A value, written as a field of a record is.
+    fn kept(&mut self) -> Option<Kept> {
+        let number = |reader: &mut Reader| reader.number().map(|n| n as i64);
+        Some(match self.byte()? {
+            TAG_NULL => Kept::Null,
+            TAG_INT => Kept::Int(number(self)?),
+            TAG_DEC => Kept::Dec(number(self)?),
+            TAG_TEXT => {
+                let length = self.bytes(2)?;
+                Kept::Text(self.bytes(u16::from_le_bytes([length[0], length[1]]) as usize)?.to_vec())
+            }
+            _ => return None,
+        })
+    }
 }
 
 impl Table {
@@ -174,7 +262,11 @@ impl Table {
     }
 
     /// The table as the catalog keeps it: name, root, next id, rows, then
-    /// the columns after `id` with their type.
+    /// the columns after `id` with their type. When a column has a rule or
+    /// the table a condition, more follows: for each column after `id` a
+    /// byte of rules and, if it says so, the value by default; then the
+    /// number of conditions, and each after its length. A table that has
+    /// none of this is described as version 1 of the format did.
     fn describe(&self) -> Vec<u8> {
         let mut record = Vec::new();
         record.push(self.name.len() as u8);
@@ -192,6 +284,22 @@ impl Table {
             record.extend_from_slice(&[kind, scale, column.name.len() as u8]);
             record.extend_from_slice(&column.name);
         }
+        if self.checks.is_empty() && !self.columns.iter().any(Column::ruled) {
+            return record;
+        }
+        for column in &self.columns[1..] {
+            let rules = [(column.not_null, RULE_NOT_NULL), (column.unique, RULE_UNIQUE), (column.default.is_some(), RULE_DEFAULT)];
+            record.push(rules.iter().filter(|(set, _)| *set).map(|(_, bit)| bit).sum());
+            if let Some(default) = &column.default {
+                // a value that is too long was refused when the table was made
+                record.extend_from_slice(&encode(&[default.field()]).unwrap_or_else(|_| [TAG_NULL].to_vec()));
+            }
+        }
+        record.push(self.checks.len() as u8);
+        for check in &self.checks {
+            record.push(check.len() as u8);
+            record.extend_from_slice(check);
+        }
         record
     }
 
@@ -204,7 +312,7 @@ impl Table {
             return None;
         }
         let mut columns = Vec::new();
-        columns.push(Column { name: b"id".to_vec(), kind: Kind::Int });
+        columns.push(Column::plain(b"id".to_vec(), Kind::Int));
         for _ in 0..count {
             let kind = match (reader.byte()?, reader.byte()?) {
                 (KIND_INT, _) => Kind::Int,
@@ -212,9 +320,34 @@ impl Table {
                 (KIND_TEXT, _) => Kind::Text,
                 _ => return None,
             };
-            columns.push(Column { name: reader.name()?, kind });
+            columns.push(Column::plain(reader.name()?, kind));
         }
-        Some(Table { name, columns, key, root, rows, next_id, changed: false, read_at: 0, written_at: 0 })
+        let mut checks = Vec::new();
+        // what version 1 did not have: there or not, never in part
+        if !reader.0.is_empty() {
+            for column in &mut columns[1..] {
+                let rules = reader.byte()?;
+                if rules & !(RULE_NOT_NULL | RULE_UNIQUE | RULE_DEFAULT) != 0 {
+                    return None;
+                }
+                (column.not_null, column.unique) = (rules & RULE_NOT_NULL != 0, rules & RULE_UNIQUE != 0);
+                if rules & RULE_DEFAULT != 0 {
+                    column.default = Some(reader.kept().filter(|default| fits(column.kind, &default.field()))?);
+                }
+            }
+            let count = reader.byte()? as usize;
+            if count > MAX_CHECKS {
+                return None;
+            }
+            for _ in 0..count {
+                let length = reader.byte()? as usize;
+                checks.push(reader.bytes(length).filter(|_| length <= MAX_CHECK)?.to_vec());
+            }
+            if !reader.0.is_empty() {
+                return None;
+            }
+        }
+        Some(Table { name, columns, checks, key, root, rows, next_id, changed: false, read_at: 0, written_at: 0 })
     }
 }
 
@@ -492,10 +625,24 @@ impl Database {
     /// Creates a table with these columns after `id`. Names are kept in
     /// lower case.
     pub fn create(&mut self, name: &[u8], columns: &[(&[u8], Kind)]) -> Result<usize, Error> {
+        let mut plain = [(&b""[..], Kind::Int, Rule::default()); MAX_COLUMNS];
+        for (plain, (column, kind)) in plain.iter_mut().zip(columns) {
+            *plain = (column, *kind, Rule::default());
+        }
+        if columns.len() >= MAX_COLUMNS {
+            return Err(Error::ColumnCount);
+        }
+        self.create_with(name, &plain[..columns.len()], &[])
+    }
+
+    /// Makes a table whose columns have rules, and which keeps conditions
+    /// (`checks`, at most `MAX_CHECKS` of `MAX_CHECK` bytes: texts for
+    /// whoever writes rows, which the engine does not read).
+    pub fn create_with(&mut self, name: &[u8], columns: &[(&[u8], Kind, Rule)], checks: &[&[u8]]) -> Result<usize, Error> {
         if !self.log.is_empty() {
             return Err(Error::Busy);
         }
-        if !good_name(name) || columns.iter().any(|(column, _)| !good_name(column)) {
+        if !good_name(name) || columns.iter().any(|(column, ..)| !good_name(column)) {
             return Err(Error::BadName);
         }
         if self.find(name).is_some() {
@@ -507,28 +654,42 @@ impl Database {
         if columns.is_empty() || columns.len() >= MAX_COLUMNS {
             return Err(Error::ColumnCount);
         }
+        if checks.len() > MAX_CHECKS || checks.iter().any(|check| check.is_empty() || check.len() > MAX_CHECK) {
+            return Err(Error::Checks);
+        }
         let mut made = Vec::new();
-        made.push(Column { name: b"id".to_vec(), kind: Kind::Int });
-        for (column, kind) in columns {
+        made.push(Column::plain(b"id".to_vec(), Kind::Int));
+        for (at, (column, kind, rule)) in columns.iter().enumerate() {
             if made.iter().any(|c: &Column| c.name.eq_ignore_ascii_case(column)) {
                 return Err(Error::DuplicateColumn);
             }
-            made.push(Column { name: column.to_ascii_lowercase(), kind: *kind });
+            if let Some(default) = &rule.default {
+                if !fits(*kind, default) {
+                    return Err(Error::WrongKind(at + 1));
+                }
+                // it must fit in the catalog, and in a row
+                encode(&[*default])?;
+            }
+            made.push(Column { name: column.to_ascii_lowercase(), kind: *kind, not_null: rule.not_null, unique: rule.unique, default: rule.default.as_ref().map(Kept::of) });
         }
-        self.begin();
-        let key = self.next_table;
-        self.next_table += 1;
-        self.tables.push(Table {
+        let table = Table {
             name: name.to_ascii_lowercase(),
             columns: made,
-            key,
+            checks: checks.iter().map(|check| check.to_vec()).collect(),
+            key: self.next_table,
             root: 0,
             rows: 0,
             next_id: 1,
             changed: true,
             read_at: 0,
             written_at: 0,
-        });
+        };
+        if table.describe().len() > tree::MAX_VALUE {
+            return Err(Error::TooLong);
+        }
+        self.begin();
+        self.next_table += 1;
+        self.tables.push(table);
         Ok(self.tables.len() - 1)
     }
 
@@ -555,6 +716,19 @@ impl Database {
         if let Some(wrong) = fields.iter().zip(&columns[1..]).position(|(field, column)| !fits(column.kind, field)) {
             return Err(Error::WrongKind(wrong + 1));
         }
+        // what the columns ask: a field that is not given is no value
+        for (at, column) in columns.iter().enumerate().skip(1) {
+            let field = fields.get(at - 1).copied().unwrap_or(Field::Null);
+            if field == Field::Null {
+                if column.not_null {
+                    return Err(Error::Missing(at));
+                }
+            } else if column.unique {
+                if let Some(id) = self.holder(table, at, &field)? {
+                    return Err(Error::Twice(at, id));
+                }
+            }
+        }
         let record = encode(fields)?;
         self.begin();
         let store = ready(self.store.get_mut(), self.limit)?;
@@ -566,6 +740,18 @@ impl Database {
         found.changed = true;
         self.log.push(Logged { table, id, change: Change::Insert });
         Ok(id)
+    }
+
+    /// The row that has this value in this column, if one does. It reads
+    /// the whole table: no index says it yet.
+    fn holder(&self, table: usize, column: usize, value: &Field) -> Result<Option<u64>, Error> {
+        let mut found = None;
+        self.scan(table, &mut |fields| {
+            if let (true, None, Field::Int(id)) = (fields[column] == *value, found, fields[0]) {
+                found = Some(id as u64);
+            }
+        })?;
+        Ok(found)
     }
 
     /// Calls `visit` with every row, in the order of their ids. The first
@@ -657,6 +843,12 @@ impl Database {
     /// As `update_each`, for the rows whose ids are among `ids` only.
     pub fn update_each_ids(&mut self, table: usize, ids: Ids, each: &mut dyn FnMut(&[Field], &mut dyn FnMut(&[Field]))) -> Result<usize, Error> {
         let kinds: Vec<Kind> = self.tables[table].columns.iter().map(|column| column.kind).collect();
+        let not_null: Vec<bool> = self.tables[table].columns.iter().map(|column| column.not_null).collect();
+        let unique: Vec<usize> = (1..kinds.len()).filter(|column| self.tables[table].columns[*column].unique).collect();
+        // what each changed row has in the columns that take no value
+        // twice, and whether any of those values is a new one
+        let mut values: Vec<(usize, Kept, u64)> = Vec::new();
+        let mut moved = false;
         // the new records are worked out first: the tree is not changed
         // while it is read
         let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -670,14 +862,24 @@ impl Database {
             }
             let mut put = |new: &[Field]| {
                 let wrong = new.iter().zip(&kinds).position(|(field, kind)| !fits(*kind, field));
-                let record = match wrong {
+                let empty = new.iter().zip(&not_null).position(|(field, not_null)| *not_null && *field == Field::Null);
+                let record = match (wrong, empty) {
                     _ if new.len() != fields.len() => Err(Error::ColumnCount),
                     _ if new[0] != fields[0] => Err(Error::Key),
-                    Some(column) => Err(Error::WrongKind(column)),
-                    None => encode(&new[1..]),
+                    (Some(column), _) => Err(Error::WrongKind(column)),
+                    (None, Some(column)) => Err(Error::Missing(column)),
+                    (None, None) => encode(&new[1..]),
                 };
                 match record {
-                    Ok(record) => records.push((id as u64, record)),
+                    Ok(record) => {
+                        for &column in &unique {
+                            if new[column] != Field::Null {
+                                values.push((column, Kept::of(&new[column]), id as u64));
+                                moved |= new[column] != fields[column];
+                            }
+                        }
+                        records.push((id as u64, record));
+                    }
                     Err(error) => failed = Some(error),
                 }
             };
@@ -685,6 +887,35 @@ impl Database {
         })?;
         if let Some(error) = failed {
             return Err(error);
+        }
+        // No value twice, in the table as it will be once every row has
+        // changed: rows may exchange their values, or all move by one.
+        if moved {
+            values.sort();
+            if let Some(pair) = values.windows(2).find(|pair| pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1) {
+                return Err(Error::Twice(pair[0].0, pair[0].2));
+            }
+            let mut twice = None;
+            self.scan(table, &mut |fields| {
+                let Field::Int(id) = fields[0] else {
+                    return;
+                };
+                // a row that changes is among the values already
+                if twice.is_some() || records.binary_search_by_key(&(id as u64), |(id, _)| *id).is_ok() {
+                    return;
+                }
+                for &column in &unique {
+                    if fields[column] != Field::Null {
+                        let held = Kept::of(&fields[column]);
+                        if values.binary_search_by(|(other, value, _)| (*other, value).cmp(&(column, &held))).is_ok() {
+                            twice = Some(Error::Twice(column, id as u64));
+                        }
+                    }
+                }
+            })?;
+            if let Some(error) = twice {
+                return Err(error);
+            }
         }
         self.begin();
         let store = ready(self.store.get_mut(), self.limit)?;
@@ -1136,6 +1367,127 @@ mod tests {
         assert_eq!(columns, [(&b"id"[..], Kind::Int), (b"name", Kind::Text), (b"price", Kind::Dec(2)), (b"stock", Kind::Int)]);
         assert_eq!((back.rows, back.next_id, back.root), (3, 4, table.root));
         assert!(Table::described(1, &table.describe()[..10]).is_none());
+    }
+
+    /// A table whose columns ask something: a label every row has and
+    /// none has twice, a code none has twice, a count that is 1 when
+    /// nothing is said.
+    fn ruled() -> (Database, usize) {
+        let mut db = Database::new();
+        let label = Rule { not_null: true, unique: true, default: None };
+        let code = Rule { unique: true, ..Rule::default() };
+        let count = Rule { default: Some(Field::Int(1)), ..Rule::default() };
+        let parts = db.create_with(b"parts", &[(b"label", Kind::Text, label), (b"code", Kind::Int, code), (b"count", Kind::Int, count)], &[&b"count >= 0"[..], b"code is null or code > 99"]).unwrap();
+        db.insert(parts, &[Field::Text(b"bolt"), Field::Int(100), Field::Int(4)]).unwrap();
+        db.insert(parts, &[Field::Text(b"nut"), Field::Int(200), Field::Int(4)]).unwrap();
+        db.insert(parts, &[Field::Text(b"washer"), Field::Null, Field::Int(9)]).unwrap();
+        db.commit(&mut |_, _, _| {}).unwrap();
+        (db, parts)
+    }
+
+    #[test]
+    fn a_column_that_must_have_a_value_refuses_a_row_without_one() {
+        let (mut db, parts) = ruled();
+        assert_eq!(db.insert(parts, &[Field::Null, Field::Int(300)]), Err(Error::Missing(1)));
+        // a field that is not given is no value either
+        assert_eq!(db.insert(parts, &[]), Err(Error::Missing(1)));
+        assert_eq!(db.update(parts, &mut |fields| fields[0] == Field::Int(2), &[(1, Field::Null)]), Err(Error::Missing(1)));
+        // nothing of it was done: there is nothing to undo
+        assert_eq!(db.create(b"more", &[(b"x", Kind::Int)]).map(|_| ()), Ok(()));
+        db.rollback();
+        // the other columns take no value as before
+        assert_eq!(db.insert(parts, &[Field::Text(b"pin")]), Ok(4));
+        assert_eq!(db.update(parts, &mut |_| true, &[(3, Field::Null)]), Ok(4));
+        assert_eq!(rows(&db, parts)[3], "4 pin - -");
+    }
+
+    #[test]
+    fn a_column_that_takes_no_value_twice_refuses_the_second() {
+        let (mut db, parts) = ruled();
+        assert_eq!(db.insert(parts, &[Field::Text(b"nut"), Field::Int(300)]), Err(Error::Twice(1, 2)));
+        assert_eq!(db.insert(parts, &[Field::Text(b"rivet"), Field::Int(100)]), Err(Error::Twice(2, 1)));
+        // letters as they are: another case is another value
+        assert_eq!(db.insert(parts, &[Field::Text(b"Nut"), Field::Int(300)]), Ok(4));
+        // no value is not a value: any number of rows may have none
+        assert_eq!(db.insert(parts, &[Field::Text(b"rivet"), Field::Null]), Ok(5));
+        // a row added in this change counts, before anything is committed
+        assert_eq!(db.insert(parts, &[Field::Text(b"rivet"), Field::Null]), Err(Error::Twice(1, 5)));
+        db.commit(&mut |_, _, _| {}).unwrap();
+        // changing a row to what another has
+        assert_eq!(db.update(parts, &mut |fields| fields[0] == Field::Int(4), &[(2, Field::Int(200))]), Err(Error::Twice(2, 2)));
+        assert_eq!(db.update(parts, &mut |fields| fields[0] == Field::Int(5), &[(1, Field::Text(b"bolt"))]), Err(Error::Twice(1, 1)));
+        // two rows changed to the same value: neither has it yet
+        assert_eq!(db.update(parts, &mut |fields| matches!(fields[0], Field::Int(4 | 5)), &[(2, Field::Int(777))]), Err(Error::Twice(2, 4)));
+        // a row keeps what it has, and other columns change freely
+        assert_eq!(db.update(parts, &mut |_| true, &[(3, Field::Int(0))]), Ok(5));
+        assert_eq!(db.update(parts, &mut |fields| fields[0] == Field::Int(1), &[(1, Field::Text(b"bolt")), (2, Field::Int(100))]), Ok(1));
+        // every code one hundred more: 100 becomes 200 while another row
+        // still has 200, and the table as it ends has none twice
+        let moved = db.update_each(parts, &mut |fields, put| {
+            if let Field::Int(code) = fields[2] {
+                let mut new = [Field::Null; 4];
+                new.copy_from_slice(fields);
+                new[2] = Field::Int(code + 100);
+                put(&new);
+            }
+        });
+        assert_eq!(moved, Ok(3));
+        // two rows exchange their labels
+        let swapped = db.update_each(parts, &mut |fields, put| {
+            let mut new = [Field::Null; 4];
+            new.copy_from_slice(fields);
+            match fields[1] {
+                Field::Text(b"bolt") => new[1] = Field::Text(b"nut"),
+                Field::Text(b"nut") => new[1] = Field::Text(b"bolt"),
+                _ => return,
+            }
+            put(&new);
+        });
+        assert_eq!(swapped, Ok(2));
+        db.commit(&mut |_, _, _| {}).unwrap();
+        assert_eq!(rows(&db, parts), ["1 nut 200 0", "2 bolt 300 0", "3 washer - 0", "4 Nut 400 0", "5 rivet - 0"]);
+        assert_eq!(db.verify(), Ok(()));
+    }
+
+    #[test]
+    fn the_catalog_keeps_what_the_columns_ask_and_the_conditions() {
+        let (db, parts) = ruled();
+        let table = &db.tables()[parts];
+        let back = Table::described(table.key, &table.describe()).unwrap();
+        let asked: Vec<(bool, bool, Option<Kept>)> = back.columns.iter().map(|column| (column.not_null, column.unique, column.default.clone())).collect();
+        assert_eq!(asked, [(false, false, None), (true, true, None), (false, true, None), (false, false, Some(Kept::Int(1)))]);
+        assert_eq!(back.checks, [b"count >= 0".to_vec(), b"code is null or code > 99".to_vec()]);
+        assert_eq!((back.rows, back.next_id, back.root), (3, 4, table.root));
+        // cut anywhere, or with something after it, it describes nothing
+        let record = table.describe();
+        assert!((0..record.len()).all(|length| Table::described(1, &record[..length]).is_none_or(|table| table.checks.is_empty() && length < record.len() - 30)));
+        assert!(Table::described(1, &[&record[..], &[0]].concat()).is_none());
+        // a table that asks nothing is described as it always was
+        let (plain, fruit) = shop();
+        let plain = plain.tables()[fruit].describe();
+        assert_eq!(plain.len(), 1 + 5 + 24 + 1 + (3 + 4) + (3 + 5) + (3 + 5));
+        // every kind of value by default, and a text of the longest
+        let mut db = Database::new();
+        let long = [b'x'; 48];
+        let defaults = [Field::Text(&long), Field::Dec(-250), Field::Null, Field::Int(i64::MIN)];
+        let columns: Vec<(&[u8], Kind, Rule)> = [(&b"a"[..], Kind::Text), (b"b", Kind::Dec(2)), (b"c", Kind::Int), (b"d", Kind::Int)].iter().zip(defaults).map(|((name, kind), default)| (*name, *kind, Rule { default: Some(default), ..Rule::default() })).collect();
+        let all = db.create_with(b"all", &columns, &[&[b'c'; MAX_CHECK][..]; MAX_CHECKS]).unwrap();
+        let back = Table::described(9, &db.tables()[all].describe()).unwrap();
+        assert_eq!(back.columns[1..].iter().map(|column| column.default.as_ref().map(Kept::field)).collect::<Vec<_>>(), defaults.map(Some));
+        assert_eq!(back.checks.len(), MAX_CHECKS);
+    }
+
+    #[test]
+    fn a_table_that_asks_too_much_is_not_made() {
+        let mut db = Database::new();
+        let wrong = Rule { default: Some(Field::Text(b"one")), ..Rule::default() };
+        assert_eq!(db.create_with(b"t", &[(b"a", Kind::Text, Rule::default()), (b"n", Kind::Int, wrong)], &[]), Err(Error::WrongKind(2)));
+        let plain = [(&b"a"[..], Kind::Int, Rule::default())];
+        assert_eq!(db.create_with(b"t", &plain, &[&b"a > 0"[..]; MAX_CHECKS + 1]), Err(Error::Checks));
+        assert_eq!(db.create_with(b"t", &plain, &[&[b'a'; MAX_CHECK + 1][..]]), Err(Error::Checks));
+        assert_eq!(db.create_with(b"t", &plain, &[b""]), Err(Error::Checks));
+        // nothing was started: a table can be made right after
+        assert!(db.create_with(b"t", &plain, &[b"a > 0"]).is_ok());
     }
 
     #[test]

@@ -89,7 +89,7 @@ end
 | `every 5 minutes` ... `end` | Keeps the lines, and runs them again and again: `seconds`, `minutes`, `hours`, `days`. |
 | `every day at 8:00` ... `end` | Keeps the lines, and runs them once a day, when the clock of the machine shows that time. |
 | `programs` | Lists the programs, how many lines each has, and when it runs. |
-| `show name` | Shows the lines of a program, as they can be typed again. |
+| `show name` | Shows the lines of a program, as they can be typed again. (`show table name` shows a table: see [SQL](04-sql.md#what-a-column-asks).) |
 | `drop program name` | Removes a program. |
 | `vars` | Lists the names that have a value. |
 | `cancel` | Drops the lines of the block being typed. |

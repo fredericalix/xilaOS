@@ -40,7 +40,13 @@ const RESERVE: u64 = 32;
 const CACHE_PAGES: usize = 256;
 
 const MAGIC: [u8; 8] = *b"XilaOSdb";
-const VERSION: u32 = 1;
+/// The format this code writes. Version 2 is version 1 with, in the
+/// catalog, what a table may say of its columns besides their type.
+const VERSION: u32 = 2;
+/// The oldest format this code reads. A volume in it is read as it is,
+/// and is in the format above from the first commit on: code that only
+/// knows version 1 then takes it for something else, and leaves it alone.
+const OLDEST: u32 = 1;
 
 const fn crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
@@ -110,10 +116,22 @@ impl Header {
     fn parse(page: &Page) -> Option<Header> {
         let good = sealed(page)
             && page[4..12] == MAGIC
-            && page[12..16] == VERSION.to_le_bytes()
+            && (OLDEST..=VERSION).contains(&(number(page, 12) as u32))
             && page[16..20] == (PAGE as u32).to_le_bytes();
         good.then(|| Header { txn: number(page, 20), pages: number(page, 28), catalog: number(page, 36), next_table: number(page, 44) })
     }
+}
+
+/// For the tests: makes a header say another version, as another XilaOS
+/// would have written it. False for a page that is not a header.
+#[cfg(test)]
+pub(crate) fn dated(page: &mut Page, version: u32) -> bool {
+    if Header::parse(page).is_none() {
+        return false;
+    }
+    page[12..16].copy_from_slice(&version.to_le_bytes());
+    seal(page);
+    true
 }
 
 pub(crate) struct Store {

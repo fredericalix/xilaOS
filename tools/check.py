@@ -1627,6 +1627,100 @@ with Xila(disk=keys_disk) as x:
     check("key forget: a key is forgotten", ok and lines == ["The key typed is forgotten."] and x.table("key") == [{"name": "openrouter", "key": "kept, never shown"}], lines)
     check("key forget: wants a key that is kept", x.cmd("key forget typed") == (False, ["No key is kept under that name. Type key to list them."]))
 
+# What a table asks of its columns is kept with it, and asked of every row.
+rules_disk = blank_disk(os.path.join(ROOT, "build", "rules.img"))
+with Xila(disk=rules_disk) as x:
+    made = x.cmd("create table parts (label text not null unique, code int unique, count int default 1 check (count >= 0), check (code is null or code > 99))")
+    check("constraints: a table is made with what its columns ask", made == (True, ["Table parts created."]), made)
+    x.cmd("insert into parts (label, code) values ('bolt', 100), ('nut', null)")
+    rows = x.table("select * from parts")
+    check("constraints: a row takes the value by default where it is given none", rows == [{"id": "1", "label": "bolt", "code": "100", "count": "1"}, {"id": "2", "label": "nut", "code": "", "count": "1"}], rows)
+    refused = [x.cmd(statement) for statement in (
+        "insert into parts (code) values (300)",
+        "insert into parts (label) values ('nut')",
+        "insert into parts (label, code) values ('pin', 100)",
+        "insert into parts (label, count) values ('pin', -1)",
+        "update parts set code = 5 where id = 1",
+        "update parts set label = 'bolt' where id = 2",
+        "insert into parts (label) values ('a'), ('b'), ('a')")]
+    wanted = ["Column label must have a value.", "Column label takes no value twice: row 2 has that one.", "Column code takes no value twice: row 1 has that one.",
+              "Refused by a check: count >= 0", "Refused by a check: code is null or code > 99", "Column label takes no value twice: row 1 has that one.",
+              "Column label takes no value twice: row 3 has that one."]
+    check("constraints: a row that breaks one is refused, and the answer says which", refused == [(False, [line]) for line in wanted], refused)
+    check("constraints: and nothing of those statements was written", x.table("select * from parts") == rows, x.table("select * from parts"))
+    check("constraints: values may pass through one another, as long as none is twice in the end", x.cmd("update parts set code = code + 100") == (True, ["2 rows changed in parts."]) and x.cmd("update parts set code = code - 100")[0])
+    asked = [(row["name"], row["rules"]) for row in x.table("select name, rules from columns where table_name = 'parts'")]
+    check("constraints: the view of the columns says what each asks", asked == [("id", ""), ("label", "not null unique"), ("code", "unique"), ("count", "default 1")], asked)
+    shown = x.cmd("show table parts")
+    check("show table: writes the statement that would make the table", shown == (True, ["create table parts (", "    label text not null unique,", "    code int unique,", "    count int default 1,", "    check (count >= 0),", "    check (code is null or code > 99)", ")"]), shown)
+    check("constraints: what is wrong in them is said when the table is made", x.cmd("create table t (a int default 'one')") == (False, ["Column a takes a whole number."]) and x.cmd("create table t (a int check (b > 0))") == (False, ["Unknown column: b"]) and x.cmd("create table t (a int primary key)")[0] is False)
+    time.sleep(0.2)
+    x.cut()
+with Xila(disk=rules_disk) as x:
+    # ids 3 and 4 went to the rows of the statement that was refused: an id is never given twice
+    again = (x.cmd("show table parts"), x.cmd("insert into parts (label) values ('nut')"), x.cmd("insert into parts (label, count) values ('pin', -1)"), x.cmd("insert into parts (label) values ('pin')"))
+    check("constraints: after a power cut the table still asks the same", again == (shown, (False, ["Column label takes no value twice: row 2 has that one."]), (False, ["Refused by a check: count >= 0"]), (True, ["1 row added to parts, with id 5."])) and x.cmd("disk check")[0], again)
+
+
+# A disk written before columns could ask anything says version 1 in its
+# headers; the tables on it are, byte for byte, what version 2 writes for
+# a table that asks nothing. So one is made here by changing the headers.
+def crc32c(data):
+    crc = 0xffffffff
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x82f63b78 if crc & 1 else crc >> 1
+    return crc ^ 0xffffffff
+
+
+def header_versions(path, becomes=None):
+    """The versions the two headers of a database say, the last commit first. With `becomes`, makes them say that one."""
+    found = []
+    with open(path, "r+b") as image:
+        for slot in range(2):
+            image.seek(slot * 4096)
+            page = bytearray(image.read(4096))
+            if page[4:12] != b"XilaOSdb" or struct.unpack("<I", page[:4])[0] != crc32c(page[4:]):
+                continue
+            if becomes is not None:
+                page[12:16] = struct.pack("<I", becomes)
+                page[:4] = struct.pack("<I", crc32c(page[4:]))
+                image.seek(slot * 4096)
+                image.write(page)
+            found.append((struct.unpack("<Q", page[20:28])[0], struct.unpack("<I", page[12:16])[0]))
+    return [version for _, version in sorted(found, reverse=True)]
+
+
+old_disk = blank_disk(os.path.join(ROOT, "build", "version1.img"))
+with Xila(disk=old_disk) as x:
+    x.cmd("create table plain (n int)")
+    x.cmd("insert into plain values (7), (8)")
+    time.sleep(0.2)
+check("version 1: this XilaOS writes version 2", header_versions(old_disk) == [2, 2], header_versions(old_disk))
+header_versions(old_disk, becomes=1)
+with Xila(disk=old_disk) as x:
+    log = "\n".join(x.boot_log)
+    found = (x.table("select n from plain"), x.cmd("disk check")[0])
+    check("version 1: a disk of the format before is found and read as it is", "Database ............ on the disk, 1 table" in log and found == ([{"n": "7"}, {"n": "8"}], True), (found, log[-300:]))
+    time.sleep(0.2)
+check("version 1: reading it writes nothing", header_versions(old_disk) == [1, 1], header_versions(old_disk))
+with Xila(disk=old_disk) as x:
+    x.cmd("insert into plain values (9)")
+    time.sleep(0.2)
+    first = header_versions(old_disk)
+    made = x.cmd("create table ruled (n int not null)")
+    time.sleep(0.2)
+check("version 1: the first change makes it version 2, and columns may ask there", first == [2, 1] and made[0] and header_versions(old_disk) == [2, 2], (first, made, header_versions(old_disk)))
+with Xila(disk=old_disk) as x:
+    found = (x.table("select n from plain"), x.cmd("insert into ruled values (null)"), x.cmd("disk check")[0])
+    check("version 1: and everything is there at the next start", found == ([{"n": "7"}, {"n": "8"}, {"n": "9"}], (False, ["Column n must have a value."]), True), found)
+header_versions(old_disk, becomes=3)
+with Xila(disk=old_disk) as x:
+    log = "\n".join(x.boot_log)
+    check("version 3: a disk of a format to come is left alone", "Database ............ in memory" in log and x.table("select name from tables where kind = 'stored'") == [], log[-400:])
+check("version 3: and nothing is written on it", header_versions(old_disk) == [3, 3], header_versions(old_disk))
+
 # What the user chose is kept from one start to the next, in a table.
 kept_disk = blank_disk(os.path.join(ROOT, "build", "settings.img"))
 with Xila(disk=kept_disk) as x:

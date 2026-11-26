@@ -584,7 +584,8 @@ See [SQL](04-sql.md).
 |---|---|
 | `tables` | Lists the tables: the views of the system and the stored ones. |
 | `select` | Reads a table. |
-| `create`, `drop` | Makes a table (`create table`), removes one (`drop table`). |
+| `create`, `drop` | Makes a table (`create table`), with what its columns ask (`not null`, `unique`, `default`, `check`); removes one (`drop table`). |
+| `show table name` | Writes the statement that would make a table as it is. |
 | `insert`, `update`, `delete` | Adds, changes and removes rows. |
 | `listen [channel]`, `unlisten [channel]` | Starts and stops being told when a table changes or a `notify` is sent. |
 | `notify channel ['text']` | Sends an event to those who listen. |

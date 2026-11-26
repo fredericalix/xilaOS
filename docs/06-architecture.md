@@ -1,6 +1,6 @@
 # Architecture
 
-XilaOS is about 33,000 lines of Rust in four crates, plus 3,000 lines
+XilaOS is about 34,000 lines of Rust in four crates, plus 3,100 lines
 of Python and shell for building and testing. No boot loader and no C
 are linked in. One crate, `xila-tls`, rests on libraries from the
 registry, for the arithmetic of TLS and the checking of certificates;
@@ -124,7 +124,7 @@ storage engine allocates.
 | `ui.rs` | 855 | The interface: header, title bar, screens, menu, terminal view. |
 | `expr.rs` | 755 | Expressions: parsing into a small tree, evaluation per row. |
 | `qr.rs` | 673 | QR codes: encoding, error correction, painting. |
-| `change.rs` | 647 | `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`. |
+| `change.rs` | 1,035 | `CREATE TABLE` and what its columns ask, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`. |
 | `city.rs` | 529 | The city: the scene from the system state, the isometric drawing. |
 | `gpt.rs` | 529 | GPT partition tables: reading, describing, the layout `install` writes. |
 | `companion.rs` | 900 | The companion: what is sent to its model, what is made of the answer, what it runs and what is refused to it, what is kept. (Its tests are 450 lines more.) |
@@ -144,7 +144,7 @@ storage engine allocates.
 | `settings.rs` | 262 | The settings kept from one start to the next. |
 | `clock.rs` | 251 | Dates and times from the battery clock. |
 | `keys.rs` | 237 | Scancodes to key events, `us` and `fr` layouts. |
-| `catalog.rs` | 208 | The system views: tables that show live state. |
+| `catalog.rs` | 290 | The system views: tables that show live state. |
 | `ask.rs` | 658 | One HTTP question over TCP, plainly or through TLS, and its answer read whole. |
 | `text.rs` | 189 | `FixedStr<N>` and helpers. |
 | `line.rs` | 165 | The line editor. |

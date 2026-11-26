@@ -429,6 +429,18 @@ impl Expr {
         Ok(truth(&self.eval(row)?)? == Some(true))
     }
 
+    /// Whether the expression is known not to hold for a row. What cannot
+    /// be known (a value is missing) neither holds nor fails: a check lets
+    /// such a row in, a WHERE leaves it out.
+    pub fn fails(&self, row: &[Value]) -> Result<bool, Message> {
+        Ok(truth(&self.eval(row)?)? == Some(false))
+    }
+
+    /// Whether the expression reads this column of the row.
+    pub fn names(&self, column: usize) -> bool {
+        self.nodes[..self.count].iter().any(|node| matches!(node, Node::Column(named) if *named == column))
+    }
+
     fn node(&self, at: usize, row: &[Value]) -> Result<Value, Message> {
         Ok(match self.nodes[at] {
             Node::Value(value) => value,
