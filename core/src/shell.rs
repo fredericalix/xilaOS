@@ -393,7 +393,7 @@ fn web(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     use crate::remote::written;
     use crate::web::WRONG;
     if arg.eq_ignore_ascii_case(b"on") {
-        if sys.session == crate::events::NETWORK {
+        if !at_the_machine(sys) {
             out.line(Style::Error, b"web on is typed at the machine itself.");
             return false;
         }
@@ -473,7 +473,7 @@ fn web(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
 fn remote(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     use crate::remote::{written, PORT, WRONG};
     if arg.eq_ignore_ascii_case(b"on") {
-        if sys.session == crate::events::NETWORK {
+        if !at_the_machine(sys) {
             out.line(Style::Error, b"remote on is typed at the machine itself.");
             return false;
         }
@@ -973,6 +973,8 @@ pub struct System {
     /// The program that runs by itself now, if one does: who asks, when a
     /// program asks the companion.
     pub firing: Name,
+    /// The companion is running a line by itself: some commands refuse.
+    pub acting: bool,
     /// What was last seen of the state of the system, to say what changes.
     pub watch: crate::watch::Watch,
     /// Pages of the tables found damaged since the start. Counted where
@@ -1073,6 +1075,7 @@ impl System {
             fetched: None,
             companion: crate::companion::Companion::new(),
             firing: Name::new(),
+            acting: false,
             watch: crate::watch::Watch::new(),
             damaged: core::cell::Cell::new(0),
             asked_machine: FixedStr::new(),
@@ -1202,7 +1205,7 @@ const HELP_COMMANDS: [&[u8]; 37] = [
     b"   keymap [us|fr]             - Changes the keyboard layout.",
     b"   key [set n k|forget n]     - Keys to services, never shown.",
     b"   ask question               - Asks the companion.",
-    b"   companion                  - Who the companion is.",
+    b"   companion [off|on]         - Who the companion is. Stops it.",
     b"   time                       - The date and the time, by the machine's clock.",
     b"   uptime                     - Time since the system started.",
     b"   city                       - Lists the blocks of the city and their heights.",
@@ -1314,6 +1317,10 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
         b"tasks" => tasks(sys, out),
         b"city" => city(sys, out),
         b"select" => query(sys, line, out),
+        b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"program") && sys.acting => {
+            out.line(Style::Error, b"Programs are not the companion's to change.");
+            false
+        }
         b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"program") => crate::lang::remove(sys, trim(split_word(arg).1), out),
         b"create" | b"drop" | b"insert" | b"update" | b"delete" => change(sys, line, out),
         b"programs" => crate::lang::list(sys, out),
@@ -1329,6 +1336,10 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
         b"clear" | b"cls" => {
             out.clear();
             true
+        }
+        b"reboot" if sys.acting => {
+            out.line(Style::Error, b"reboot is typed at the machine itself.");
+            false
         }
         b"reboot" => {
             out.line(Style::Out, b"Restarting.");
@@ -1381,6 +1392,14 @@ fn query(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
 
 /// Runs a statement that changes stored tables.
 fn change(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
+    // the companion acting by itself leaves alone what holds it
+    if let Some(table) = crate::change::target(line).filter(|table| sys.acting && crate::companion::held_by(table)) {
+        let mut message = crate::sql::Message::from_bytes(b"The table ");
+        message.push_bytes(table);
+        message.push_bytes(b" is not the companion's to change.");
+        out.line(Style::Error, message.bytes());
+        return false;
+    }
     let now = sys.ticks.max(1);
     let (events, vars) = (&mut sys.events, &sys.vars[sys.session]);
     // those who listen to the table hear of every row, once the change is certain
@@ -1656,7 +1675,8 @@ fn disk(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
                 }
             }
         }
-        b"erase" if sys.session == crate::events::NETWORK => {
+        // both forms: the one that tells what would be lost, and the one that does it
+        b"erase" | b"erase yes" if !at_the_machine(sys) => {
             out.line(Style::Error, b"disk erase takes a disk: it is typed at the machine itself.");
             false
         }
@@ -1755,7 +1775,7 @@ const NO_SYSTEM: &[u8] = b"A machine that serves the system can give it: install
 /// serves it (`tools/netboot.py`), in place of the one the firmware gave.
 fn install(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     use crate::gpt::Holds;
-    if sys.session == crate::events::NETWORK {
+    if !at_the_machine(sys) {
         out.line(Style::Error, b"install takes a disk: it is typed at the machine itself.");
         return false;
     }
@@ -2363,6 +2383,10 @@ fn trim_end(bytes: &[u8]) -> &[u8] {
 /// name or a calculation is replaced by its value: `ask is {new.label}
 /// at {new.amount} unusual?`.
 fn ask(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    if sys.acting {
+        out.line(Style::Error, b"The companion does not ask itself.");
+        return false;
+    }
     // what is asked, with the values of what stands between braces
     let mut text = FixedStr::<{ crate::companion::ASKED }>::new();
     let mut rest = arg;
@@ -2414,10 +2438,31 @@ fn ask(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     }
 }
 
-/// Who the companion is, and what it is doing.
+/// Whether who types is at the machine: at its keyboard or on its serial
+/// port. Not at the prompt over the network, not the companion acting by
+/// itself, and not a program that runs by itself, which either of those
+/// could have written. What takes a disk or opens the machine to others
+/// is for nobody else.
+fn at_the_machine(sys: &System) -> bool {
+    matches!(sys.session, crate::events::SCREEN | crate::events::SERIAL) && !sys.acting
+}
+
+/// Who the companion is, and what it is doing. `companion off` stops it:
+/// it is asked nothing and does nothing until `companion on`.
 fn companion(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    if arg.eq_ignore_ascii_case(b"off") || arg.eq_ignore_ascii_case(b"on") {
+        let on = arg.eq_ignore_ascii_case(b"on");
+        // it may turn itself off, never on
+        if on && sys.acting {
+            out.line(Style::Error, b"companion on is typed at the machine itself.");
+            return false;
+        }
+        crate::companion::switch(sys, on);
+        out.line(Style::Done, if on { b"The companion is on." } else { b"The companion is off: it is asked nothing and does nothing until companion on." });
+        return true;
+    }
     if !arg.is_empty() {
-        out.line(Style::Error, b"companion takes nothing after it. To change who it is: update companions set ...");
+        out.line(Style::Error, b"After companion: nothing, off or on. To change who it is: update companions set ...");
         return false;
     }
     let who = crate::companion::who(&sys.db);
@@ -2433,11 +2478,12 @@ fn companion(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     }
     let mut text = Text::new();
     let _ = match sys.companion.stage {
+        _ if sys.companion.off => write!(text, "off"),
         crate::companion::Stage::Idle => write!(text, "nothing asked"),
         crate::companion::Stage::Calling => write!(text, "answering, for {} s", sys.ticks.saturating_sub(sys.companion.since) / 100),
     };
     t.row(&[b"now", text.bytes()]);
-    for (item, count) in [(&b"calls to the model"[..], sys.companion.calls), (b"queries run for it", sys.companion.queries)] {
+    for (item, count) in [(&b"calls to the model"[..], sys.companion.calls), (b"queries run for it", sys.companion.queries), (b"lines it ran", sys.companion.acts)] {
         text.clear();
         let _ = write!(text, "{count}");
         t.row(&[item, text.bytes()]);
@@ -2450,6 +2496,11 @@ fn companion(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
 /// `key set openrouter sk-...` keeps one, `key forget openrouter` forgets
 /// it. A key is never shown: not here, not by SQL, not to a browser.
 fn key(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    // keys are not the companion's: not even their names
+    if sys.acting {
+        out.line(Style::Error, b"key is typed at the machine itself.");
+        return false;
+    }
     let (word, rest) = split_word(arg);
     let (name, value) = split_word(trim(rest));
     let value = trim(value);
@@ -3319,6 +3370,8 @@ pub mod tests {
         assert_eq!(run_line(&mut sys, "install").1.lines, ["install takes a disk: it is typed at the machine itself."]);
         assert_eq!(run_line(&mut sys, "remote on").1.lines, ["remote on is typed at the machine itself."]);
         assert_eq!(run_line(&mut sys, "disk erase").1.lines, ["disk erase takes a disk: it is typed at the machine itself."]);
+        // the form that erases, not only the one that tells what would be lost
+        assert_eq!(run_line(&mut sys, "disk erase yes").1.lines, ["disk erase takes a disk: it is typed at the machine itself."]);
         assert!(run_line(&mut sys, "disk").0);
         assert_eq!(sys.remote.code().map(|code| crate::remote::written(code).bytes().to_vec()), Some(again.clone().into_bytes()));
         // it has names and blocks of its own
@@ -3451,9 +3504,15 @@ pub mod tests {
                 "   now                 nothing asked",
                 "   calls to the model  0",
                 "   queries run for it  0",
+                "   lines it ran        0",
             ]
         );
-        assert_eq!(run_line(&mut sys, "companion now").1.lines, ["companion takes nothing after it. To change who it is: update companions set ..."]);
+        assert_eq!(run_line(&mut sys, "companion now").1.lines, ["After companion: nothing, off or on. To change who it is: update companions set ..."]);
+        // off: it is asked nothing; on again
+        assert_eq!(run_line(&mut sys, "companion off").1.lines, ["The companion is off: it is asked nothing and does nothing until companion on."]);
+        assert_eq!(run_line(&mut sys, "companion").1.lines[5], "   now                 off");
+        assert_eq!(run_line(&mut sys, "ask hello?").1.lines, ["The companion is off. Type companion on to have it back."]);
+        assert_eq!(run_line(&mut sys, "companion ON").1.lines, ["The companion is on."]);
         assert_eq!(run_line(&mut sys, "ask").1.lines, ["Type ask and what you want to know: ask how many tasks are running?"]);
         assert_eq!(run_line(&mut sys, "ask hello?").1.lines, ["No key opens the model. Type key set openrouter and the key."]);
         run_line(&mut sys, "key set openrouter sk-or-v1-secret");

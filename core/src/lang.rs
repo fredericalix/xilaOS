@@ -1524,6 +1524,30 @@ mod tests {
     }
 
     #[test]
+    fn a_program_that_runs_by_itself_neither_takes_a_disk_nor_opens_the_machine() {
+        let mut sys = System::new();
+        // written over the network, where those commands are refused: a
+        // program is not a way around
+        sys.session = crate::events::NETWORK;
+        let (ok, _) = type_lines(&mut sys, &["on notify door", "    install 1 yes", "    disk erase yes", "    web on", "    remote on", "    say 'after'", "end"]);
+        assert!(ok);
+        type_lines(&mut sys, &["notify door 'open'"]);
+        sys.session = crate::events::SCREEN;
+        // it stops at the first line that fails, and each of the four does
+        for refused in ["install takes a disk", "disk erase takes a disk", "web on is typed", "remote on is typed"] {
+            let said = in_background(&mut sys);
+            assert!(said.len() == 2 && said[0].starts_with(&format!("on_notify_door: {refused}")) && said[0].ends_with("at the machine itself."), "{said:?}");
+            assert!(sys.request.is_none() && sys.web.code().is_none() && sys.remote.code().is_none());
+            // the next one, with the refused line taken out by who is at the machine
+            type_lines(&mut sys, &["delete from programs where line = 1 and name = 'on_notify_door'", "update programs set line = line - 1 where line > 1", "notify door 'again'"]);
+        }
+        assert_eq!(in_background(&mut sys), ["on_notify_door: after"]);
+        // run by who is at the machine, a program may
+        type_lines(&mut sys, &["program doors", "    web on", "end"]);
+        assert!(type_lines(&mut sys, &["run doors"]).0 && sys.web.code().is_some());
+    }
+
+    #[test]
     fn a_program_runs_every_day_at_its_time() {
         use crate::clock::Moment;
         let mut sys = books();

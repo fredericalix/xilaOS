@@ -196,6 +196,14 @@ impl Ask {
         Ok(Ask { id, ..Ask::unasked(head, now) })
     }
 
+    /// Hangs up, whatever was being said: nobody wants the answer any more.
+    pub fn drop_it(&mut self, tcp: &mut Tcp) {
+        if self.step == Step::Going {
+            self.step = Step::Failed(Failed::Silent);
+            tcp.abort(self.id);
+        }
+    }
+
     /// Everything but the call itself.
     fn unasked(head: FixedStr<HEAD>, now: u64) -> Ask {
         Ask { id: 0, since: now, patience: PATIENCE, head, sent: 0, stage: Stage::Status, line: FixedStr::new(), lines: 0, heard: false, status: 0, length: None, chunked: false, kept: 0, total: 0, step: Step::Going }

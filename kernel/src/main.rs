@@ -678,6 +678,10 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
 fn companion(sys: &mut System, nic: &mut e1000::Nic, call: &mut Option<Thinking>, room: &mut Option<(Box<[u8]>, Box<[u8]>)>) {
     use xila_core::companion::{self, Stage, Trouble};
     if sys.companion.stage != Stage::Calling {
+        // turned off, or given up, while its model was being called: hang up
+        if let Some(mut gone) = call.take() {
+            gone.ask.drop_it(&mut sys.net.tcp);
+        }
         return;
     }
     let (request, answer) = room.get_or_insert_with(|| (alloc::vec![0u8; companion::REQUEST].into_boxed_slice(), alloc::vec![0u8; companion::ANSWER].into_boxed_slice()));

@@ -45,14 +45,16 @@ were also tried on the real machine.
 | What happens to the machine said as events: `start`, `network`, `disk`, `tasks`, `memory` | yes; `disk` and `memory` by unit tests only | not tried |
 | The companion asked by programs (`ask` in an `on` or `every` program), which is how it reacts to what happens | yes | not tried |
 | The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | not tried |
+| The companion acts (`run`: one line at the prompt, written in `acts`), remembers (`remember`, the table `remembered`) and is stopped (`companion off`, kept between starts); what is refused to it | yes, against a made-up model and a real one; the refusals against the made-up one | not tried |
+| `install`, `disk erase`, `remote on`, `web on` refused to a program that runs by itself; `disk erase yes` refused to the network session | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 26 November 2026: about 29,500 lines, 295
-unit tests, 447 system checks.
+about 300 system checks. On 26 November 2026: about 33,000 lines, 302
+unit tests, 462 system checks.
 
 ## Known limits of what is done
 
@@ -108,7 +110,7 @@ The system is meant to grow in layers. Layer 0 (the base) and layer 1
 | 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet, TCP/IP, DNS and TLS for the side that calls |
 | 4. Sound | Audio driver, mixing, MP3, ambiences | Not started |
 | 5. Applications | Spreadsheet, database front end, a HyperCard-like, mail, text web browser, IRC, HTTP server, a port of Doom | Not started |
-| 6. Agents | AI companions with their own access rights to the data | A first companion answers and reads the tables; it does not act yet, and has no access rights |
+| 6. Agents | AI companions with their own access rights to the data | A first companion answers, reads the tables, acts and remembers; it has no access rights |
 | 7. Later | Wi-Fi, USB, RISC-V | Not started |
 
 ### The intentions behind it
@@ -224,14 +226,14 @@ a real machine. Each numbered step is merged once its unit tests and
 its checks in `tools/check.py` pass.
 
 On 26 November 2026 the author put a first AI companion ahead of the
-rest: it is the phase under way, and what is left of phase 2 waits for
+rest, and it was built that day; what is left of phase 2 waited for
 it. Its steps are [below](#the-companion).
 
 | Phase | Content | State |
 |---|---|---|
 | 1. Loose ends | The small things that were off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing | Done on 23 November 2026 |
-| The companion | A first AI companion: a screen to write to it, and its reactions to what happens in the system. Names (DNS), TLS and HTTPS first, since the model it speaks through is reached over the Internet | In progress |
-| 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Left: constraints and indexes, which change what is written on the disk; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | Waits for the companion |
+| The companion | A first AI companion: a screen to write to it, and its reactions to what happens in the system. Names (DNS), TLS and HTTPS first, since the model it speaks through is reached over the Internet | Done on 26 November 2026, in QEMU; not tried on the T430 |
+| 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Left: constraints and indexes, which change what is written on the disk; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | Not resumed yet |
 | 3. XilaScript | Parameters and names of a program's own; a task of its own for a program, and for the commands that wait (`net ping`, `net get`, `install from`); an editor; `insert ... select`, the values of before, more rhythms | After 2 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
 | 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
@@ -240,8 +242,9 @@ it. Its steps are [below](#the-companion).
 **Waiting for the T430.** What these phases build is only verified in
 QEMU until it is tried there: the dead keys on the real keyboard,
 `install` showing its progress on a real disk, `disk check` on a
-real disk, names asked of the name server of a real network, and TLS
-with the keys its processor draws and the time its clock tells.
+real disk, names asked of the name server of a real network, TLS
+with the keys its processor draws and the time its clock tells, and
+the companion as a whole.
 
 ### The companion
 
@@ -311,12 +314,33 @@ companion (`ask`, with the values of what happened between braces),
 and what happens to the machine is said as events that such a program
 hears: its start, the network, the disk, the tasks, the memory.
 
-What is left:
+Acting and remembering came last, the same day. The model has two
+more tools: `run`, one line at the prompt, and `remember`, a sentence
+kept in the table `remembered` and told to it again with every
+question. Every line it runs is a row of the table `acts`;
+`companion off` stops it, and stays in force through a restart;
+`install`, `disk erase`, `remote on` and `web on` are refused to it.
 
-6. **Acting and notes**: commands it runs and data it changes, each
-   written in a table, with a command that stops it and four commands
-   refused to it; notes of its own, kept from one conversation to the
-   next.
+Three things were added to what the author had decided, because the
+guards did not hold without them. They are his to undo:
+
+- More is refused to the companion than the four commands: `key`,
+  `reboot`, `ask`, `companion on`, blocks, what needs the kernel while
+  it is served, and any change to the tables `programs`, `acts` and
+  `companions`. A program the companion wrote would have run without
+  its refusals and could have turned it on again; the row of
+  `companions` says where its key is sent; `acts` is the record.
+- `install`, `disk erase`, `remote on` and `web on` are now refused to
+  every program that runs by itself, whoever wrote it. Before, a
+  program written at the prompt over the network was a way around the
+  refusals of that prompt. A user's own `on` or `every` program can no
+  longer open the pages for browsers by itself.
+- `disk erase yes` was not refused to the prompt over the network,
+  though `disk erase` was. It is.
+
+What it is not: bounded. It may empty or drop any table of the user's
+without asking, and nothing undoes it. See
+[what holds it](14-the-companion.md#what-holds-it).
 
 Two things of the plan were not needed in the form they had: texts
 longer than 48 characters in SQL (what is said is kept as long lines

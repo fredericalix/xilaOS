@@ -278,8 +278,8 @@ laptops is.
 ### Settings kept between starts
 
 When the tables are kept on a disk, the theme, the mood, the keyboard layout,
-the brightness and the way pictures reach the screen are found again at the
-next start. Nothing has to be asked: at every tick of its timer the system
+the brightness, the way pictures reach the screen and whether the companion
+is off are found again at the next start. Nothing has to be asked: at every tick of its timer the system
 compares what is in use with what it last wrote, and writes what differs into
 the stored table `kept_settings`, whoever changed it (a command, a key, a
 program).
@@ -506,7 +506,7 @@ puts the code away and brings the terminal back.
 
 The code is as large as the screen allows while keeping dots that a camera can
 still tell apart: at least two screen points per dot. On a screen of 50 rows
-it holds 2,563 characters (`qr help c`, 2,368 characters, fits), on one of 40
+it holds 2,563 characters (`qr help c`, 2,547 characters, fits), on one of 40
 rows 1,465; a QR code cannot hold more than 2,953. When a command says more,
 the end is dropped and the answer tells how much (`The last N did not fit.`).
 A command that says nothing gives no code.
@@ -527,8 +527,9 @@ sensitive to case. `?` is another name for `help`, and `cls` for `clear`.
 | `mood [calm\|auto\|intense]` | Says or sets the mood. Auto follows the typing. |
 | `keymap [us\|fr]` | Says or changes the keyboard layout. |
 | `key`, `key set name key`, `key forget name` | Lists the keys to services by name; keeps one; forgets one. A key is never shown. |
-| `ask question` | Asks the companion, which reads the tables to answer. See [The companion](14-the-companion.md). |
+| `ask question` | Asks the companion, which reads the tables to answer and runs lines at the prompt to do what it is asked. See [The companion](14-the-companion.md). |
 | `companion` | Who the companion is, and what it is doing. |
+| `companion off`, `companion on` | Stops the companion: nothing is asked of it and it does nothing. Has it back. Kept between starts. |
 | `qr command` | Runs a command and shows what it says as a QR code. |
 | `peek` | Writes the characters on the screen, one line per row. |
 
@@ -604,7 +605,7 @@ See [XilaScript](05-xilascript.md).
 
 ## Limits
 
-- Two screens only, and one prompt on the screen. There are no applications
+- Three screens only, and one prompt on the screen. There are no applications
   yet: the menu lists screens, not programs.
 - `sound` and `irc` in the header are labels; nothing is behind them.
 - The history holds 16 lines and the terminal 256 rows; neither is kept

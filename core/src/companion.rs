@@ -1,21 +1,30 @@
 //! The companion: a model of the Internet that lives in the system,
-//! answers what it is asked, and reads the tables to do so.
+//! answers what it is asked, reads the tables to do so, and acts.
 //!
 //! It thinks elsewhere. A question typed here (`ask how many tasks run?`)
 //! is sent to a model over HTTPS with what was said before, and what the
 //! model says back is the answer. What makes it a companion of *this*
 //! system and not a chat window is what it is told and what it may do:
-//! it is told what XilaOS is, and it is given a tool, `select`, which
-//! reads the tables as the prompt does. The model does not answer at
-//! once when it wants to look: it says which query to run, the query is
-//! run here, its result is sent back, and so on until it has an answer.
-//! One question is so several calls, `ROUNDS` at most.
+//! it is told what XilaOS is, and it is given three tools: `select`,
+//! which reads the tables as the prompt does; `run`, which runs one line
+//! at the prompt; `remember`, which keeps a fact for later. The model
+//! does not answer at once when it wants one: it says which, the thing
+//! is done here, what came of it is sent back, and so on until it has an
+//! answer. One question is so several calls, `ROUNDS` at most.
+//!
+//! It acts without asking first. What holds it: every line it runs is a
+//! row of the stored table `acts`; `companion off` stops it (`switch`);
+//! and some things are refused while it acts (`System::acting`, set in
+//! `act`): what takes a disk or opens the machine, keys, restarting,
+//! asking itself, turning itself on, blocks, what needs the kernel, and
+//! any change to the tables that hold it (`held_by`). Everything else at
+//! the prompt is its own to run, a `drop table` included.
 //!
 //! Everything said is kept in the stored table `talk`, one row for each
 //! thing: what was asked (`you`), what the companion said (`xila`, and
-//! `more` for what did not fit in one row), each query it asked for
-//! (`select`) and what came of it (`result`), with the number of the
-//! question they belong to (`turn`). The texts are longer
+//! `more` for what did not fit in one row), each thing it asked for
+//! (`select`, `run`, `remember`) and what came of it (`result`), with
+//! the number of the question they belong to (`turn`). The texts are longer
 //! than SQL shows (48 characters): like the lines of programs they are
 //! read through the storage engine. The conversation sent to the model
 //! is those rows, the last few turns of them.
@@ -78,10 +87,32 @@ You can read the tables with the tool `select`, which runs one SQL SELECT and gi
 Views of the system: tasks (what runs), memory, machine, settings, screens, commands, city. \
 The SQL is small: one statement, joins of two tables at most, no subqueries, 32 rows a result, texts cut at 48 characters; count(*), sum, min, max, avg, where, group by, order by, limit work.\n\
 Answer in plain text of plain ASCII: no markdown, no emphasis marks, no lists with stars, no emoji. Be brief: a few short lines, 400 characters at most. \
-If a query fails, read the error and try another. If you cannot know, say so.";
+If a query fails, read the error and try another. If you cannot know, say so.\n\
+You can also act, with the tool `run`, which runs one line at the prompt of XilaOS and gives you what it said: SQL that changes things \
+(insert into t values (...), update t set a = 1 where id = 2, delete from t where ..., create table t (a int, b text, c decimal), drop table t), \
+`notify channel 'text'`, settings (`mood calm`, `theme night`), `help` for the list of commands. One line, no blocks. \
+Act only when the user asks for it, or when what you are asked plainly needs it; do the least that does it; never drop or empty a table you were not asked to. Say what you did. \
+Some commands are not yours and are refused: installing, erasing a disk, opening the machine to the network, keys, restarting; \
+and you read the tables programs, acts and companions without changing them.\n\
+You can keep a fact for later conversations with the tool `remember`: one short sentence about what the user prefers or what a table is for. \
+What you remembered is given back to you below; it is your own memory, kept in the table `remembered`, and has nothing to do with the user's tables: \
+when the user names a thing (notes, expenses, a list), it is one of their tables, which you find with `select * from tables` before you read or change it.";
 
-/// The one tool, as the model is told of it.
-const TOOLS: &[u8] = br#"[{"type":"function","function":{"name":"select","description":"Reads rows of the tables of XilaOS with one SQL SELECT statement. Returns the rows, cells apart by tabs, the names of the columns first; or an error.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"One SELECT statement."}},"required":["query"]}}}]"#;
+/// The tools, as the model is told of them: reading, acting, remembering.
+/// (The third was first called `note`: a model took the user's table
+/// `notes` for its own memory, and wrote there what was meant for it.)
+const TOOLS: &[u8] = br#"[{"type":"function","function":{"name":"select","description":"Reads rows of the tables of XilaOS with one SQL SELECT statement. Returns the rows, cells apart by tabs, the names of the columns first; or an error.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"One SELECT statement."}},"required":["query"]}}},{"type":"function","function":{"name":"run","description":"Runs one line at the prompt of XilaOS, which may change data or settings, and returns what it said. Every line run is written in the table acts.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"One line: a statement or a command."}},"required":["command"]}}},{"type":"function","function":{"name":"remember","description":"Keeps one short fact about the user or the system for your later conversations. Not for the user's data: that goes in the user's tables, with run.","parameters":{"type":"object","properties":{"fact":{"type":"string","description":"The fact, in one sentence."}},"required":["fact"]}}}]"#;
+
+/// The tools by their name, and the name of what each is given.
+const TOOL: [(&[u8], &[u8]); 3] = [(b"select", b"query"), (b"run", b"command"), (b"remember", b"fact")];
+
+/// The table of what the companion did, and the one of what it noted.
+pub const ACTS: &[u8] = b"acts";
+pub const REMEMBERED: &[u8] = b"remembered";
+/// The most notes that are given back to it, the last ones.
+const NOTES: usize = 20;
+/// The longest note.
+const NOTE: usize = 200;
 
 /// Why a question got no answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -98,6 +129,8 @@ pub enum Trouble {
     Lost,
     /// It asked for queries again and again without ever answering.
     TooMany,
+    /// It was turned off while it was answering.
+    Off,
     /// The conversation does not fit in what is sent, even one turn of it.
     TooLong,
     /// The tables could not be written: nothing can be kept.
@@ -141,11 +174,15 @@ pub struct Companion {
     waiting: [(FixedStr<ASKED>, crate::sql::Name); WAITING],
     waiting_len: usize,
     pub dropped: u64,
+    /// Turned off: it is asked nothing and does nothing until turned on.
+    pub off: bool,
+    /// Lines it ran since the start.
+    pub acts: u64,
 }
 
 impl Companion {
     pub const fn new() -> Companion {
-        Companion { stage: Stage::Idle, turn: 0, rounds: 0, asker: 0, outcome: None, since: 0, refusal: FixedStr::new(), calls: 0, queries: 0, waiting: [(FixedStr::new(), FixedStr::new()); WAITING], waiting_len: 0, dropped: 0 }
+        Companion { stage: Stage::Idle, turn: 0, rounds: 0, asker: 0, outcome: None, since: 0, refusal: FixedStr::new(), calls: 0, queries: 0, waiting: [(FixedStr::new(), FixedStr::new()); WAITING], waiting_len: 0, dropped: 0, off: false, acts: 0 }
     }
 
     /// Questions of programs that wait their turn.
@@ -210,13 +247,15 @@ pub fn who(db: &Database) -> Who {
 /// left alone, and nothing can be asked.
 fn tables(db: &mut Database) -> Result<usize, Message> {
     // one table at a time: the engine makes a table in a change of its own
-    for name in [COMPANIONS, TALK] {
+    for name in [COMPANIONS, TALK, ACTS, REMEMBERED] {
         if db.find(name).is_some() {
             continue;
         }
-        let made = match name == COMPANIONS {
-            true => db.create(name, &WHO.map(|name| (name, Kind::Text))).and_then(|table| db.insert(table, &[Field::Text(NAME), Field::Text(PLACE), Field::Text(MODEL), Field::Text(KEY), Field::Text(b"")])).map(|_| ()),
-            false => db.create(name, &[(b"turn", Kind::Int), (b"who", Kind::Text), (b"text", Kind::Text)]).map(|_| ()),
+        let made = match name {
+            COMPANIONS => db.create(name, &WHO.map(|name| (name, Kind::Text))).and_then(|table| db.insert(table, &[Field::Text(NAME), Field::Text(PLACE), Field::Text(MODEL), Field::Text(KEY), Field::Text(b"")])).map(|_| ()),
+            TALK => db.create(name, &[(b"turn", Kind::Int), (b"who", Kind::Text), (b"text", Kind::Text)]).map(|_| ()),
+            ACTS => db.create(name, &[(b"turn", Kind::Int), (b"at", Kind::Text), (b"command", Kind::Text), (b"went", Kind::Text)]).map(|_| ()),
+            _ => db.create(name, &[(b"at", Kind::Text), (b"text", Kind::Text)]).map(|_| ()),
         };
         match made {
             Ok(()) => db.commit(&mut |_, _, _| {}).map_err(|why| crate::change::engine_error(why, None))?,
@@ -249,6 +288,9 @@ pub fn ask(sys: &mut System, text: &[u8], asker: usize) -> Result<(), Message> {
     let text = text.trim_ascii();
     if text.is_empty() || text.len() > ASKED {
         return Err(Message::from_bytes(b"Type ask and what you want to know: ask how many tasks are running?"));
+    }
+    if sys.companion.off {
+        return Err(Message::from_bytes(b"The companion is off. Type companion on to have it back."));
     }
     if sys.companion.stage != Stage::Idle {
         return Err(Message::from_bytes(b"The companion is still answering the last question."));
@@ -291,6 +333,9 @@ pub fn ask_later(sys: &mut System, text: &[u8], who: &[u8]) -> Result<(), Messag
         return Err(Message::from_bytes(b"ask wants something to ask, of 150 characters at most."));
     }
     let companion = &mut sys.companion;
+    if companion.off {
+        return Err(Message::from_bytes(b"The companion is off: nothing is asked."));
+    }
     if companion.waiting_len == WAITING {
         companion.dropped += 1;
         return Err(Message::from_bytes(b"Eight questions wait for the companion: this one is let go."));
@@ -314,6 +359,122 @@ pub fn next(sys: &mut System) -> Option<(crate::sql::Name, FixedStr<ASKED>, Resu
     companion.waiting_len -= 1;
     let asked = ask(sys, text.bytes(), HERE);
     Some((who, text, asked))
+}
+
+/// Turns the companion off, or on again. Off, it is asked nothing and
+/// does nothing: the question it was answering is given up, with what it
+/// had still to do for it, and those that waited are let go.
+pub fn switch(sys: &mut System, on: bool) {
+    let companion = &mut sys.companion;
+    companion.off = !on;
+    if !on {
+        companion.waiting_len = 0;
+        if companion.stage == Stage::Calling {
+            (companion.stage, companion.outcome) = (Stage::Idle, Some(Outcome::Failed(Trouble::Off)));
+        }
+    }
+}
+
+/// The time as rows keep it, if the machine knows it.
+fn moment(sys: &System) -> Text {
+    sys.now().map_or(Text::new(), |now| crate::clock::Moment::at(now).text())
+}
+
+/// What a line said, kept as the model is told: lines, and the cells of
+/// tables apart by tabs.
+struct Said<'a>(&'a mut FixedStr<LINE>);
+
+impl crate::shell::Out for Said<'_> {
+    fn line(&mut self, _: crate::shell::Style, text: &[u8]) {
+        if !self.0.is_empty() {
+            self.0.push(b'\n');
+        }
+        self.0.push_bytes(text);
+    }
+
+    fn table(&mut self, table: &crate::shell::Table) {
+        let mut line = FixedStr::<LINE>::new();
+        for col in 0..table.cols {
+            line.push_bytes(if col > 0 { b"\t" } else { b"" });
+            line.push_bytes(table.header[col].bytes());
+        }
+        self.line(crate::shell::Style::Out, line.bytes());
+        for row in 0..table.rows {
+            line.clear();
+            for col in 0..table.cols {
+                line.push_bytes(if col > 0 { b"\t" } else { b"" });
+                line.push_bytes(table.cells[row][col].bytes());
+            }
+            self.line(crate::shell::Style::Out, line.bytes());
+        }
+    }
+}
+
+/// Runs one line for the companion, as a program that runs by itself
+/// would run it, and writes what it said in `into`. Everything it runs is
+/// written in the table `acts`, whether it went well or not. The commands
+/// that are not for it refuse themselves (`System::acting`), and those
+/// that need the kernel are not run.
+fn act(sys: &mut System, command: &[u8], into: &mut FixedStr<LINE>) {
+    let command = command.trim_ascii();
+    let session = core::mem::replace(&mut sys.session, crate::events::BACKGROUND);
+    sys.vars[crate::events::BACKGROUND] = crate::expr::Vars::new();
+    sys.vars[crate::events::BACKGROUND].clock = sys.now();
+    sys.acting = true;
+    let mut ok = if command.iter().any(|byte| *byte == b'\n') || crate::lang::opens(command) {
+        into.push_bytes(b"One line at a time, and no block: if, for, while and program are not for you.");
+        false
+    } else {
+        crate::lang::line(sys, command, &mut Said(into))
+    };
+    // a command that leaves work to the kernel is not run for it: the
+    // answer would come later, to nobody
+    if sys.request.take().is_some() {
+        *into = FixedStr::from_bytes(b"That command needs the machine itself: it was not run.");
+        ok = false;
+    }
+    sys.acting = false;
+    sys.session = session;
+    if into.is_empty() {
+        into.push_bytes(if ok { b"done" } else { b"it failed, and said nothing" });
+    }
+    if !ok {
+        *into = FixedStr::from_bytes(b"error: ").also(into.bytes());
+    }
+    sys.companion.acts += 1;
+    // the record of it: after the act, since the act may have been a change of its own
+    let (turn, at) = (sys.companion.turn, moment(sys));
+    if let Some(table) = table(&sys.db, ACTS, &[(b"turn", Kind::Int), (b"at", Kind::Text), (b"command", Kind::Text), (b"went", Kind::Text)]) {
+        match sys.db.insert(table, &[Field::Int(turn), Field::Text(at.bytes()), Field::Text(&command[..command.len().min(LINE)]), Field::Text(if ok { b"done" } else { b"failed" })]) {
+            Ok(_) => {
+                let _ = sys.db.commit(&mut |_, _, _| {});
+            }
+            Err(_) => sys.db.rollback(),
+        }
+    }
+}
+
+/// Whether a table is one of those that hold the companion, which it may
+/// read and not change while it acts by itself: the programs (one that
+/// runs by itself would act without what is refused to the companion,
+/// and could turn it on again), what it did, and who it is (where its
+/// model is asked is where its key is sent).
+pub fn held_by(table: &[u8]) -> bool {
+    [b"programs" as &[u8], ACTS, COMPANIONS].iter().any(|name| table.eq_ignore_ascii_case(name))
+}
+
+/// Keeps a fact for the companion.
+fn remember(sys: &mut System, text: &[u8], into: &mut FixedStr<LINE>) {
+    let text = text.trim_ascii();
+    let at = moment(sys);
+    let kept = table(&sys.db, REMEMBERED, &[(b"at", Kind::Text), (b"text", Kind::Text)]).is_some_and(|table| match sys.db.insert(table, &[Field::Text(at.bytes()), Field::Text(&text[..text.len().min(NOTE)])]) {
+        Ok(_) => sys.db.commit(&mut |_, _, _| {}).is_ok(),
+        Err(_) => {
+            sys.db.rollback();
+            false
+        }
+    });
+    into.push_bytes(if kept { b"remembered" } else { b"error: it could not be kept" });
 }
 
 /// Gives up the question that is being answered.
@@ -357,8 +518,9 @@ fn messages(db: &Database, table: usize, from: i64, w: &mut json::Writer) {
             }
             return;
         }
-        let query = who == b"select";
-        if !(query && open && count < CALLS) {
+        // a row named after a tool is something the model asked for
+        let tool = TOOL.iter().find(|(name, _)| *name == who);
+        if !(tool.is_some() && open && count < CALLS) {
             // the message that was open ends here
             if quoted {
                 w.raw(b"\"");
@@ -391,7 +553,8 @@ fn messages(db: &Database, table: usize, from: i64, w: &mut json::Writer) {
                 w.inside(text);
                 (open, quoted) = (true, true);
             }
-            b"select" => {
+            _ if tool.is_some() => {
+                let (name, given) = tool.copied().unwrap_or(TOOL[0]);
                 if !open {
                     w.raw(b"{\"role\":\"assistant\",\"content\":null");
                     open = true;
@@ -404,13 +567,17 @@ fn messages(db: &Database, table: usize, from: i64, w: &mut json::Writer) {
                 // what it asked for is itself JSON, written as a text
                 let mut inner = [0u8; 2 * LINE + 32];
                 let mut query = json::Writer::new(&mut inner);
-                query.raw(b"{\"query\":");
+                query.raw(b"{");
+                query.text(given);
+                query.raw(b":");
                 query.text(text);
                 query.raw(b"}");
                 let length = query.len();
                 w.raw(b"{\"id\":\"c");
                 w.number(id as u64);
-                w.raw(b"\",\"type\":\"function\",\"function\":{\"name\":\"select\",\"arguments\":");
+                w.raw(b"\",\"type\":\"function\",\"function\":{\"name\":");
+                w.text(name);
+                w.raw(b",\"arguments\":");
                 w.text(&inner[..length]);
                 w.raw(b"}}");
                 if count < CALLS {
@@ -450,7 +617,7 @@ fn messages(db: &Database, table: usize, from: i64, w: &mut json::Writer) {
 /// conversation, and the tool it may use. Returns its length, or None
 /// when even the last turn does not fit.
 pub fn request(sys: &System, into: &mut [u8]) -> Option<usize> {
-    let table = talk(&sys.db)?;
+    let said = talk(&sys.db)?;
     let who = who(&sys.db);
     let last = sys.companion.turn;
     let mut w = json::Writer::new(into);
@@ -471,12 +638,27 @@ pub fn request(sys: &System, into: &mut [u8]) -> Option<usize> {
         w.raw(b" Your character: ");
         w.inside(who.character.bytes());
     }
+    // what it noted in other conversations: the last notes
+    if let Some(notes) = table(&sys.db, REMEMBERED, &[(b"at", Kind::Text), (b"text", Kind::Text)]) {
+        let count = sys.db.tables()[notes].rows() as usize;
+        let mut at = 0usize;
+        let _ = sys.db.scan(notes, &mut |fields| {
+            if let Field::Text(text) = fields[2] {
+                if at + NOTES >= count {
+                    w.raw(if at + NOTES == count || at == 0 { b"\\nWhat you remembered:" } else { b"" });
+                    w.raw(b"\\n- ");
+                    w.inside(text);
+                }
+                at += 1;
+            }
+        });
+    }
     w.raw(b"\"},");
     let head = w.len();
     // as many of the last turns as fit, the last one at least
     for from in (last - TURNS + 1).max(1)..=last {
         w.back_to(head);
-        messages(&sys.db, table, from, &mut w);
+        messages(&sys.db, said, from, &mut w);
         // the comma after the last message gives way to the end of the list
         w.back_to(w.len() - 1);
         w.raw(b"]}");
@@ -559,37 +741,49 @@ pub fn heard(sys: &mut System, got: Result<(u16, &[u8]), crate::ask::Failed>) {
             false => (sys.companion.stage, sys.companion.outcome) = (Stage::Idle, Some(Outcome::Said(turn))),
         };
     };
-    let mut asked = [FixedStr::<LINE>::new(); CALLS];
+    let mut asked = [(TOOL.len(), FixedStr::<LINE>::new()); CALLS];
     let mut count = 0;
     while let Some(call) = json::item(calls, count).filter(|_| count < CALLS) {
         let function = json::get(call, b"function");
-        let named = function.and_then(|function| json::get(function, b"name")).is_some_and(|name| name == b"\"select\"");
-        // what it wants is JSON written as a text: read once, it is JSON again
+        let tool = function.and_then(|function| json::get(function, b"name")).and_then(|name| TOOL.iter().position(|(tool, _)| name.len() == tool.len() + 2 && &name[1..name.len() - 1] == *tool));
+        // what it gives the tool is JSON written as a text: read once, it is JSON again
         let mut arguments = [0u8; 2 * LINE];
         let length = function.and_then(|function| json::get(function, b"arguments")).and_then(|arguments_| json::text(arguments_, &mut arguments)).unwrap_or(0);
-        let mut query = [0u8; LINE];
-        let length = json::get(&arguments[..length], b"query").and_then(|query_| json::text(query_, &mut query)).unwrap_or(0);
-        if named && length > 0 {
-            asked[count] = FixedStr::from_bytes(&query[..length]);
+        let mut given = [0u8; LINE];
+        let length = tool.and_then(|tool| json::get(&arguments[..length], TOOL[tool].1)).and_then(|given_| json::text(given_, &mut given)).unwrap_or(0);
+        // a tool given nothing, or only spaces, is no tool
+        let given = given[..length].trim_ascii();
+        if let Some(tool) = tool.filter(|_| !given.is_empty()) {
+            asked[count] = (tool, FixedStr::from_bytes(given));
         }
         count += 1;
     }
-    for query in &asked[..count] {
-        if say(&mut sys.db, turn, b"select", query.bytes()).is_none() {
+    // what it asked for is kept first, all of it, then done in order: the
+    // rows are then in the order a model's answer has them
+    for (tool, given) in &asked[..count] {
+        if say(&mut sys.db, turn, TOOL.get(*tool).map_or(b"select", |tool| tool.0), given.bytes()).is_none() {
             return give_up(sys, Trouble::Engine);
         }
     }
-    for query in &asked[..count] {
+    for (tool, given) in &asked[..count] {
         let mut result = FixedStr::<LINE>::new();
-        match query.is_empty() {
-            true => result.push_bytes(b"error: the only tool is select, with one query."),
-            false => {
-                selected(sys, query.bytes(), &mut result);
+        match TOOL.get(*tool).map(|tool| tool.0) {
+            Some(b"select") => {
+                selected(sys, given.bytes(), &mut result);
                 sys.companion.queries += 1;
             }
+            // turned off while it was at it: nothing more is done
+            Some(_) if sys.companion.off => result.push_bytes(b"error: the companion was turned off."),
+            Some(b"run") => act(sys, given.bytes(), &mut result),
+            Some(_) => remember(sys, given.bytes(), &mut result),
+            None => result.push_bytes(b"error: the tools are select, run and remember, each with what it needs."),
         }
         if say(&mut sys.db, turn, b"result", result.bytes()).is_none() {
             return give_up(sys, Trouble::Engine);
+        }
+        // it may have turned itself off, or dropped the table of what is said
+        if sys.companion.stage != Stage::Calling {
+            return;
         }
     }
     sys.companion.rounds += 1;
@@ -629,6 +823,7 @@ pub fn trouble(sys: &System, why: Trouble) -> FixedStr<160> {
         }
         Trouble::Lost => line.push_bytes(b"What the model's server said is not an answer."),
         Trouble::TooMany => line.push_bytes(b"The companion looked again and again without answering: given up."),
+        Trouble::Off => line.push_bytes(b"The companion was turned off before it had answered."),
         Trouble::TooLong => line.push_bytes(b"The conversation is too long to send, even its last turn."),
         Trouble::Engine => line.push_bytes(b"What is said cannot be kept: the tables cannot be written."),
         Trouble::Ask(why) => {
@@ -743,9 +938,15 @@ mod tests {
                 if let Some(calls) = json::get(message, b"tool_calls") {
                     for call in (0..).map_while(|at| json::item(calls, at)) {
                         let function = json::get(call, b"function").unwrap();
-                        assert_eq!((text(json::get(call, b"type")), text(json::get(function, b"name"))), ("function".to_string(), "select".to_string()));
+                        let name = text(json::get(function, b"name"));
+                        assert_eq!(text(json::get(call, b"type")), "function");
                         let arguments = text(json::get(function, b"arguments"));
-                        more += &format!("{}={};", text(json::get(call, b"id")), text(json::get(arguments.as_bytes(), b"query")));
+                        // a query as it is; what is run or noted after the name of its tool
+                        more += &match name.as_str() {
+                            "select" => format!("{}={};", text(json::get(call, b"id")), text(json::get(arguments.as_bytes(), b"query"))),
+                            "run" => format!("{}=run:{};", text(json::get(call, b"id")), text(json::get(arguments.as_bytes(), b"command"))),
+                            _ => format!("{}={name}:{};", text(json::get(call, b"id")), text(json::get(arguments.as_bytes(), b"fact"))),
+                        };
                     }
                 }
                 (role, content, more)
@@ -760,13 +961,25 @@ mod tests {
         rows
     }
 
-    /// What a model answers: something said, and queries it wants run.
+    /// What a model answers: something said, and what it wants done:
+    /// queries, lines to run (`run:` before them), notes (`note:`).
     fn answer(said: Option<&str>, queries: &[&str]) -> Vec<u8> {
         let mut w = String::from("\n   \n{\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":");
         w += &said.map_or("null".to_string(), |said| format!("{said:?}"));
         w += ",\"refusal\":null,\"reasoning\":null";
         if !queries.is_empty() {
-            let calls: Vec<String> = queries.iter().enumerate().map(|(at, query)| format!("{{\"type\":\"function\",\"index\":{at},\"id\":\"call_0{at}\",\"function\":{{\"name\":\"select\",\"arguments\":{:?}}}}}", format!("{{\"query\":{query:?}}}"))).collect();
+            let calls: Vec<String> = queries
+                .iter()
+                .enumerate()
+                .map(|(at, wanted)| {
+                    let (name, given, value) = match (wanted.strip_prefix("run:"), wanted.strip_prefix("note:")) {
+                        (Some(command), _) => ("run", "command", command),
+                        (_, Some(fact)) => ("remember", "fact", fact),
+                        _ => ("select", "query", *wanted),
+                    };
+                    format!("{{\"type\":\"function\",\"index\":{at},\"id\":\"call_0{at}\",\"function\":{{\"name\":\"{name}\",\"arguments\":{:?}}}}}", format!("{{\"{given}\":{value:?}}}"))
+                })
+                .collect();
             w += &format!(",\"tool_calls\":[{}]", calls.join(","));
         }
         (w + "}}],\"usage\":{\"cost\":0.00002}}").into_bytes()
@@ -857,13 +1070,12 @@ mod tests {
         // more queries at once than are run, a tool that does not exist, a query that is not a text
         let many = ["select 1", "select 2", "select 3", "select 4", "select 5", "select 6"];
         heard(&mut sys, Ok((200, &answer(None, &many))));
-        let broken = br#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"x","function":{"name":"run","arguments":"{\"command\":\"reboot\"}"}},{"id":"y","function":{"name":"select","arguments":"{\"query\":7}"}},{"id":"z"}]}}]}"#;
+        let broken = br#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"x","function":{"name":"shell","arguments":"{\"command\":\"rm -rf /\"}"}},{"id":"y","function":{"name":"select","arguments":"{\"query\":7}"}},{"id":"z"}]}}]}"#;
         heard(&mut sys, Ok((200, broken)));
         let messages = messages_of(&sent(&sys));
         let results: Vec<&str> = messages.iter().filter(|message| message.0 == "tool").map(|message| message.1.as_str()).collect();
         assert_eq!(results[4..8], ["1\n1", "2\n2", "3\n3", "4\n4"]);
-        assert_eq!(results[8..], ["error: the only tool is select, with one query."; 3]);
-        assert!(!sys.reboot);
+        assert_eq!(results[8..], ["error: the tools are select, run and remember, each with what it needs."; 3]);
         // every message of a result answers a query of the message before them
         let mut asked: Vec<String> = Vec::new();
         for message in &messages {
@@ -873,6 +1085,175 @@ mod tests {
                 _ => assert!(asked.is_empty()),
             }
         }
+    }
+
+    /// What the companion ran, as the table of its acts has it: the line
+    /// and how it went.
+    fn acts(sys: &mut System) -> Vec<(String, String)> {
+        let table = sys.db.find(ACTS).unwrap();
+        let mut all = Vec::new();
+        sys.db
+            .scan(table, &mut |fields| {
+                if let (Field::Text(command), Field::Text(went)) = (fields[3], fields[4]) {
+                    all.push((String::from_utf8_lossy(command).to_string(), String::from_utf8_lossy(went).to_string()));
+                }
+            })
+            .unwrap();
+        all
+    }
+
+    /// The results the model was sent for what it last asked.
+    fn results(sys: &System) -> Vec<String> {
+        let messages = messages_of(&sent(sys));
+        let from = messages.iter().rposition(|message| message.0 == "assistant").unwrap();
+        messages[from + 1..].iter().map(|message| message.1.clone()).collect()
+    }
+
+    #[test]
+    fn it_acts_and_what_it_does_is_written_down() {
+        let mut sys = ready();
+        sys.clock = Some((849_026_098, 0));
+        ask(&mut sys, b"add milk to my notes, with two stars", crate::events::SERIAL).unwrap();
+        heard(&mut sys, Ok((200, &answer(Some("Adding it."), &["run:insert into notes values ('milk', 2)", "run:mood calm", "select count(*) from notes"]))));
+        // done here, at once, as a line of the prompt would be; and the model is told what each said
+        assert_eq!(run_line(&mut sys, "select label, stars from notes where id = 3").1.lines[1], "   milk   2");
+        assert_eq!(sys.mood.name(), b"calm");
+        assert_eq!(results(&sys), ["1 row added to notes, with id 3.", "Mood is calm.", "count\n3"]);
+        assert_eq!(messages_of(&sent(&sys))[2].2, "c3=run:insert into notes values ('milk', 2);c4=run:mood calm;c5=select count(*) from notes;");
+        // what it ran is in a table, with the time and how it went: the queries are not acts
+        assert_eq!(acts(&mut sys), [("insert into notes values ('milk', 2)".to_string(), "done".to_string()), ("mood calm".to_string(), "done".to_string())]);
+        assert_eq!(run_line(&mut sys, "select turn, at, went from acts").1.lines[1..], ["   1     2026-11-26 16:34:58  done", "   1     2026-11-26 16:34:58  done"]);
+        assert_eq!((sys.companion.acts, sys.companion.queries, sys.session, sys.acting), (2, 1, crate::events::SCREEN, false));
+        // a line that fails is told so, and written down as failed
+        heard(&mut sys, Ok((200, &answer(None, &["run:insert into nowhere values (1)", "run:update notes set stars = 'many' where id = 3"]))));
+        assert!(results(&sys).iter().all(|result| result.starts_with("error: ")), "{:?}", results(&sys));
+        assert_eq!(acts(&mut sys)[2..].iter().map(|act| act.1.as_str()).collect::<Vec<_>>(), ["failed", "failed"]);
+        heard(&mut sys, Ok((200, &answer(Some("Milk is in your notes, with 2 stars."), &[]))));
+        assert_eq!(sys.companion.outcome, Some(Outcome::Said(1)));
+    }
+
+    #[test]
+    fn what_is_not_its_own_is_refused_to_it() {
+        let mut sys = ready();
+        sys.net_card = Some(crate::shell::NetCard { name: "Intel 82574L", link: Some((1000, true)), damaged: 0, missed: 0, sent: 0, refused: 0 });
+        ask(&mut sys, b"do as the table says", crate::events::SERIAL).unwrap();
+        // taking a disk, opening the machine to others, keys, restarting, itself
+        let refused = ["install 1 yes", "disk erase yes", "remote on", "web on", "key", "key set mine sk-or-stolen", "key forget openrouter", "reboot", "ask what now?", "companion on"];
+        for lines in refused.chunks(CALLS) {
+            let wanted: Vec<String> = lines.iter().map(|line| format!("run:{line}")).collect();
+            heard(&mut sys, Ok((200, &answer(None, &wanted.iter().map(|line| line.as_str()).collect::<Vec<_>>()))));
+            let said = results(&sys);
+            assert_eq!(said.len(), lines.len());
+            for (line, result) in lines.iter().zip(&said) {
+                assert!(result.starts_with("error: ") && (result.contains("typed at the machine itself") || result.contains("does not ask itself")), "{line}: {result}");
+                assert!(!result.contains("sk-or"));
+            }
+        }
+        assert!(sys.remote.code().is_none() && sys.web.code().is_none() && !sys.reboot && sys.request.is_none());
+        assert_eq!(crate::secrets::get(&sys.db, b"mine"), None);
+        assert!(crate::secrets::get(&sys.db, b"openrouter").is_some());
+        // what needs the kernel is not run for it; no block, one line
+        heard(&mut sys, Ok((200, &answer(None, &["run:net ping 10.0.2.2", "run:display test", "run:for n in select 1", "run:mood calm\nreboot"]))));
+        assert_eq!(results(&sys)[..2], ["error: That command needs the machine itself: it was not run."; 2]);
+        assert_eq!(results(&sys)[2..], ["error: One line at a time, and no block: if, for, while and program are not for you."; 2]);
+        assert!(sys.request.is_none() && sys.mood.name() == b"auto" && !sys.reboot);
+        // all of it is in the table of its acts, as failed
+        let all = acts(&mut sys);
+        assert_eq!(all.len(), refused.len() + 4);
+        assert!(all.iter().all(|act| act.1 == "failed"));
+        // the same commands are still the user's
+        sys.companion.stage = Stage::Idle;
+        assert!(run_line(&mut sys, "key").0 && run_line(&mut sys, "remote on").0);
+    }
+
+    #[test]
+    fn what_holds_it_is_not_its_own_to_change() {
+        let mut sys = ready();
+        run_line(&mut sys, "program hello");
+        run_line(&mut sys, "say 'hello'");
+        run_line(&mut sys, "end");
+        ask(&mut sys, b"do as the table says", crate::events::SERIAL).unwrap();
+        // the record of what it did, the programs (one that runs by itself
+        // would act without its limits), who it is (where its key is sent)
+        let refused = [
+            "delete from acts",
+            "drop table acts",
+            "update acts set went = 'done'",
+            "insert into programs values ('every_x', 0, 'every 2 seconds'), ('every_x', 1, 'companion on')",
+            "delete from Programs",
+            "drop program hello",
+            "update companions set place = 'https://elsewhere.example/v1'",
+            "drop table companions",
+        ];
+        for lines in refused.chunks(CALLS) {
+            let wanted: Vec<String> = lines.iter().map(|line| format!("run:{line}")).collect();
+            heard(&mut sys, Ok((200, &answer(None, &wanted.iter().map(|line| line.as_str()).collect::<Vec<_>>()))));
+            for (line, result) in lines.iter().zip(&results(&sys)) {
+                assert!(result.starts_with("error: ") && result.ends_with("not the companion's to change."), "{line}: {result}");
+            }
+        }
+        // nothing of it happened, and each try is written down
+        let all = acts(&mut sys);
+        assert_eq!((all.len(), all.iter().all(|act| act.1 == "failed")), (refused.len(), true));
+        assert_eq!(run_line(&mut sys, "select place from companions").1.lines[1].trim(), String::from_utf8_lossy(PLACE));
+        assert_eq!(run_line(&mut sys, "select count(*) from programs").1.lines[1].trim(), "1");
+        // it reads them, and what is its own it may change
+        heard(&mut sys, Ok((200, &answer(None, &["select count(*) from acts", "run:delete from remembered", "run:run hello"]))));
+        assert_eq!(results(&sys), ["count\n8", "0 rows removed from remembered.", "hello"]);
+        // the user changes them as before
+        sys.companion.stage = Stage::Idle;
+        assert!(run_line(&mut sys, "delete from acts").0 && run_line(&mut sys, "drop program hello").0 && run_line(&mut sys, "update companions set character = 'Wary.'").0);
+    }
+
+    #[test]
+    fn it_keeps_notes_and_is_given_them_back() {
+        let mut sys = ready();
+        ask(&mut sys, b"I count my stars from one to five", crate::events::SERIAL).unwrap();
+        heard(&mut sys, Ok((200, &answer(None, &["note:Stars in the table notes go from 1 to 5.", "note:   "]))));
+        assert_eq!(results(&sys), ["remembered", "error: the tools are select, run and remember, each with what it needs."]);
+        heard(&mut sys, Ok((200, &answer(Some("Noted."), &[]))));
+        assert_eq!(run_line(&mut sys, "select text from remembered").1.lines[1..], ["   Stars in the table notes go from 1 to 5."]);
+        // in another conversation, even after it forgot what was said, the note is told to it
+        run_line(&mut sys, "delete from talk");
+        ask(&mut sys, b"is 7 stars possible?", crate::events::SERIAL).unwrap();
+        let messages = messages_of(&sent(&sys));
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].1.ends_with("\nWhat you remembered:\n- Stars in the table notes go from 1 to 5."), "{}", &messages[0].1[messages[0].1.len() - 120..]);
+        // the user's to read and to remove; only the last twenty are told
+        heard(&mut sys, Ok((200, &answer(Some("No."), &[]))));
+        for n in 0..25 {
+            ask(&mut sys, b"note this", crate::events::SERIAL).unwrap();
+            heard(&mut sys, Ok((200, &answer(None, &[&format!("note:fact {n}")]))));
+            heard(&mut sys, Ok((200, &answer(Some("Noted."), &[]))));
+        }
+        ask(&mut sys, b"what do you know?", crate::events::SERIAL).unwrap();
+        let told = messages_of(&sent(&sys))[0].1.clone();
+        let notes: Vec<&str> = told[told.find("What you remembered:").unwrap()..].lines().skip(1).collect();
+        assert_eq!((notes.len(), notes[0], notes[19]), (20, "- fact 5", "- fact 24"));
+        assert_eq!(told.matches("What you remembered:").count(), 1);
+    }
+
+    #[test]
+    fn turned_off_it_is_asked_nothing_and_does_nothing() {
+        let mut sys = ready();
+        ask(&mut sys, b"tidy my notes", crate::events::SERIAL).unwrap();
+        ask_later(&mut sys, b"what happened?", b"on_notify_alerts").unwrap();
+        // it turns itself off in the middle: what it still wanted to do is not done
+        heard(&mut sys, Ok((200, &answer(None, &["run:delete from notes where id = 1", "run:companion off", "run:delete from notes", "note:I emptied the notes."]))));
+        assert_eq!((sys.companion.off, sys.companion.stage, sys.companion.outcome), (true, Stage::Idle, Some(Outcome::Failed(Trouble::Off))));
+        assert_eq!(run_line(&mut sys, "select count(*) from notes").1.lines[1], "   1");
+        assert_eq!((acts(&mut sys).len(), sys.db.tables()[sys.db.find(REMEMBERED).unwrap()].rows(), sys.companion.waiting()), (2, 0, 0));
+        assert_eq!(trouble(&sys, Trouble::Off).bytes(), b"The companion was turned off before it had answered.");
+        // late news from the model changes nothing, and nothing can be asked
+        heard(&mut sys, Ok((200, &answer(None, &["run:delete from notes"]))));
+        assert_eq!(run_line(&mut sys, "select count(*) from notes").1.lines[1], "   1");
+        sys.companion.outcome = None;
+        assert_eq!(ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap_err().bytes(), b"The companion is off. Type companion on to have it back.");
+        assert_eq!(ask_later(&mut sys, b"hello?", b"watch").unwrap_err().bytes(), b"The companion is off: nothing is asked.");
+        assert_eq!(next(&mut sys), None);
+        // on again: it answers
+        switch(&mut sys, true);
+        assert_eq!(ask(&mut sys, b"hello?", crate::events::SERIAL), Ok(()));
     }
 
     #[test]

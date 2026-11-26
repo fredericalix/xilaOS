@@ -30,7 +30,7 @@ The same content as one file: [xilaos.pdf](xilaos.pdf) (rebuild it with
     the Intel chip.
 
 14. [The companion](14-the-companion.md): what to ask it, what it
-    sees, what is kept, how it is built.
+    sees and does, what holds it, what is kept, how it is built.
 
 ## Working on it
 

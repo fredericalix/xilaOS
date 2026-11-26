@@ -386,6 +386,25 @@ fn delete(db: &mut Database, lexer: &mut Lexer, vars: &Vars) -> Result<Done, Mes
     Ok(Done { message: count_message(removed, "removed from", &schema.name), table: schema.name, event: None })
 }
 
+/// The table a statement that changes the database is about, when it
+/// has the shape of one: for whoever must decide before it is run.
+pub fn target(statement: &[u8]) -> Option<&[u8]> {
+    let mut lexer = Lexer::new(statement);
+    let verb = lexer.word(b"a statement").ok()?;
+    let before: &[u8] = match verb.len() {
+        6 if verb.eq_ignore_ascii_case(b"create") => b"table",
+        4 if verb.eq_ignore_ascii_case(b"drop") => b"table",
+        6 if verb.eq_ignore_ascii_case(b"insert") => b"into",
+        6 if verb.eq_ignore_ascii_case(b"delete") => b"from",
+        6 if verb.eq_ignore_ascii_case(b"update") => b"",
+        _ => return None,
+    };
+    if !before.is_empty() && !lexer.keyword(before) {
+        return None;
+    }
+    lexer.word(b"a table").ok()
+}
+
 /// Runs a statement that changes the database. `changed` is called for
 /// every row the statement added, changed or removed, once it is certain:
 /// the name of the table, what happened, the id of the row.
@@ -462,6 +481,18 @@ mod tests {
         );
         assert_eq!(run(&mut sys, &["insert into expenses (amount, label) values (-0.05, 'refund')"]), "1 row added to expenses, with id 3.");
         sys
+    }
+
+    #[test]
+    fn the_table_of_a_statement_is_known_before_it_is_run() {
+        let of = |statement: &str| target(statement.as_bytes()).map(|name| String::from_utf8_lossy(name).into_owned());
+        assert_eq!(of("insert into notes values (1)").as_deref(), Some("notes"));
+        assert_eq!(of("  INSERT  INTO Programs (name) values ('x')").as_deref(), Some("Programs"));
+        assert_eq!(of("update acts set went = 'done'").as_deref(), Some("acts"));
+        assert_eq!(of("delete from acts where id = 1").as_deref(), Some("acts"));
+        assert_eq!(of("drop table companions").as_deref(), Some("companions"));
+        assert_eq!(of("create table acts (a int)").as_deref(), Some("acts"));
+        assert_eq!((of("select * from acts"), of("drop acts"), of("insert notes"), of("")), (None, None, None, None));
     }
 
     #[test]

@@ -251,7 +251,7 @@ of the program:
 system view is refused: it does not say when it changes. What happens to
 the machine itself is heard with `on notify`: the channels `start`,
 `network`, `disk`, `tasks` and `memory`
-([LISTEN / NOTIFY](04-sql.md#listen-notify)).
+([LISTEN / NOTIFY](04-sql.md#listen--notify)).
 
 ### Asking the companion
 
@@ -278,7 +278,9 @@ end
 or a calculation is replaced by its value. The program does not wait:
 the question takes its turn (eight may wait), and what is asked and
 answered is written on the companion's screen, under the name of the
-program.
+program. The companion may act on what it is asked: a program that
+asks it about rows that come from elsewhere hands those rows to a
+model that can change the tables ([what holds it](14-the-companion.md#what-holds-it)).
 
 ### How they run
 
@@ -290,6 +292,11 @@ program.
 - **They cannot `listen`**: only a prompt does. They can `notify`, and
   change tables, which may start other programs.
 - **Errors go to the log too**, with the line where the program stopped.
+- **What takes a disk or opens the machine is refused to them**:
+  `install`, `disk erase`, `remote on` and `web on` are typed at the
+  machine itself, or run by a program started there with `run`. A
+  program that runs by itself may have been written by somebody at the
+  prompt over the network, to whom those commands are refused.
 - **The values from before** an `update` or a `delete` are not known: only
   `id`.
 - **The row is read when the program starts**, a moment after the change. If

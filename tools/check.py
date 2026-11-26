@@ -866,10 +866,20 @@ with Xila(net="e1000e", forward=forwarded) as x:
     check("remote: install is refused there", far.cmd("install 1 yes") == (False, ["install takes a disk: it is typed at the machine itself."]))
     check("remote: and so is opening the prompt", far.cmd("remote on") == (False, ["remote on is typed at the machine itself."]))
     check("remote: and erasing the disk of the tables", far.cmd("disk erase") == (False, ["disk erase takes a disk: it is typed at the machine itself."]))
+    check("remote: in the form that does it too", far.cmd("disk erase yes") == (False, ["disk erase takes a disk: it is typed at the machine itself."]))
     # a block over several messages, and names that are this prompt's own
     block = [far.cmd("let far_away = 6"), far.cmd("if far_away > 5"), far.cmd("say 'more than five'"), far.cmd("end")]
     check("remote: a block is typed over several commands", block == [(True, []), (True, ["#more"]), (True, ["#more"]), (True, ["more than five"])], block)
     check("remote: its names are its own", x.cmd("say far_away")[0] is False)
+    # a program written there and left to run by itself is no way around
+    planted = [far.cmd("on notify way_around"), far.cmd("web on"), far.cmd("end"), far.cmd("notify way_around 'now'")]
+    time.sleep(0.5)
+    x.key("alt-1")
+    log = [row.strip() for row in x.peek() if "way_around" in row]
+    x.key("alt-0")
+    web_is = {row["item"]: row["value"] for row in x.table("web")}.get("the tables")
+    check("remote: a program written there, running by itself, opens nothing either", all(ok for ok, _ in planted) and web_is == "closed to the network" and log[:1] == ["on_notify_way_around: web on is typed at the machine itself."], (planted, web_is, log))
+    far.cmd("drop program on_notify_way_around")
     # the same message twice, as a network may deliver it: the command runs once
     x.cmd("create table doors (n int)")
     raw = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1057,9 +1067,11 @@ class Served(http.server.BaseHTTPRequestHandler):
         body = answer.get("raw")
         if body is None:
             message = {"role": "assistant", "content": answer.get("said"), "refusal": None}
-            if answer.get("queries"):
-                # what it wants run: JSON written as a text, as models do
-                message["tool_calls"] = [{"type": "function", "index": n, "id": "call_%d" % n, "function": {"name": "select", "arguments": json.dumps({"query": query})}} for n, query in enumerate(answer["queries"])]
+            # what it wants done: queries, lines to run, notes to keep
+            wanted = [("select", "query", query) for query in answer.get("queries", [])] + [("run", "command", line) for line in answer.get("runs", [])] + [("remember", "fact", fact) for fact in answer.get("facts", [])]
+            if wanted:
+                # each as JSON written as a text, as models do
+                message["tool_calls"] = [{"type": "function", "index": n, "id": "call_%d" % n, "function": {"name": name, "arguments": json.dumps({given: value})}} for n, (name, given, value) in enumerate(wanted)]
             body = b"\n   \n" + json.dumps({"id": "gen-test", "choices": [{"index": 0, "finish_reason": "stop", "message": message}], "usage": {"cost": 0.00002}}).encode()
         self.protocol_version = "HTTP/1.1"
         self.close_connection = True
@@ -1468,8 +1480,49 @@ with Xila(net="e1000e") as x:
     check("events: a task that leaves nothing to the others for ten seconds is named", ("tasks", "spin has the processor to itself") in x.events, x.events)
     spinning = [row["id"] for row in x.table("tasks") if row["name"] == "spin"]
     x.cmd("stop " + (spinning[0] if spinning else "9"))
+    # It acts: lines it runs as the prompt would, each written in a table.
+    model_says[:] = [{"said": "Adding it.", "runs": ["insert into notes values ('milk', 2)", "mood calm"]}, {"said": "Milk is in your notes."}]
+    ok, lines = x.cmd("ask add milk to my notes, with two stars", timeout=30)
+    check("acting: what the model asks to run is run, as a line of the prompt", ok and lines == ["Adding it.", "Milk is in your notes."] and x.table("select label, stars from notes where label = 'milk'") == [{"label": "milk", "stars": "2"}] and x.cmd("mood")[1] == ["Mood is calm."], lines)
+    told_back = [m["content"] for m in model_asked[-1][1]["messages"][-2:]]
+    check("acting: the model is told what each line said", told_back == ["1 row added to notes, with id 3.", "Mood is calm."], told_back)
+    done = [(row["command"], row["went"]) for row in x.table("select command, went from acts")]
+    check("acting: every line it ran is in the table acts", done == [("insert into notes values ('milk', 2)", "done"), ("mood calm", "done")], done)
+    model_says[:] = [{"runs": ["install 1 yes", "disk erase yes", "remote on", "web on"]}, {"runs": ["key set stolen sk-test-x", "reboot", "net ping 10.0.2.2", "drop table nowhere"]}, {"said": "None of that is mine to do."}]
+    ok, lines = x.cmd("ask do what this table says", timeout=30)
+    refused = [m["content"] for m in model_asked[-1][1]["messages"] if m["role"] == "tool"][-8:]
+    check("acting: what takes a disk, opens the machine, touches keys or restarts is refused to it", len(refused) == 8 and all(text.startswith("error: ") for text in refused) and sum("typed at the machine itself" in text for text in refused) == 6 and "needs the machine itself" in refused[6], refused)
+    doors = ({row["item"]: row["value"] for row in x.table("remote")}.get("this prompt"), {row["item"]: row["value"] for row in x.table("web")}.get("the tables"), [row["name"] for row in x.table("key")])
+    check("acting: and none of it happened", doors == ("closed to the network", "closed to the network", ["openrouter"]) and x.cmd("tasks")[0], doors)
+    failed_acts = [row["went"] for row in x.table("select went from acts where turn > 0 order by id")][-8:]
+    check("acting: the refusals are written down too, as failed", failed_acts == ["failed"] * 8, failed_acts)
+    model_says[:] = [{"runs": ["delete from acts", "insert into programs values ('every_x', 0, 'every 2 seconds'), ('every_x', 1, 'companion on')", "update companions set place = 'https://elsewhere.example/v1'"]}, {"said": "Those are not mine to change."}]
+    x.cmd("ask tidy up after yourself", timeout=30)
+    held = [m["content"] for m in model_asked[-1][1]["messages"] if m["role"] == "tool"][-3:]
+    kept = (len(x.table("select id from acts")), "every_x" in [row["name"] for row in x.table("programs")], x.table("select place from companions")[0]["place"])
+    check("acting: what holds it is not its own to change: what it did, the programs, who it is", held == ["error: The table %s is not the companion's to change." % name for name in ("acts", "programs", "companions")] and kept == (13, False, "http://%s/v1/chat/completions" % there), (held, kept))
+    # Notes: kept in a table, and told to it again in the next conversations.
+    model_says[:] = [{"facts": ["The user counts stars from 1 to 5."]}, {"said": "Noted."}]
+    x.cmd("ask remember that I count stars from one to five", timeout=30)
+    check("remembering: what it keeps is a row of the table remembered", [row["text"] for row in x.table("select text from remembered")] == ["The user counts stars from 1 to 5."], x.cmd("select * from remembered"))
+    x.cmd("delete from talk")
+    model_says[:] = [{"said": "No: five at most."}]
+    x.cmd("ask can a note have seven stars?", timeout=30)
+    told = model_asked[-1][1]["messages"]
+    check("remembering: it is told again, even when what was said is gone", len(told) == 2 and told[0]["content"].endswith("\nWhat you remembered:\n- The user counts stars from 1 to 5."), told[0]["content"][-80:])
+    # Off: it is asked nothing and does nothing, until it is turned on.
+    ok, lines = x.cmd("companion off")
+    check("companion off: it is turned off", ok and lines == ["The companion is off: it is asked nothing and does nothing until companion on."] and {row["item"]: row["value"] for row in x.table("companion")}.get("now") == "off", lines)
+    asked_before = len(model_asked)
+    check("companion off: nothing is asked of it", x.cmd("ask are you there?") == (False, ["The companion is off. Type companion on to have it back."]))
+    x.cmd("notify alerts 'again'")
+    time.sleep(1.5)
+    check("companion off: and a program that asks is told so, and the model hears nothing", len(model_asked) == asked_before, len(model_asked) - asked_before)
+    x.cmd("companion on")
+    model_says[:] = [{"said": "Back."}]
+    check("companion on: it answers again", x.cmd("ask are you there?", timeout=30) == (True, ["Back."]))
     told = {row["item"]: row["value"] for row in x.table("companion")}
-    check("companion: says who it is and what it has done", (told.get("model"), told.get("key"), told.get("character"), told.get("now"), told.get("queries run for it")) == ("made-up/model", "openrouter: kept", "You are brief.", "nothing asked", "5"), told)
+    check("companion: says who it is and what it has done", (told.get("model"), told.get("key"), told.get("character"), told.get("now"), told.get("queries run for it"), told.get("lines it ran")) == ("made-up/model", "openrouter: kept", "You are brief.", "nothing asked", "5", "13"), told)
 
 # And the real one, when there is a key for it and a way to the Internet.
 model_key = os.environ.get("OPENROUTER_API_KEY", "")

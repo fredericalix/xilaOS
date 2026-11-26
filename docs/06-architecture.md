@@ -1,6 +1,6 @@
 # Architecture
 
-XilaOS is about 29,500 lines of Rust in four crates, plus 2,800 lines
+XilaOS is about 33,000 lines of Rust in four crates, plus 3,000 lines
 of Python and shell for building and testing. No boot loader and no C
 are linked in. One crate, `xila-tls`, rests on libraries from the
 registry, for the arithmetic of TLS and the checking of certificates;
@@ -127,7 +127,8 @@ storage engine allocates.
 | `change.rs` | 647 | `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`. |
 | `city.rs` | 529 | The city: the scene from the system state, the isometric drawing. |
 | `gpt.rs` | 529 | GPT partition tables: reading, describing, the layout `install` writes. |
-| `companion.rs` | 520 | The companion: what is sent to its model, what is made of the answer, what is kept. (Its tests are as long again.) |
+| `companion.rs` | 900 | The companion: what is sent to its model, what is made of the answer, what it runs and what is refused to it, what is kept. (Its tests are 450 lines more.) |
+| `watch.rs` | 145 | What happens to the machine, said as events on five channels. |
 | `dns.rs` | 520 | Names: the question to a name server, its answer, the names kept. |
 | `json.rs` | 250 | JSON written into a buffer and read where it lies, with no tree. |
 | `secrets.rs` | 100 | Keys to services, in a table SQL does not know. |

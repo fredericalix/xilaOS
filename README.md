@@ -59,7 +59,9 @@ end
   and TLS 1.3 for what it asks of the Internet; a prompt over the
   network; the tables as read-only web pages.
 - **A companion**, Xila: `ask how many tasks are running?`. A model of
-  the Internet answers, and reads the tables of the machine to do so.
+  the Internet answers, reads the tables of the machine to do so, and
+  changes them when asked; what it does is written in a table, and
+  `companion off` stops it.
 - **Self-installation**: `install` partitions a disk, writes a FAT32
   start-up partition and reads it all back.
 
@@ -84,13 +86,13 @@ prompt as the screen. `Ctrl+A` then `X` quits. Type `help` to begin;
 the steps for a real machine.
 
 ```sh
-cargo test -p xila-core -p xila-db -p xila-tls   # more than 250 unit tests, on the host
+cargo test -p xila-core -p xila-db -p xila-tls   # about 300 unit tests, on the host
 tools/build.sh && python3 tools/check.py    # more than 300 checks of the whole system, in QEMU
 ```
 
 ## Architecture
 
-About 29,500 lines of Rust in four crates. The fourth, `tls/`, is TLS
+About 33,000 lines of Rust in four crates. The fourth, `tls/`, is TLS
 1.3 for the pages XilaOS asks for; it is the only one that rests on
 libraries from elsewhere, for the arithmetic and for the checking of
 certificates.

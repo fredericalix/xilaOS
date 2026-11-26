@@ -35,19 +35,21 @@ pub struct Kept {
     light: Option<u32>,
     /// The user asked for the screen to be written directly.
     direct: bool,
+    /// The companion was turned off.
+    quiet: bool,
 }
 
 impl Kept {
     /// What a system starts with when nothing is kept.
-    const FIRST: Kept = Kept { theme: 0, layout: Layout::Us, mood: MoodMode::Auto, light: None, direct: false };
+    const FIRST: Kept = Kept { theme: 0, layout: Layout::Us, mood: MoodMode::Auto, light: None, direct: false, quiet: false };
 
     fn of(sys: &System) -> Kept {
-        Kept { theme: sys.theme, layout: sys.layout, mood: sys.mood, light: sys.display.light, direct: sys.display.direct }
+        Kept { theme: sys.theme, layout: sys.layout, mood: sys.mood, light: sys.display.light, direct: sys.display.direct, quiet: sys.companion.off }
     }
 
     /// The settings as rows: a name and a value. A setting that was never
     /// chosen has no row.
-    fn rows(&self) -> [(&'static [u8], Option<Text>); 5] {
+    fn rows(&self) -> [(&'static [u8], Option<Text>); 6] {
         let text = |bytes: &[u8]| Some(Text::from_bytes(bytes));
         let light = self.light.map(|hundredths| {
             let mut value = Text::new();
@@ -60,6 +62,7 @@ impl Kept {
             (b"mood", text(self.mood.name())),
             (b"brightness", light),
             (b"pictures", text(if self.direct { b"direct" } else { b"two" })),
+            (b"companion", text(if self.quiet { b"off" } else { b"on" })),
         ]
     }
 
@@ -74,6 +77,8 @@ impl Kept {
             (b"mood", b"intense") => self.mood = MoodMode::Intense,
             (b"pictures", b"direct") => self.direct = true,
             (b"pictures", b"two") => self.direct = false,
+            (b"companion", b"off") => self.quiet = true,
+            (b"companion", b"on") => self.quiet = false,
             (b"theme", _) => match THEMES.iter().position(|theme| theme.name == value) {
                 Some(theme) => self.theme = theme,
                 None => return false,
@@ -111,6 +116,7 @@ pub fn load(sys: &mut System) -> usize {
     }
     (sys.theme, sys.layout, sys.mood) = (kept.theme, kept.layout, kept.mood);
     (sys.display.light, sys.display.direct) = (kept.light, kept.direct);
+    sys.companion.off = kept.quiet;
     // what is in use is what is kept: nothing to write
     sys.kept = Some(kept);
     count
