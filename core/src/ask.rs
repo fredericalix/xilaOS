@@ -6,7 +6,9 @@
 //! try the calling side of the network by hand.
 //!
 //! A question is a line that says what is wanted (`GET /path`), the name
-//! of the machine asked, and for a `POST` some bytes that go with it. The
+//! of the machine asked (as it was written: its address, or a name that
+//! `dns.rs` found the address of), and for a `POST` some bytes that go
+//! with it. The
 //! answer starts with a line that says how it went, as a number: 200 is
 //! yes, 404 is "not found". The start of the answer is kept, as much as
 //! fits; the rest is let go.
@@ -36,6 +38,8 @@ pub enum Failed {
     Silent,
     /// What it said is not an answer to a question like ours.
     NotAnAnswer,
+    /// It was asked by its name, and the address of that name was not found.
+    Name(crate::dns::Failed),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,19 +62,23 @@ pub struct Ask {
 
 impl Ask {
     /// Calls `to` on `port` and asks `how` (`GET` or `POST`) for `path`,
-    /// with `bytes` going along for a `POST`.
-    pub fn start(tcp: &mut Tcp, to: Ip, port: u16, how: &[u8], path: &[u8], bytes: &[u8], now: u64) -> Result<Ask, Failed> {
+    /// with `bytes` going along for a `POST`. `machine` is how the machine
+    /// was written, a name or an address: it is told so, since one
+    /// address may serve the pages of several names.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start(tcp: &mut Tcp, to: Ip, port: u16, machine: &[u8], how: &[u8], path: &[u8], bytes: &[u8], now: u64) -> Result<Ask, Failed> {
         let mut question = FixedStr::<QUESTION>::new();
         let path: &[u8] = if path.is_empty() { b"/" } else { path };
         // the first line, who is asked, and that one answer is all that is wanted
-        let head = how.len() + path.len() + bytes.len() + 120;
-        if head > QUESTION || path.iter().chain(how).any(|byte| *byte <= b' ' || *byte > 0x7e) {
+        let head = how.len() + path.len() + machine.len() + bytes.len() + 105;
+        if head > QUESTION || path.iter().chain(how).chain(machine).any(|byte| *byte <= b' ' || *byte > 0x7e) {
             return Err(Failed::NoRoom);
         }
         question.push_bytes(how);
         question.push(b' ');
         question.push_bytes(path);
-        let _ = write!(question, " HTTP/1.0\r\nHost: {}.{}.{}.{}", to[0], to[1], to[2], to[3]);
+        question.push_bytes(b" HTTP/1.0\r\nHost: ");
+        question.push_bytes(machine);
         if port != 80 {
             let _ = write!(question, ":{port}");
         }
@@ -143,10 +151,21 @@ impl Ask {
     }
 }
 
+/// Where to ask: the machine as it was written, its address if it was
+/// written as one and not as a name, the port and the path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Place<'a> {
+    pub machine: &'a [u8],
+    pub ip: Option<Ip>,
+    pub port: u16,
+    pub path: &'a [u8],
+}
+
 /// Reads where to ask, written as `192.168.1.20`, `192.168.1.20:8000` or
-/// `192.168.1.20:8000/some/path`, with or without `http://` before it:
-/// the address, the port (80 if none is said) and the path.
-pub fn place(text: &[u8]) -> Option<(Ip, u16, &[u8])> {
+/// `192.168.1.20:8000/some/path`, with or without `http://` before it,
+/// and with a name in place of the address (`example.org/some/path`):
+/// the machine, the port (80 if none is said) and the path.
+pub fn place(text: &[u8]) -> Option<Place<'_>> {
     let text = text.strip_prefix(b"http://").unwrap_or(text);
     let slash = text.iter().position(|byte| *byte == b'/').unwrap_or(text.len());
     let (machine, path) = text.split_at(slash);
@@ -154,7 +173,8 @@ pub fn place(text: &[u8]) -> Option<(Ip, u16, &[u8])> {
         Some(colon) => (&machine[..colon], crate::text::parse_number(&machine[colon + 1..]).filter(|port| (1..65536).contains(port))? as u16),
         None => (machine, 80),
     };
-    Some((crate::net::ip_of(address)?, port, path))
+    let ip = crate::net::ip_of(address);
+    (ip.is_some() || crate::dns::valid(address)).then_some(Place { machine: address, ip, port, path })
 }
 
 #[cfg(test)]
@@ -163,11 +183,16 @@ mod tests {
 
     #[test]
     fn where_to_ask_is_read_in_the_forms_people_write() {
-        assert_eq!(place(b"192.168.1.20"), Some(([192, 168, 1, 20], 80, &b""[..])));
-        assert_eq!(place(b"192.168.1.20:8000"), Some(([192, 168, 1, 20], 8000, &b""[..])));
-        assert_eq!(place(b"http://192.168.1.20:8000/notes/1?x=2"), Some(([192, 168, 1, 20], 8000, &b"/notes/1?x=2"[..])));
-        assert_eq!(place(b"10.0.2.2/"), Some(([10, 0, 2, 2], 80, &b"/"[..])));
-        for wrong in ["", "the-mac", "192.168.1", "192.168.1.20:", "192.168.1.20:0", "192.168.1.20:70000", "192.168.1.20:80x", "https://192.168.1.20", ":80"] {
+        let at = |machine: &'static str, ip, port, path: &'static str| Some(Place { machine: machine.as_bytes(), ip, port, path: path.as_bytes() });
+        assert_eq!(place(b"192.168.1.20"), at("192.168.1.20", Some([192, 168, 1, 20]), 80, ""));
+        assert_eq!(place(b"192.168.1.20:8000"), at("192.168.1.20", Some([192, 168, 1, 20]), 8000, ""));
+        assert_eq!(place(b"http://192.168.1.20:8000/notes/1?x=2"), at("192.168.1.20", Some([192, 168, 1, 20]), 8000, "/notes/1?x=2"));
+        assert_eq!(place(b"10.0.2.2/"), at("10.0.2.2", Some([10, 0, 2, 2]), 80, "/"));
+        // a name in place of the address: its address is to be found
+        assert_eq!(place(b"example.org"), at("example.org", None, 80, ""));
+        assert_eq!(place(b"http://Example.org:8000/notes/1"), at("Example.org", None, 8000, "/notes/1"));
+        assert_eq!(place(b"the-mac/"), at("the-mac", None, 80, "/"));
+        for wrong in ["", "192.168.1", "192.168.1.20:", "192.168.1.20:0", "192.168.1.20:70000", "192.168.1.20:80x", "https://192.168.1.20", ":80", "a b", "example..org", "example.org:x"] {
             assert_eq!(place(wrong.as_bytes()), None, "{wrong}");
         }
     }
@@ -175,15 +200,22 @@ mod tests {
     #[test]
     fn a_question_is_a_few_lines_of_text() {
         let mut tcp = Tcp::new();
-        let ask = Ask::start(&mut tcp, [192, 168, 1, 20], 8000, b"GET", b"/notes", b"", 0).unwrap_or_else(|_| panic!());
+        let ask = Ask::start(&mut tcp, [192, 168, 1, 20], 8000, b"192.168.1.20", b"GET", b"/notes", b"", 0).unwrap_or_else(|_| panic!());
         assert_eq!(ask.question.bytes(), b"GET /notes HTTP/1.0\r\nHost: 192.168.1.20:8000\r\nConnection: close\r\n\r\n");
-        let ask = Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"POST", b"", b"big expense: rent", 0).unwrap_or_else(|_| panic!());
+        // asked by its name, the machine is told that name
+        let ask = Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"example.org", b"GET", b"/notes", b"", 0).unwrap_or_else(|_| panic!());
+        assert_eq!(ask.question.bytes(), b"GET /notes HTTP/1.0\r\nHost: example.org\r\nConnection: close\r\n\r\n");
+        let ask = Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"192.168.1.20", b"POST", b"", b"big expense: rent", 0).unwrap_or_else(|_| panic!());
         assert_eq!(ask.question.bytes(), &b"POST / HTTP/1.0\r\nHost: 192.168.1.20\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 17\r\n\r\nbig expense: rent"[..]);
         // what would not be one question is not sent: a line break in the path, or too much to say
-        assert!(matches!(Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"GET", b"/a\r\nX: y", b"", 0), Err(Failed::NoRoom)));
-        assert!(matches!(Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"GET", b"/a b", b"", 0), Err(Failed::NoRoom)));
-        assert!(matches!(Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"POST", b"/", &[b'x'; 500], 0), Err(Failed::NoRoom)));
-        assert_eq!(tcp.count(), 2);
+        assert!(matches!(Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"192.168.1.20", b"GET", b"/a\r\nX: y", b"", 0), Err(Failed::NoRoom)));
+        assert!(matches!(Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"192.168.1.20", b"GET", b"/a b", b"", 0), Err(Failed::NoRoom)));
+        assert!(matches!(Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"a\r\nX: y", b"GET", b"/", b"", 0), Err(Failed::NoRoom)));
+        assert!(matches!(Ask::start(&mut tcp, [192, 168, 1, 20], 80, b"192.168.1.20", b"POST", b"/", &[b'x'; 500], 0), Err(Failed::NoRoom)));
+        // the longest name with the longest path still fits
+        let name = [b'a'; crate::dns::NAME];
+        assert!(Ask::start(&mut tcp, [192, 168, 1, 20], 65000, &name, b"GET", &[b'p'; 200], b"", 0).is_ok());
+        assert_eq!(tcp.count(), 4);
     }
 
     #[test]

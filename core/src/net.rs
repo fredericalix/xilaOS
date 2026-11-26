@@ -13,12 +13,16 @@
 //!   on the way: nothing XilaOS exchanges is that large;
 //! - **ICMP**: answers a `ping`, and sends one;
 //! - **UDP**: small messages to a numbered port of a machine;
-//! - **DHCP**: asks the network for an address, a mask and a gateway, as a
-//!   machine does when its cable is plugged in, and asks again before the
-//!   lease runs out.
+//! - **DHCP**: asks the network for an address, a mask, a gateway and a
+//!   name server, as a machine does when its cable is plugged in, and
+//!   asks again before the lease runs out.
 //!
 //! - **TCP**: conversations in which every byte arrives, in order. The
 //!   protocol itself is in `tcp.rs`; this carries its segments.
+//!
+//! - **Names** (DNS): the address of a machine known by its name, asked
+//!   of the server the network named. The questions and answers are in
+//!   `dns.rs`; this carries them.
 //!
 //! Numbers of several bytes are written with the most significant byte
 //! first, the reverse of the processor: `be` below.
@@ -158,6 +162,8 @@ pub struct Net {
     pings: u16,
     /// The conversations with other machines.
     pub tcp: crate::tcp::Tcp,
+    /// The machines known by their name, and who is asked for the others.
+    pub names: crate::dns::Names,
     /// Frames taken from the cable and given to it.
     pub received: u64,
     pub sent: u64,
@@ -178,6 +184,7 @@ impl Net {
             ping: None,
             pings: 0,
             tcp: crate::tcp::Tcp::new(),
+            names: crate::dns::Names::new(),
             received: 0,
             sent: 0,
         }
@@ -191,6 +198,8 @@ impl Net {
         (self.ip, self.waiting) = (None, None);
         self.exchange = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]) ^ (now as u32).wrapping_mul(0x9e37_79b9);
         self.lease = Lease::Asking { again: now, tries: 0 };
+        // the names were those of the network the card was on
+        self.names.forget();
     }
 
     /// Whether an address was given, and until which tick.
@@ -321,6 +330,23 @@ impl Net {
         frame[40..42].copy_from_slice(&sum.to_be_bytes());
     }
 
+    /// Looks for the address of a machine by its name (`dns::valid`), in
+    /// what is known or by asking the name server. To be called again and
+    /// again, with `receive` in between, until it says something else
+    /// than `Asking`: three seconds at most.
+    pub fn name(&mut self, name: &[u8], now: u64, wire: &mut dyn Wire) -> crate::dns::Lookup {
+        let mut question = [0u8; crate::dns::QUESTION];
+        let (state, send) = self.names.look(name, now, &mut question);
+        if let Some((to, to_port, from_port, length)) = send {
+            if !self.message(to, to_port, from_port, &question[..length], now, wire) {
+                // no address of our own, or no way to the server
+                self.names.give_up();
+                return crate::dns::Lookup::Failed(crate::dns::Failed::NoServer);
+            }
+        }
+        state
+    }
+
     /// Sends a ping. Its answer, when it comes, is in `ping`.
     pub fn ping(&mut self, to: Ip, now: u64, wire: &mut dyn Wire) -> bool {
         let Some(from) = self.ip else {
@@ -368,8 +394,9 @@ impl Net {
             option(54, &server);
         }
         option(12, b"xilaos");
-        // 55: what we want to be told, the mask, the gateway and the lease
-        option(55, &[1, 3, 51]);
+        // 55: what we want to be told: the mask, the gateway, the name
+        // server and the lease
+        option(55, &[1, 3, 6, 51]);
         body[at] = 255;
         let length = (at + 1).max(300);
         self.udp(&mut frame, NOWHERE, EVERY_IP, 68, 67, &[]);
@@ -398,7 +425,7 @@ impl Net {
             return;
         }
         let offered: Ip = [body[16], body[17], body[18], body[19]];
-        let (mut kind, mut mask, mut gateway, mut server, mut seconds) = (0, NOWHERE, NOWHERE, NOWHERE, 3600u64);
+        let (mut kind, mut mask, mut gateway, mut server, mut names, mut seconds) = (0, NOWHERE, NOWHERE, NOWHERE, NOWHERE, 3600u64);
         let mut at = 240;
         while at + 1 < body.len() && body[at] != 255 {
             if body[at] == 0 {
@@ -413,6 +440,8 @@ impl Net {
                 (53, 1) => kind = value[0],
                 (1, 4) => mask.copy_from_slice(value),
                 (3, 4..) => gateway.copy_from_slice(&value[..4]),
+                // the first of the name servers, if several are named
+                (6, 4..) => names.copy_from_slice(&value[..4]),
                 (54, 4) => server.copy_from_slice(value),
                 (51, 4) => seconds = be32(value, 0) as u64,
                 _ => {}
@@ -428,6 +457,7 @@ impl Net {
             // it is ours
             (5, Lease::Taking { .. } | Lease::Held { .. }) if offered != NOWHERE => {
                 (self.ip, self.mask, self.gateway) = (Some(offered), mask, gateway);
+                self.names.told(names);
                 let ticks = seconds.clamp(60, 30 * 86_400) * SECOND;
                 self.lease = Lease::Held { until: now + ticks, renew: now + ticks / 2 };
             }
@@ -565,6 +595,10 @@ impl Net {
                             return None;
                         }
                         self.learn(from, their_card, now);
+                        if self.names.answered(from, from_port, port, bytes, now) {
+                            // what a name server says of the name we asked about
+                            return None;
+                        }
                         Some(Message { from, from_port, port, bytes })
                     }
                     ICMP if self.ip == Some(to) && checksum(add(0, data)) == 0 => {
@@ -863,7 +897,7 @@ pub(crate) mod tests {
         net.tick(50, &mut wire);
         let (options, exchange) = asked(&wire.0[0]);
         assert_eq!(options[0], (53, vec![1]));
-        assert!(options.contains(&(55, vec![1, 3, 51])) && options.contains(&(12, b"xilaos".to_vec())));
+        assert!(options.contains(&(55, vec![1, 3, 6, 51])) && options.contains(&(12, b"xilaos".to_vec())));
         // nobody answers: again after two seconds, then four, then eight and eight
         for tick in 51..2500 {
             net.tick(tick, &mut wire);
@@ -880,6 +914,7 @@ pub(crate) mod tests {
         // yes: for 600 seconds
         net.receive(&served(5, exchange, US, 600), 2510, &mut wire);
         assert_eq!((net.ip, net.mask, net.gateway), (Some(US), [255, 255, 255, 0], BOX));
+        assert_eq!(net.names.server, Some(([9, 9, 9, 9], 53)), "the name server came with the address");
         assert_eq!(net.held_until(), Some(2510 + 60_000));
         // at half that time it is asked for again, with the address in the request
         for tick in 2511..=2510 + 30_000 {
@@ -903,6 +938,42 @@ pub(crate) mod tests {
         net.exchange = 7;
         net.receive(&served(6, 7, NOWHERE, 0), 10, &mut wire);
         assert_eq!(net.ip, None);
+    }
+
+    #[test]
+    fn a_name_is_asked_of_the_server_the_network_named() {
+        use crate::dns::{Failed, Lookup};
+        const SERVER: Ip = [192, 168, 1, 3];
+        let mut net = settled();
+        let mut wire = Kept::default();
+        // the network named nobody to ask
+        assert_eq!(net.name(b"example.org", 10, &mut wire), Lookup::Failed(Failed::NoServer));
+        net.names.told(SERVER);
+        net.learn(SERVER, THEIRS, 1);
+        assert_eq!(net.name(b"example.org", 10, &mut wire), Lookup::Asking);
+        let sent = wire.0[0].clone();
+        let (port, length) = (be16(&sent, 34), be16(&sent, 38) as usize - 8);
+        assert_eq!((&sent[..6], &sent[30..34], be16(&sent, 36)), (&THEIRS[..], &SERVER[..], 53));
+        let reply = crate::dns::tests::served(&sent[42..42 + length], 0, &[(1, 60, &[93, 184, 216, 34])]);
+        // what comes to that port from somebody else is not an answer, and is nobody's message either
+        let frame = packet(OURS, THEIRS, [192, 168, 1, 7], US, 17, &udp([192, 168, 1, 7], US, 53, port, &reply));
+        assert_eq!(net.receive(&frame, 20, &mut wire), None);
+        assert_eq!(net.name(b"example.org", 20, &mut wire), Lookup::Asking);
+        let frame = packet(OURS, THEIRS, SERVER, US, 17, &udp(SERVER, US, 53, port, &reply));
+        assert_eq!(net.receive(&frame, 30, &mut wire), None);
+        assert_eq!(net.name(b"example.org", 31, &mut wire), Lookup::Found([93, 184, 216, 34]));
+        assert_eq!(wire.0.len(), 1, "asked once");
+        // once the answer has come, that port is like any other
+        assert!(net.receive(&frame, 32, &mut wire).is_some());
+        // without an address of our own nothing can be asked, and nothing stays half asked
+        net.ip = None;
+        assert_eq!(net.name(b"other.example", 40, &mut wire), Lookup::Failed(Failed::NoServer));
+        net.ip = Some(US);
+        assert_eq!(net.name(b"other.example", 41, &mut wire), Lookup::Asking);
+        assert_eq!(wire.0.len(), 2);
+        // a card that is set up again forgets the names and who gave them
+        net.start(OURS, 50);
+        assert_eq!(net.names.server, None);
     }
 
     #[test]

@@ -63,7 +63,7 @@ yet:
 - programs outside the kernel, and the virtual machine they are to be
   compiled for;
 - applications as isolated zones with access control lists;
-- DNS, TLS, or encryption of any kind: the network prompt and the web
+- TLS, or encryption of any kind: the network prompt and the web
   pages send everything in clear on the local network;
 - sound, USB, Wi-Fi, NVMe, ACPI (so no clean power-off);
 - indexes, `BEGIN` / `COMMIT`, and values larger than 48

@@ -16,6 +16,7 @@ pub mod catalog;
 pub mod change;
 pub mod city;
 pub mod clock;
+pub mod dns;
 pub mod events;
 pub mod expr;
 pub mod fat;

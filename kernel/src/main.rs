@@ -31,6 +31,7 @@ use xila_core::events;
 use xila_core::keys::Decoder;
 use xila_core::grid::Grid;
 use xila_core::ask;
+use xila_core::dns;
 use xila_core::remote;
 use xila_core::tftp;
 use xila_core::shell::{self, Measure, Out, Pictures, Request, Style, System, Table, FRAME_TICKS, PROMPT};
@@ -508,6 +509,8 @@ fn observe(sys: &mut System) {
     sys.chance = sys.chance.rotate_left(7) ^ arch::chance();
     // the conversations of the network draw their first numbers from it too
     sys.net.tcp.stir(sys.chance);
+    // and the questions about names their numbers
+    sys.net.names.stir(sys.chance);
     task::snapshot(&mut sys.tasks);
     let memory = memory::stats();
     sys.machine.mem_managed_kb = memory.managed_kb;
@@ -591,7 +594,13 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
                 Some(nic) => get(sys, nic, to, port),
                 None => Err(ask::Failed::NoAnswer),
             };
-            sys.got = Some((to, port, got));
+            sys.got = Some((port, got));
+        }
+        Some(Request::Name) => {
+            sys.named = Some(match nic {
+                Some(nic) => named(sys, nic, arch::micros()),
+                None => Err(dns::Failed::NoServer),
+            });
         }
         Some(Request::Fetch(server)) => {
             let fetched = match nic {
@@ -642,16 +651,46 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
     }
 }
 
+/// Finds the address of the machine named `System::asked_machine`: in
+/// what is known, or by asking the name server and waiting for its
+/// answer. The machine does nothing else meanwhile, three seconds at
+/// most. `start` is when the command began to be served, by `micros`.
+fn named(sys: &mut System, nic: &mut e1000::Nic, start: u64) -> Result<xila_core::net::Ip, dns::Failed> {
+    // the time of the network, which stands still while a command is served
+    let now = |sys: &System| sys.ticks + (arch::micros() - start) / 10_000;
+    let name = sys.asked_machine;
+    let mut frame = [0u8; 2048];
+    loop {
+        while let Some(length) = nic.receive(&mut frame) {
+            let at = now(sys);
+            // a command from the network that comes meanwhile is not run: who sent it asks again
+            let _ = sys.net.receive(&frame[..length], at, nic);
+        }
+        let at = now(sys);
+        sys.net.tick(at, nic);
+        match sys.net.name(name.bytes(), at, nic) {
+            dns::Lookup::Found(ip) => return Ok(ip),
+            dns::Lookup::Asking => core::hint::spin_loop(),
+            dns::Lookup::Failed(why) => return Err(why),
+        }
+    }
+}
+
 /// Asks a machine for a page, and waits for its answer: how it went, and
 /// the start of what it said. The machine does nothing else meanwhile,
-/// five seconds at most.
-fn get(sys: &mut System, nic: &mut e1000::Nic, to: xila_core::net::Ip, port: u16) -> Result<(u16, FixedStr<640>), ask::Failed> {
+/// five seconds at most, after the three at most that finding its
+/// address may take when it is asked by its name (`to` is then None).
+fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, port: u16) -> Result<(u16, FixedStr<640>), ask::Failed> {
     let start = arch::micros();
     // the time of the network, which stands still while a command is served
     let now = |sys: &System| sys.ticks + (arch::micros() - start) / 10_000;
-    let path = sys.asked_path;
+    let to = match to {
+        Some(to) => to,
+        None => named(sys, nic, start).map_err(ask::Failed::Name)?,
+    };
+    let (machine, path) = (sys.asked_machine, sys.asked_path);
     let at = now(sys);
-    let mut asking = ask::Ask::start(&mut sys.net.tcp, to, port, b"GET", path.bytes(), b"", at)?;
+    let mut asking = ask::Ask::start(&mut sys.net.tcp, to, port, machine.bytes(), b"GET", path.bytes(), b"", at)?;
     let mut frame = [0u8; 2048];
     loop {
         while let Some(length) = nic.receive(&mut frame) {

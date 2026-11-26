@@ -559,9 +559,42 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         sys.request = Some(Request::Ping(to));
         return true;
     }
+    if word.eq_ignore_ascii_case(b"name") {
+        // the address of a machine known by its name
+        let name = trim(rest);
+        if !crate::dns::valid(name) {
+            out.line(Style::Error, b"Type net name and the name of a machine: net name example.org");
+            return false;
+        }
+        if sys.net.ip.is_none() {
+            out.line(Style::Error, b"This machine has no address on the network yet. Type net to see why.");
+            return false;
+        }
+        sys.asked_machine = FixedStr::from_bytes(name);
+        sys.request = Some(Request::Name);
+        return true;
+    }
+    if word.eq_ignore_ascii_case(b"names") {
+        // who is asked for names, in place of whom the network named
+        let rest = trim(rest);
+        let (address, port) = match rest.iter().position(|byte| *byte == b':') {
+            Some(colon) => (&rest[..colon], parse_number(&rest[colon + 1..]).filter(|port| (1..65536).contains(port))),
+            None => (rest, Some(crate::dns::PORT as usize)),
+        };
+        let (Some(server), Some(port)) = (crate::net::ip_of(address), port) else {
+            out.line(Style::Error, b"Type net names and the address of a name server: net names 192.168.1.1");
+            return false;
+        };
+        sys.net.names.set(server, port as u16);
+        let mut line = FixedStr::<COLS>::from_bytes(b"Names are now asked of ");
+        line.push_bytes(name_server(server, port as u16).bytes());
+        line.push(b'.');
+        out.line(Style::Done, line.bytes());
+        return true;
+    }
     if word.eq_ignore_ascii_case(b"get") {
         // a page of another machine: the calling side of the network, tried by hand
-        let Some((to, port, path)) = crate::ask::place(trim(rest)).filter(|(_, _, path)| path.len() <= 200) else {
+        let Some(place) = crate::ask::place(trim(rest)).filter(|place| place.path.len() <= 200) else {
             out.line(Style::Error, b"Type net get and where to ask: net get 192.168.1.20:8000/page");
             return false;
         };
@@ -569,8 +602,9 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
             out.line(Style::Error, b"This machine has no address on the network yet. Type net to see why.");
             return false;
         }
-        sys.asked_path = FixedStr::from_bytes(path);
-        sys.request = Some(Request::Get(to, port));
+        sys.asked_machine = FixedStr::from_bytes(place.machine);
+        sys.asked_path = FixedStr::from_bytes(place.path);
+        sys.request = Some(Request::Get(place.ip, place.port));
         return true;
     }
     if arg.eq_ignore_ascii_case(b"registers") {
@@ -583,7 +617,7 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         return true;
     }
     if !arg.is_empty() {
-        out.line(Style::Error, b"After net: restart, registers, ping and an address, or get and a place.");
+        out.line(Style::Error, b"After net: restart, registers, ping, get, name or names, and what they need.");
         return false;
     }
     let mut t = Table::new(b"net", &[b"item", b"value"]);
@@ -603,6 +637,16 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
             t.row(&[b"address", crate::net::ip_text(ip).bytes()]);
             t.row(&[b"mask", crate::net::ip_text(sys.net.mask).bytes()]);
             t.row(&[b"gateway", crate::net::ip_text(sys.net.gateway).bytes()]);
+            match sys.net.names.server {
+                Some((server, port)) => {
+                    let mut text = name_server(server, port);
+                    if sys.net.names.by_hand {
+                        text.push_bytes(b", set by hand");
+                    }
+                    t.row(&[b"name server", text.bytes()]);
+                }
+                None => t.row(&[b"name server", b"none named by the network"]),
+            }
             let mut kept = Text::new();
             let minutes = sys.net.held_until().map_or(0, |until| until.saturating_sub(sys.ticks) / 6000);
             let _ = if minutes >= 120 { write!(kept, "for {} hours more", minutes / 60) } else { write!(kept, "for {minutes} minutes more") };
@@ -622,6 +666,27 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     count(b"missed, no room", card.missed);
     show(sys, out, &t);
     true
+}
+
+/// A name server as it is written: its address, and its port when it is
+/// not the usual one.
+fn name_server(server: crate::net::Ip, port: u16) -> Text {
+    let mut text = crate::net::ip_text(server);
+    if port != crate::dns::PORT {
+        let _ = write!(text, ":{port}");
+    }
+    text
+}
+
+/// Why the address of a name was not found, for the user.
+fn unnamed(why: crate::dns::Failed) -> &'static [u8] {
+    use crate::dns::Failed;
+    match why {
+        Failed::NoServer => b"The network named no server to ask for names. Type net names and an address.",
+        Failed::Silent => b"The name server did not answer.",
+        Failed::NoSuchName => b"The name server knows no machine of that name.",
+        Failed::NoAddress => b"The name server gave no address for that name.",
+    }
 }
 
 /// Lists what the PCI bus of the machine holds, and what XilaOS drives.
@@ -711,9 +776,14 @@ pub enum Request {
     /// Fetch the system from another machine of the network, to install
     /// it: answered in `System::fetched`.
     Fetch(crate::net::Ip),
-    /// Ask a machine for the page at `System::asked_path`, on a port:
-    /// answered in `System::got`.
-    Get(crate::net::Ip, u16),
+    /// Ask the machine `System::asked_machine` for the page at
+    /// `System::asked_path`, on a port: answered in `System::got`. The
+    /// address is that of the machine, or none when it was written as a
+    /// name whose address is to be found first.
+    Get(Option<crate::net::Ip>, u16),
+    /// Find the address of the machine named `System::asked_machine`:
+    /// answered in `System::named`.
+    Name,
 }
 
 /// The state of the system that commands can read and change.
@@ -827,10 +897,15 @@ pub struct System {
     /// The kernel's answer to `Request::Fetch`: who was asked, and the
     /// size of what came with its check number.
     pub fetched: Option<(crate::net::Ip, Result<(usize, u32), crate::tftp::Failed>)>,
-    /// What `net get` asks for, and the kernel's answer: who was asked,
-    /// then how it went and the start of what was said.
+    /// What `net get` asks for, of which machine (as it was written, an
+    /// address or a name), and the kernel's answer: the port, then how
+    /// it went and the start of what was said.
+    pub asked_machine: crate::dns::Name,
     pub asked_path: FixedStr<200>,
-    pub got: Option<(crate::net::Ip, u16, Result<(u16, FixedStr<640>), crate::ask::Failed>)>,
+    pub got: Option<(u16, Result<(u16, FixedStr<640>), crate::ask::Failed>)>,
+    /// The kernel's answer to `Request::Name`: the address of
+    /// `asked_machine`.
+    pub named: Option<Result<crate::net::Ip, crate::dns::Failed>>,
     /// Commands of the last numbered table each session was shown.
     pub last: [[Text; TABLE_ROWS]; crate::events::SESSIONS],
     pub last_len: [usize; crate::events::SESSIONS],
@@ -917,8 +992,10 @@ impl System {
             system_bytes: 0,
             installed: None,
             fetched: None,
+            asked_machine: FixedStr::new(),
             asked_path: FixedStr::new(),
             got: None,
+            named: None,
             last: [[Text::new(); TABLE_ROWS]; crate::events::SESSIONS],
             last_len: [0; crate::events::SESSIONS],
             peek: [[b' '; COLS]; MAX_ROWS],
@@ -1030,7 +1107,7 @@ const HELP_COMMANDS: [&[u8]; 34] = [
     b"   devices                    - The parts of the machine, and which are driven.",
     b"   disk [check|erase]         - Where the tables are; reads all; takes a disk.",
     b"   install [n|system|from a]  - Puts XilaOS on a disk; from: fetches it first.",
-    b"   net [ping a|get place]     - The network: card, cable, address. Pings; asks.",
+    b"   net [ping a|get p|name n]  - The network: card, cable, address. Pings; asks.",
     b"   remote [on|off]            - Opens this prompt to the local network.",
     b"   web [on|off]               - Shows the tables to browsers of that network.",
     b"   screen [n]                 - Lists the screens, or shows screen n.",
@@ -1965,10 +2042,19 @@ fn answers(sys: &mut System, out: &mut dyn Out) {
         };
         out.line(style, text);
     }
-    if let Some((to, port, got)) = sys.got.take() {
+    match sys.named.take() {
+        None => {}
+        Some(Ok(ip)) => {
+            let mut line = FixedStr::<COLS>::from_bytes(sys.asked_machine.bytes());
+            let _ = write!(line, " is at {}.", core::str::from_utf8(crate::net::ip_text(ip).bytes()).unwrap_or("?"));
+            out.line(Style::Out, line.bytes());
+        }
+        Some(Err(why)) => out.line(Style::Error, unnamed(why)),
+    }
+    if let Some((port, got)) = sys.got.take() {
         use crate::ask::Failed;
         let mut line = FixedStr::<COLS>::new();
-        line.push_bytes(crate::net::ip_text(to).bytes());
+        line.push_bytes(sys.asked_machine.bytes());
         let _ = write!(line, ":{port}");
         match got {
             Ok((status, said)) => {
@@ -1988,10 +2074,12 @@ fn answers(sys: &mut System, out: &mut dyn Out) {
                     out.line(Style::Out, b"(and more)");
                 }
             }
+            // its address was not found: nothing was asked of it
+            Err(Failed::Name(why)) => out.line(Style::Error, unnamed(why)),
             Err(why) => {
                 line.push_bytes(match why {
                     Failed::NoRoom => b" cannot be asked now: too many conversations at once.",
-                    Failed::NoAnswer => b" does not answer.",
+                    Failed::NoAnswer | Failed::Name(_) => b" does not answer.",
                     Failed::Silent => b" took the call and then said nothing.",
                     Failed::NotAnAnswer => b" answered something that is not a page.",
                 });
@@ -3040,6 +3128,7 @@ pub mod tests {
                 "   address               192.168.1.20",
                 "   mask                  255.255.255.0",
                 "   gateway               192.168.1.1",
+                "   name server           none named by the network",
                 "   given by the network  for 24 hours more",
                 "   frames received       2",
                 "   frames sent           3",
@@ -3064,13 +3153,13 @@ pub mod tests {
         assert!(run_line(&mut sys, "net registers").0);
         assert_eq!(sys.request.take(), Some(Request::NetRegisters));
         // a page of another machine
-        for wrong in ["net get", "net get the-mac", "net get 192.168.1.20:x"] {
+        for wrong in ["net get", "net get 192.168.1", "net get the mac", "net get 192.168.1.20:x"] {
             assert_eq!(run_line(&mut sys, wrong).1.lines, ["Type net get and where to ask: net get 192.168.1.20:8000/page"], "{wrong}");
         }
         assert!(run_line(&mut sys, "net get http://192.168.1.20:8000/notes/1").0);
-        assert_eq!((sys.request.take(), sys.asked_path.bytes()), (Some(Request::Get([192, 168, 1, 20], 8000)), &b"/notes/1"[..]));
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Get(Some([192, 168, 1, 20]), 8000)), &b"192.168.1.20"[..], &b"/notes/1"[..]));
         let said = |sys: &mut System, got| {
-            sys.got = Some(([192, 168, 1, 20], 8000, got));
+            sys.got = Some((8000, got));
             let mut out = Lines::default();
             // an answer that is a failure makes the command one
             assert_eq!(served(sys, &mut out), out.errors == 0);
@@ -3080,6 +3169,68 @@ pub mod tests {
         assert_eq!(said(&mut sys, Ok((200, text))), (0, vec!["192.168.1.20:8000 answered 200.".to_string(), "first line".to_string(), "<b>second</b> ??".to_string(), "3".to_string(), "4".to_string(), "5".to_string(), "6".to_string(), "7".to_string(), "8".to_string(), "(and more)".to_string()]));
         assert_eq!(said(&mut sys, Ok((404, FixedStr::new()))), (1, vec!["192.168.1.20:8000 answered 404.".to_string()]));
         assert_eq!(said(&mut sys, Err(crate::ask::Failed::NoAnswer)), (1, vec!["192.168.1.20:8000 does not answer.".to_string()]));
+        // a machine asked by its name: the kernel finds its address first
+        assert!(run_line(&mut sys, "net get Example.org:8000/notes/1").0);
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes()), (Some(Request::Get(None, 8000)), &b"Example.org"[..]));
+        assert_eq!(said(&mut sys, Ok((200, FixedStr::from_bytes(b"hello")))), (0, vec!["Example.org:8000 answered 200.".to_string(), "hello".to_string()]));
+        use crate::dns::Failed as NoName;
+        let whys = [
+            (NoName::NoServer, "The network named no server to ask for names. Type net names and an address."),
+            (NoName::Silent, "The name server did not answer."),
+            (NoName::NoSuchName, "The name server knows no machine of that name."),
+            (NoName::NoAddress, "The name server gave no address for that name."),
+        ];
+        for (why, text) in whys {
+            assert!(text.len() <= COLS);
+            assert_eq!(said(&mut sys, Err(crate::ask::Failed::Name(why))), (1, vec![text.to_string()]));
+        }
+        // the address of a name, by itself
+        for wrong in ["net name", "net name 192.168.1.20", "net name two words", "net name a..b"] {
+            let (ok, out) = run_line(&mut sys, wrong);
+            assert!(!ok && sys.request.is_none(), "{wrong}");
+            assert_eq!(out.lines, ["Type net name and the name of a machine: net name example.org"], "{wrong}");
+        }
+        assert!(run_line(&mut sys, "net name openrouter.ai").0);
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes()), (Some(Request::Name), &b"openrouter.ai"[..]));
+        sys.named = Some(Ok([104, 18, 3, 115]));
+        let mut out = Lines::default();
+        assert!(served(&mut sys, &mut out));
+        assert_eq!(out.lines, ["openrouter.ai is at 104.18.3.115."]);
+        for (why, text) in whys {
+            sys.named = Some(Err(why));
+            let mut out = Lines::default();
+            assert!(!served(&mut sys, &mut out));
+            assert_eq!(out.lines, [text]);
+        }
+        // the longest name still fits in a line with what is said of it
+        let long = "a.".repeat(crate::dns::NAME / 2 - 1) + "fr";
+        assert!(run_line(&mut sys, &format!("net get {long}:65000/")).0);
+        sys.request = None;
+        sys.got = Some((65000, Ok((200, FixedStr::new()))));
+        let mut out = Lines::default();
+        served(&mut sys, &mut out);
+        assert_eq!(out.lines, [format!("{long}:65000 answered 200.")]);
+        assert!(out.lines[0].len() <= COLS);
+        assert!(run_line(&mut sys, &format!("net name {long}")).0);
+        sys.request = None;
+        sys.named = Some(Ok([255, 255, 255, 255]));
+        let mut out = Lines::default();
+        served(&mut sys, &mut out);
+        assert_eq!(out.lines, [format!("{long} is at 255.255.255.255.")]);
+        assert!(out.lines[0].len() <= COLS);
+        // who is asked for names: whom the network named, or one set by hand
+        for wrong in ["net names", "net names example.org", "net names 10.0.2.2:", "net names 10.0.2.2:0", "net names 10.0.2.2:99999"] {
+            assert_eq!(run_line(&mut sys, wrong).1.lines, ["Type net names and the address of a name server: net names 192.168.1.1"], "{wrong}");
+        }
+        sys.net.names.told([192, 168, 1, 1]);
+        assert_eq!(run_line(&mut sys, "net").1.lines[7], "   name server           192.168.1.1");
+        let (ok, out) = run_line(&mut sys, "net names 9.9.9.9");
+        assert!(ok);
+        assert_eq!(out.lines, ["Names are now asked of 9.9.9.9."]);
+        assert_eq!(run_line(&mut sys, "net").1.lines[7], "   name server           9.9.9.9, set by hand");
+        assert_eq!(run_line(&mut sys, "net names 10.0.2.2:5300").1.lines, ["Names are now asked of 10.0.2.2:5300."]);
+        assert_eq!(run_line(&mut sys, "net").1.lines[7], "   name server           10.0.2.2:5300, set by hand");
+        assert_eq!(run_line(&mut sys, "net status").1.lines, ["After net: restart, registers, ping, get, name or names, and what they need."]);
         let mut read = [("CTRL", 0, 0x0018_0240); NET_REGISTERS];
         read[1] = ("STATUS", 8, 0x0008_0083);
         sys.net_registers = Some(read);

@@ -1,6 +1,6 @@
 # Networking
 
-XilaOS has a small network stack of its own, written for it: no code from another system, no heap, no interrupt. Plugged by a cable into a local network, the machine asks for an address, answers a `ping`, and can do four things with other machines: take commands from one (`remote`), show its tables to a browser (`web`), ask one for a page (`net get`), and fetch a new system from one (`install from`).
+XilaOS has a small network stack of its own, written for it: no code from another system, no heap, no interrupt. Plugged by a cable into a local network, the machine asks for an address, answers a `ping`, finds the address of a machine known by its name (`net name`), and can do four things with other machines: take commands from one (`remote`), show its tables to a browser (`web`), ask one for a page (`net get`), and fetch a new system from one (`install from`).
 
 > **Nothing is encrypted.** Every code, command, table and file described in this chapter crosses the network as it is. All of it is meant for a local network one trusts, and all of it is closed when the machine starts. See [Security](#security).
 
@@ -13,7 +13,8 @@ XilaOS has a small network stack of its own, written for it: no code from anothe
 | IPv4 | To the cable directly, or through the gateway. No fragments: a packet cut in pieces on the way is dropped, and none is ever sent. | `core/src/net.rs` |
 | ICMP | Answers an echo request, sends one (`net ping`). Nothing else. | `core/src/net.rs` |
 | UDP | Messages to and from a port, with their checksum. | `core/src/net.rs` |
-| DHCP | Client only: asks for an address, a mask and a gateway, and asks again at half of the lease. | `core/src/net.rs` |
+| DHCP | Client only: asks for an address, a mask, a gateway and a name server, and asks again at half of the lease. | `core/src/net.rs` |
+| DNS | Client only: asks the name server for the IPv4 address of a name, over UDP, and keeps the answer for as long as it says. Eight names remembered. | `core/src/dns.rs` |
 | TCP | Both sides: listens and calls. Eight conversations at once, four ports listened on. No out-of-order reassembly, no window scaling, no selective acknowledgement. | `core/src/tcp.rs` |
 | HTTP, asking | One `GET` (the code can also write a `POST`), HTTP/1.0, the first kilobyte of the answer is kept. | `core/src/ask.rs` |
 | HTTP, serving | Read-only pages of the tables, one browser at a time. | `core/src/web.rs` |
@@ -22,7 +23,7 @@ XilaOS has a small network stack of its own, written for it: no code from anothe
 | Network boot | A script on another computer serves the kernel to a PC that starts from its cable. | `tools/netboot.py` |
 | Driver | Intel cards of the e1000 family only. | `kernel/src/e1000.rs` |
 
-What does not exist: DNS (machines are named by their address), TLS or any other encryption, IPv6, Wi-Fi, any card that is not an Intel e1000, sockets for programs (XilaScript has no statement that opens a conversation), routing, and a firewall. An encrypted protocol between XilaOS machines is designed and not built yet.
+What does not exist: TLS or any other encryption, IPv6, Wi-Fi, any card that is not an Intel e1000, sockets for programs (XilaScript has no statement that opens a conversation), routing, and a firewall. An encrypted protocol between XilaOS machines is designed and not built yet.
 
 ## Using it
 
@@ -51,6 +52,7 @@ XilaOS|all:/>net
    address               10.0.2.15
    mask                  255.255.255.0
    gateway               10.0.2.2
+   name server           10.0.2.3
    given by the network  for 23 hours more
    frames received       19
    frames sent           22
@@ -60,6 +62,30 @@ XilaOS|all:/>net
 ```
 
 Without a cable the `cable` row says `not plugged in, or the other end is silent` and the address `none: no cable`; with a cable and no answer yet from the network, `none yet: asking the network for one`. The card's own counters are read before every command, and once per second for the city.
+
+### net name and net names
+
+`net name` finds the address of a machine known by its name. The question goes to the name server the network named along with the address (the `name server` row of `net`), and the answer is kept for as long as it says: the same name asked again within that time is answered at once, without a question.
+
+```
+XilaOS|all:/>net name openrouter.ai
+openrouter.ai is at 104.18.3.115.
+XilaOS|all:/>net name no-such-machine.example
+The name server knows no machine of that name.
+```
+
+The other failures say `The name server did not answer.` (after three questions, one second apart), `The name server gave no address for that name.` (a name with no IPv4 address, or a server that could not tell) and `The network named no server to ask for names. Type net names and an address.`
+
+`net names` sets by hand who is asked, in place of whom the network named, until `net restart` or the next start. A port may follow the address when it is not the usual 53:
+
+```
+XilaOS|all:/>net names 1.1.1.1
+Names are now asked of 1.1.1.1.
+```
+
+`net` then shows `1.1.1.1, set by hand`. What was known from the other server is forgotten.
+
+A name is at most 56 characters: words of letters, digits, `-` and `_` between dots. Capitals do not matter.
 
 ### net ping
 
@@ -112,7 +138,7 @@ XilaOS|all:/>net registers
 
 ### net get
 
-Asks another machine for a page over HTTP and shows how it went and the start of what it said. It is the calling side of TCP, tried by hand. The place is an address, with or without `http://`, a port (80 if none) and a path:
+Asks another machine for a page over HTTP and shows how it went and the start of what it said. It is the calling side of TCP, tried by hand. The place is an address or a name, with or without `http://`, a port (80 if none) and a path:
 
 ```
 XilaOS|all:/>net get 10.0.2.2:55485/hello.txt
@@ -134,7 +160,18 @@ XilaOS|all:/>net get 10.0.2.2:1/
 10.0.2.2:1 does not answer.
 ```
 
-What comes back is shown and never run. The other failures say `took the call and then said nothing`, `answered something that is not a page`, or `cannot be asked now: too many conversations at once`. A machine that has not finished answering after five seconds is given up. There is no DNS, so a name in place of the address is refused, and no TLS, so `https://` is too.
+What comes back is shown and never run. The other failures say `took the call and then said nothing`, `answered something that is not a page`, or `cannot be asked now: too many conversations at once`. A machine that has not finished answering after five seconds is given up. There is no TLS, so `https://` is refused.
+
+With a name in place of the address, the address is found first, as `net name` does, and the machine is told the name it was asked by, since one address may serve the pages of several names. When the address is not found, nothing is asked and the line says why, as `net name` would. Here a name server on the host knows the host as `xila.test`:
+
+```
+XilaOS|all:/>net get xila.test:55485/hello.txt
+xila.test:55485 answered 200.
+hello from the host
+this page is served by python3 -m http.server
+XilaOS|all:/>net get no-such-machine.example/
+The name server knows no machine of that name.
+```
 
 ### remote: the prompt from another computer
 
@@ -239,6 +276,7 @@ This is stated in the commands' own output and repeated here because it is the m
 - **The web pages cannot change anything.** This is by construction and not by a check: nothing a browser sends reaches the shell. The first line of its request is read, the name of a table is accepted only if it is letters, digits and underscores, and the only thing ever run is `select`, through a reference to the system that does not allow changes. Any method but `GET` gets `405 Method Not Allowed`. Cell contents are escaped. The pages ask browsers not to keep them (`Cache-Control: no-store`) and not to tell other sites their address (`Referrer-Policy: no-referrer`).
 - **TFTP authenticates nothing.** Nothing says who the server is nor that the file is the right one; `install from` only checks that the file has the shape of a UEFI program for this kind of machine. That is why it only fetches, shows a size and a check number, and writes nothing until `install system` is typed at the machine, and why no form of `install` is accepted from the network.
 - **`net get` shows and never runs** what comes back.
+- **Nothing says who answers a question about a name.** The answer is taken from the address and port the question went to, with the number and the name of the question, and from nobody else; but whoever can put a message on the cable with those can give a wrong address. Until what is spoken with a machine proves who it is (TLS, not built yet), a name is no safer than the network it was asked on.
 
 ## How it is built
 
@@ -265,7 +303,13 @@ The DHCP client asks after 2, 4, then every 8 seconds until it is offered an add
 
 The card raises no interrupt. The interface task, the one that also reads the keyboard and redraws the screen, calls `network` in `kernel/src/main.rs` at each pass of its loop: it takes up to 32 frames from the card, gives each to `Net::receive`, then calls `Net::tick`. A packet therefore waits up to a hundredth of a second. If one of the messages is a command for the remote prompt, it is run there and then, exactly as the serial task runs a line. Then `web::step` does a little of the pages' work and `Net::speak` sends what TCP has ready.
 
-Commands that wait for the network (`net ping`, `net get`, `install from`) run their own loop of the same kind while the command is served, holding the system for up to one second, five seconds and one minute respectively.
+Commands that wait for the network (`net ping`, `net name`, `net get`, `install from`) run their own loop of the same kind while the command is served, holding the system for up to one second, three seconds, five seconds (after the three of a name) and one minute respectively.
+
+### Names
+
+`core/src/dns.rs` is, like the rest, a machine with no hardware under it. `Names::look` is asked for a name again and again: it answers from the eight names it keeps, or says what question to send (to the server, from a port and with a number both drawn from `System::chance`), sends it again after one second and after two, and gives up after three. `Names::answered` takes a UDP message that came to that port: it must come from the server's address and port and carry the number and the name of the question. `Net::name` carries both, and `Net::receive` hands it the messages before anything else sees them.
+
+One question at a time, for an address of four bytes only. The server is asked to find the answer itself, going from server to server; XilaOS does not. When a name is another name for a second machine, the server follows it and the address is the first one in its answer. An answer too long for one UDP message is not asked again over TCP. A name that has no address is not remembered as such: it is asked again the next time.
 
 ### The e1000 driver
 
@@ -386,15 +430,18 @@ with Xila(net="e1000e", forward=4000, web=8080, tftp="some/folder") as x:
     far = Machine("127.0.0.1", CODE, 4000)   # far.cmd("tasks") returns what x.cmd does
 ```
 
+The small network names 10.0.2.3 as name server; QEMU passes what it is asked on to the host's own name server. With some of those (a VPN's, for one) no answer comes back: `net names 1.1.1.1`, or any server of the Internet, then asks one directly. `tools/check.py` runs a small name server of its own on the host and tells the guest to ask it (`net names 10.0.2.2:PORT`), so the checks need no Internet.
+
 `net="e1000"` gives the 82540EM instead. `forward` is a UDP port of the host that leads to port 4000 of the guest, `web` a TCP port that leads to port 80, and `tftp` a folder whose files QEMU serves at 10.0.2.2, which is how `install from 10.0.2.2` is checked. From the guest, a server on the host is at 10.0.2.2: `python3 -m http.server` answers `net get`.
 
 Every frame that goes by is kept in `build/net.pcap`. `tools/check.py` reads that file back with code of its own and checks the lengths and checksums of everything XilaOS sent, so that the stack is not only checked against itself.
 
 ## Limits
 
-- One card, one address, one gateway. No DNS, no IPv6, no fragments.
+- One card, one address, one gateway. No IPv6, no fragments.
+- Names: IPv4 addresses only, one question at a time, names of 56 characters at most, no answers over TCP, and nothing that proves who answered.
 - A packet waits up to 10 ms for the next tick; throughput is whatever 100 passes per second and a 1 KB receive window allow. This is enough for pages of tables and a 1 MB kernel, and not meant for more.
-- `net ping`, `net get` and `install from` hold the whole system while they wait.
+- `net ping`, `net name`, `net get` and `install from` hold the whole system while they wait.
 - TCP is only used by the kernel's own `web` and `net get`; the language has no way to open a conversation.
 - The parts specific to the 82579 ran on a single T430. The driver has never met another real card.
 - No encryption anywhere.

@@ -38,6 +38,7 @@ were also tried on the real machine.
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
 | Ethernet (Intel e1000 family), ARP, IPv4, ICMP, UDP, DHCP | yes | yes, after five trials |
+| Names (DNS): `net name`, `net names`, `net get` by name | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
@@ -71,8 +72,9 @@ loses silently is not caught. No mirror, no snapshots. Details in
 clean power-off: `reboot` or the power button. A fatal error is only
 reported on the serial port. Details in [The kernel](07-kernel.md).
 
-**Network.** No DNS, no TLS, no IPv6, no fragments, eight TCP
-conversations, no out-of-order reassembly. **Nothing is encrypted and
+**Network.** No TLS, no IPv6, no fragments, eight TCP
+conversations, no out-of-order reassembly. Names: IPv4 addresses
+only, and nothing proves who answered. **Nothing is encrypted and
 nothing is authenticated beyond a code sent in clear.** Details in
 [Networking](10-networking.md).
 
@@ -93,7 +95,7 @@ The system is meant to grow in layers. Layer 0 (the base) and layer 1
 | 0. Base | Boot, memory, interrupts, tasks, screen, keyboard, interface | Done, without memory protection |
 | 1. Database | Storage, tables, SQL, transactions, LISTEN / NOTIFY | Done in a first form; no typed large objects, no access rights |
 | 2. Programs | A virtual machine, zones, public / private status, ACLs, installing applications, supervised services, a vault for secrets | Not started, except XilaScript and scheduled programs |
-| 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet and TCP/IP only |
+| 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet, TCP/IP and DNS only |
 | 4. Sound | Audio driver, mixing, MP3, ambiences | Not started |
 | 5. Applications | Spreadsheet, database front end, a HyperCard-like, mail, text web browser, IRC, HTTP server, a port of Doom | Not started |
 | 6. Agents | AI companions with their own access rights to the data | A first companion is under way, without access rights |
@@ -227,8 +229,8 @@ it. Its steps are [below](#the-companion).
 
 **Waiting for the T430.** What these phases build is only verified in
 QEMU until it is tried there: the dead keys on the real keyboard,
-`install` showing its progress on a real disk, and `disk check` on a
-real disk.
+`install` showing its progress on a real disk, `disk check` on a
+real disk, and names asked of the name server of a real network.
 
 ### The companion
 
@@ -257,10 +259,10 @@ What has to be said with it: a companion that acts by itself follows
 what it reads, and any text of a table can steer it. Access lists do
 not exist yet to bound it; the three guards above are all there is.
 
-The steps, in order. Each is merged once verified:
+The steps, in order. Each is merged once verified. The first, names
+(DHCP asks for the name server, a question over UDP gives the address
+of a name, `net get` takes a name), was done on 26 November 2026.
 
-1. **Names.** DHCP asks for the name server; a question over UDP gives
-   the address of a name; `net get` takes a name.
 2. **TLS.** A client for TLS 1.3 only, written here as a machine fed
    with bytes like `tcp.rs`, in a crate of its own (`tls/`) which holds
    the first outside code of XilaOS: the algorithms (X25519,
@@ -406,8 +408,10 @@ ways the emulator never shows.
 
 ### Network
 
-- DNS.
-- TLS, which everything that reaches the Internet needs.
+- TLS, which everything that reaches the Internet needs: step 2 of
+  the companion.
+- Names: addresses of sixteen bytes, an answer too long for UDP asked
+  again over TCP, `net ping` and `install from` by name.
 - Fragments, segments that arrive out of order, more than eight
   conversations, IPv6.
 - The web pages: sorting, filtering, the rest of a long table, a page

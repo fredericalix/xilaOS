@@ -120,6 +120,7 @@ storage engine allocates.
 | `change.rs` | 647 | `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`. |
 | `city.rs` | 529 | The city: the scene from the system state, the isometric drawing. |
 | `gpt.rs` | 529 | GPT partition tables: reading, describing, the layout `install` writes. |
+| `dns.rs` | 520 | Names: the question to a name server, its answer, the names kept. |
 | `web.rs` | 517 | The read-only pages of tables for a browser. |
 | `remote.rs` | 464 | The prompt over the network: the code, the message format. |
 | `grid.rs` | 406 | The grid of cells, change tracking, choosing a screen mode. |

@@ -1027,9 +1027,118 @@ with Xila(net="e1000e") as x:
     check("net get: a machine that says nothing is given up after a while", lines == ["10.0.2.2:%d took the call and then said nothing." % mute.getsockname()[1]], lines)
     many = [x.cmd("net get %s/n%d" % (there, n))[1][:1] for n in range(20)]
     check("net get: twenty calls one after the other, each from a place that is freed", many == [[there + " answered 200."]] * 20, many)
-    ok, lines = x.cmd("net get nowhere")
+    ok, lines = x.cmd("net get no where")
     check("net get: wants a place to ask", not ok and lines == ["Type net get and where to ask: net get 192.168.1.20:8000/page"], lines)
     check("net get: the rest of the network is as it was", x.cmd("net ping 10.0.2.2")[1][0].startswith("10.0.2.2 answered in "))
+
+    # Names. The network QEMU makes up names a name server (10.0.2.3, which
+    # passes the questions on to this machine's own). To check without the
+    # Internet, the guest is told to ask a small one here instead.
+    names_asked = []
+
+    def name_server(listening):
+        while True:
+            try:
+                question, who = listening.recvfrom(512)
+            except OSError:
+                return
+            # the name of the question, word by word, each after its length
+            at, words = 12, []
+            while question[at]:
+                words.append(question[at + 1:at + 1 + question[at]].decode())
+                at += 1 + question[at]
+            name = ".".join(words)
+            names_asked.append(name)
+
+            def answer(code, lines):
+                # the question back, as it was asked, then the lines
+                return question[:2] + bytes([0x81, 0x80 | code]) + struct.pack(">HHHH", 1, len(lines), 0, 0) + question[12:at + 5] + b"".join(lines)
+
+            def line(kind, value):
+                # about the name of the question (a pointer back to it), to be kept a minute
+                return b"\xc0\x0c" + struct.pack(">HHIH", kind, 1, 60, len(value)) + value
+
+            here = bytes([10, 0, 2, 2])
+            if name.lower() == "xila.test":
+                listening.sendto(answer(0, [line(1, here)]), who)
+            elif name.lower() == "alias.test":
+                # another name for a machine (5), then the address of that machine
+                listening.sendto(answer(0, [line(5, b"\x04xila\x04test\x00"), line(1, here)]), who)
+            elif name.lower() == "six.test":
+                # only an address of sixteen bytes (28)
+                listening.sendto(answer(0, [line(28, bytes(16))]), who)
+            elif name.lower() != "mute.test":
+                listening.sendto(answer(3, []), who)
+
+    def net_says():
+        return {row["item"]: row["value"] for row in x.table("net")}
+
+    listening = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listening.bind(("127.0.0.1", 0))
+    threading.Thread(target=name_server, args=(listening,), daemon=True).start()
+    ours = "10.0.2.2:%d" % listening.getsockname()[1]
+    check("names: the network named a name server along with the address", net_says().get("name server") == "10.0.2.3", net_says())
+    ok, lines = x.cmd("net names " + ours)
+    check("net names: who is asked for names is set by hand", ok and lines == ["Names are now asked of %s." % ours], lines)
+    check("net names: and net says so", net_says().get("name server") == ours + ", set by hand", net_says())
+    ok, lines = x.cmd("net name xila.test")
+    check("net name: the address of a machine known by its name", ok and lines == ["xila.test is at 10.0.2.2."], lines)
+    ok, lines = x.cmd("net name XILA.Test")
+    check("net name: known the second time, whatever the capitals, without asking again", ok and lines == ["XILA.Test is at 10.0.2.2."] and names_asked == ["xila.test"], (lines, names_asked))
+    ok, lines = x.cmd("net name alias.test")
+    check("net name: a name that is another name for a machine", ok and lines == ["alias.test is at 10.0.2.2."], lines)
+    ok, lines = x.cmd("net name none.test")
+    check("net name: a name nobody has is a failure", not ok and lines == ["The name server knows no machine of that name."], lines)
+    ok, lines = x.cmd("net name six.test")
+    check("net name: a name with no address of four bytes is a failure", not ok and lines == ["The name server gave no address for that name."], lines)
+    del names_asked[:]
+    start = time.time()
+    ok, lines = x.cmd("net name mute.test", timeout=30)
+    took = time.time() - start
+    check("net name: a server that says nothing is asked three times, then given up", not ok and lines == ["The name server did not answer."] and names_asked == ["mute.test"] * 3 and 2 < took < 10, (lines, names_asked, took))
+    ok, lines = x.cmd("net name 10.0.2.2")
+    check("net name: wants a name", not ok and lines == ["Type net name and the name of a machine: net name example.org"], lines)
+    ok, lines = x.cmd("net names there")
+    check("net names: wants an address", not ok and lines == ["Type net names and the address of a name server: net names 192.168.1.1"], lines)
+    del asked_of_us[:]
+    named = "xila.test:%d" % serving.server_address[1]
+    ok, lines = x.cmd("net get %s/some/page" % named)
+    check("net get: a machine asked by its name", ok and lines == [named + " answered 200.", "hello from the host", "you asked for /some/page"], lines)
+    check("net get: the machine is told the name it was asked by", asked_of_us == [("/some/page", named)], asked_of_us)
+    ok, lines = x.cmd("net get none.test/page")
+    check("net get: a name nobody has: nothing is asked, and it is a failure", not ok and lines == ["The name server knows no machine of that name."] and len(asked_of_us) == 1, (lines, asked_of_us))
+    # the card set up again: the names are those of the network again
+    x.cmd("net restart")
+    for _ in range(80):
+        if net_says().get("address") == "10.0.2.15":
+            break
+        time.sleep(0.25)
+    check("net restart: the name server is again the one the network named", net_says().get("name server") == "10.0.2.3", net_says())
+    ok, lines = x.cmd("net name xila.test", timeout=30)
+    check("net restart: and what the other one said is forgotten", not ok, lines)
+    # A name of the Internet, asked of a server of the Internet, if this
+    # machine can reach one. Not of the server the network named: QEMU
+    # passes those questions on to this machine's own, and with some (a
+    # VPN's) no answer comes back.
+    public = "1.1.1.1"
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.settimeout(2)
+    try:
+        probe.sendto(b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01", (public, 53))
+        online = probe.recvfrom(512)[0][:2] == b"\x12\x34"
+    except OSError:
+        online = False
+    probe.close()
+    if online:
+        x.cmd("net names " + public)
+        ok, lines = x.cmd("net name example.com", timeout=30)
+        check("net name: a name of the Internet, asked of a server of the Internet", ok and re.fullmatch(r"example\.com is at \d+\.\d+\.\d+\.\d+\.", lines[0]), lines)
+        ok, lines = x.cmd("net name www.github.com", timeout=30)
+        check("net name: one that is another name for a machine, as real servers say it", ok and re.fullmatch(r"www\.github\.com is at \d+\.\d+\.\d+\.\d+\.", lines[0]), lines)
+    else:
+        print("skip  net name: a name of the Internet (no name server of the Internet answers this machine)")
+    check("names: the rest of the network is as it was", x.cmd("net ping 10.0.2.2")[1][0].startswith("10.0.2.2 answered in "))
+    listening.close()
 serving.shutdown()
 mute.close()
 

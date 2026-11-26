@@ -179,6 +179,7 @@ hardware differs:
 7. the network: DHCP, ping, the captured frames re-read by other code
    for lengths and checksums; the remote prompt; the web pages fetched
    with `urllib`; `net get` against a small HTTP server on the host;
+   names against a small name server on the host;
 8. the clock a quarter of a minute before midnight; kept settings;
 9. two pictures shown in turn (the trial kind, in memory);
 10. QR codes, read back by the reader of macOS;

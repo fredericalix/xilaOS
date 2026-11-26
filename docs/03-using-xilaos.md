@@ -535,6 +535,7 @@ See [Networking](10-networking.md).
 |---|---|
 | `net` | The network card, the cable, the address, the counters. |
 | `net ping address`, `net get place`, `net restart`, `net registers` | Asks another machine to answer; fetches a page; sets the card up again; lists its registers. |
+| `net name name`, `net names address` | Finds the address of a machine known by its name; sets who is asked for names. |
 | `remote [on\|off]` | Opens this prompt to the local network, or closes it. |
 | `web [on\|off]` | Shows the tables to browsers of the local network, or stops. |
 | `install from address` | Fetches a newer system from a machine that serves it. |
