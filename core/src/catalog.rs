@@ -137,7 +137,13 @@ impl System {
                 if let Some(ids) = ids(first, last) {
                     let mut each = |fields: &[xila_db::Field]| visit(&row_from(fields, &kinds));
                     let read = if apart { self.db.scan_apart(index, ids, &mut each) } else { self.db.scan_ids(index, ids, &mut each) };
-                    read.map_err(|error| engine_error(error, None))?;
+                    read.map_err(|error| {
+                        // a page that does not read as it was written: said as an event too
+                        if matches!(error, xila_db::Error::Damaged(_)) {
+                            self.damaged.set(self.damaged.get() + 1);
+                        }
+                        engine_error(error, None)
+                    })?;
                 }
             }
             return Ok(());

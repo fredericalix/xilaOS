@@ -432,8 +432,9 @@ On an unknown PC this is the first thing to look at.
 through since the start, whether the disk gave them or they were still in
 memory: read it before and after a query to see what the query cost.
 
-`disk check` reads every page of every stored table and checks it: its
-checksum, the order of its tree, the count of its rows. It changes nothing.
+`disk check` reads every page of every stored table from the disk and
+checks it: its checksum, the order of its tree, the count of its rows.
+It changes nothing.
 
 ```
 XilaOS|all:/>disk check

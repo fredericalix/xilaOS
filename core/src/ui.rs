@@ -411,6 +411,11 @@ impl Ui {
         // The programs that run by themselves; what they say goes to the log.
         let rows = self.terms[1].len();
         crate::lang::background(sys, &mut TermOut { term: &mut self.terms[1] });
+        // What changed in the state of the system is said, for who listens
+        // and for the programs that wait for it. After the programs had
+        // their turn: at the first tick they have just been read from the
+        // tables, and only then can one of them hear that the system started.
+        crate::watch::look(sys);
         if self.terms[1].len() != rows {
             sys.log_rows = self.terms[1].len();
             self.dirty = true;
@@ -432,6 +437,18 @@ impl Ui {
             let term = &mut self.terms[COMPANION];
             term.scroll = 0;
             crate::companion::tell(sys, crate::companion::HERE, COLS - 1 - head.len(), &mut ChatOut { term, head, first: true, ink: role::TERM_OUT });
+            self.dirty = true;
+        }
+        // What a program that runs by itself asks the companion, when its
+        // turn has come: written in the conversation, under the program's name.
+        if let Some((who, text, asked)) = crate::companion::next(sys) {
+            let term = &mut self.terms[COMPANION];
+            let head = Ui::speaker(sys, who.bytes());
+            let mut said = ChatOut { term, head, first: true, ink: role::TERM_CMD };
+            crate::text::wrap(text.bytes(), COLS - 1 - head.len(), &mut |part| said.line(Style::Out, part));
+            if let Err(message) = asked {
+                ChatOut { term, head: FixedStr::from_bytes(b"      * "), first: true, ink: role::ERROR }.line(Style::Error, message.bytes());
+            }
             self.dirty = true;
         }
         let lost = sys.events.take_lost(events::SCREEN);
@@ -923,6 +940,53 @@ mod tests {
         // Esc goes back to the overview, as on the other screens
         ui.key(&mut sys, key(Key::Esc));
         assert_eq!(sys.screen, 0);
+    }
+
+    #[test]
+    fn a_program_asks_the_companion_and_the_answer_is_on_its_screen() {
+        let (mut ui, mut sys) = start();
+        sys.net.ip = Some([10, 0, 2, 15]);
+        crate::secrets::set(&mut sys.db, b"openrouter", b"sk-or-v1-secret").unwrap();
+        for line in ["create table expenses (label text, amount int)", "on insert into expenses", "if new.amount > 50", "ask is {new.label} at {new.amount} unusual?", "end", "end", "on notify alerts", "ask what does '{text}' mean?", "end"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        // a small expense: nothing is asked
+        ui.run(&mut sys, b"insert into expenses values ('coffee', 3)");
+        ui.tick(&mut sys, 1);
+        assert_eq!((sys.companion.stage, sys.companion.waiting()), (crate::companion::Stage::Idle, 0));
+        // a large one, and an alert right after: asked one after the other, each under the name of its program
+        ui.run(&mut sys, b"insert into expenses values ('a boat', 9000)");
+        ui.run(&mut sys, b"notify alerts 'the disk is full'");
+        ui.tick(&mut sys, 1);
+        assert_eq!((sys.companion.stage, sys.companion.asker, sys.companion.waiting()), (crate::companion::Stage::Calling, crate::companion::HERE, 1));
+        ui.key(&mut sys, alt_digit(2));
+        ui.render(&mut sys);
+        assert_eq!(body(&ui), ["<on_insert_expenses> is a boat at 9000 unusual?", "(thinking)"]);
+        crate::companion::heard(&mut sys, Ok((200, br#"{"choices":[{"message":{"content":"Yes: the others are under ten."}}]}"#)));
+        ui.tick(&mut sys, 1);
+        ui.render(&mut sys);
+        // the answer, then the next question, which was waiting
+        assert_eq!(body(&ui)[1..], ["<xila> Yes: the others are under ten.", "<on_notify_alerts> what does 'the disk is full' mean?", "(thinking)"]);
+        assert_eq!(sys.companion.waiting(), 0);
+        crate::companion::heard(&mut sys, Ok((200, br#"{"choices":[{"message":{"content":"That no more can be kept."}}]}"#)));
+        ui.tick(&mut sys, 1);
+        ui.render(&mut sys);
+        assert_eq!(body(&ui)[3..], ["<xila> That no more can be kept.", "<you>"]);
+        // nothing of it went to the prompt's screen, but for what the commands said there
+        ui.key(&mut sys, alt_digit(0));
+        ui.render(&mut sys);
+        assert!(!body(&ui).iter().any(|row| row.contains("under ten") || row.contains("no more can be kept")), "{:?}", body(&ui));
+        // more questions than can wait: the ninth is let go, and said so in the log
+        for _ in 0..12 {
+            ui.run(&mut sys, b"notify alerts 'again'");
+        }
+        ui.tick(&mut sys, 1);
+        ui.tick(&mut sys, 1);
+        assert_eq!((sys.companion.stage, sys.companion.waiting()), (crate::companion::Stage::Calling, 8));
+        assert_eq!(sys.companion.dropped, 3);
+        ui.key(&mut sys, alt_digit(1));
+        ui.render(&mut sys);
+        assert!(body(&ui).iter().any(|row| row == "on_notify_alerts: Eight questions wait for the companion: this one is let go."), "{:?}", body(&ui));
     }
 
     #[test]

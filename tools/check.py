@@ -1433,6 +1433,41 @@ with Xila(net="e1000e") as x:
     back = x.peek()
     check("companion screen: [Esc] goes back, and the prompt's screen did not get the answer", "OVERVIEW" in back[4] and not any("On my own screen." in row for row in back), [row for row in back if row.strip()][-3:])
     check("companion screen: it is one of the screens", [row["name"] for row in x.table("select name from screens")] == ["overview", "boot log", "companion"])
+    # A program that runs by itself asks the companion: nobody waits, and
+    # what is said is on the companion's screen, under the program's name.
+    for line in ("on notify alerts", "ask the alert says: {text}. Anything to do?", "end"):
+        x.cmd(line)
+    model_says[:] = [{"said": "Nothing to do."}]
+    asked_before = len(model_asked)
+    x.cmd("notify alerts 'the disk is full'")
+    for _ in range(60):
+        if len(model_asked) > asked_before and any("Nothing to do." in row for row in x.peek()):
+            break
+        time.sleep(0.2)
+    check("ask in a program: what happened is asked about, with its values in the question", len(model_asked) > asked_before and model_asked[-1][1]["messages"][-1]["content"] == "the alert says: the disk is full. Anything to do?", model_asked[-1][1]["messages"][-1])
+    x.key("alt-2", 0.4)
+    said = [row.rstrip() for row in x.peek() if row.strip()]
+    check("ask in a program: question and answer are on the companion's screen, under the program's name", re.fullmatch(r"\d\d:\d\d <on_notify_alerts> the alert says: the disk is full\. Anything to do\?", said[-3]) and re.fullmatch(r"\d\d:\d\d <xila> Nothing to do\.", said[-2]), said[-3:])
+    x.key("esc", 0.4)
+    # What happens to the machine is said on channels: the network here.
+    x.cmd("listen network")
+    x.cmd("listen tasks")
+    x.events.clear()
+    x.monitor("set_link net0 off")
+    time.sleep(2.5)
+    x.cmd("")
+    check("events: a cable that is pulled out is said", ("network", "cable out") in x.events, x.events)
+    x.monitor("set_link net0 on")
+    time.sleep(2.5)
+    x.cmd("")
+    check("events: and one that is put back", ("network", "cable in") in x.events, x.events)
+    x.events.clear()
+    x.cmd("spin")
+    time.sleep(13)
+    x.cmd("")
+    check("events: a task that leaves nothing to the others for ten seconds is named", ("tasks", "spin has the processor to itself") in x.events, x.events)
+    spinning = [row["id"] for row in x.table("tasks") if row["name"] == "spin"]
+    x.cmd("stop " + (spinning[0] if spinning else "9"))
     told = {row["item"]: row["value"] for row in x.table("companion")}
     check("companion: says who it is and what it has done", (told.get("model"), told.get("key"), told.get("character"), told.get("now"), told.get("queries run for it")) == ("made-up/model", "openrouter: kept", "You are brief.", "nothing asked", "5"), told)
 
@@ -1492,6 +1527,24 @@ with Xila(more=["-rtc", "base=2026-03-04T23:59:45"]) as x:
     x.cmd("every day at noon")
     ok, lines = x.cmd("end")
     check("every day at: wants a time", not ok and lines == ["Write: every 5 minutes (or seconds, hours, days), or every day at 8:00"], lines)
+
+# The start of the system is an event, and so is the address the network
+# gives: programs kept on the disk hear both at the next start.
+start_disk = blank_disk(os.path.join(ROOT, "build", "start.img"))
+with Xila(disk=start_disk, net="e1000e") as x:
+    for line in ("on notify start", "say 'started: ' + text", "end", "on notify network", "say 'the network says: ' + text", "end"):
+        x.cmd(line)
+    time.sleep(0.3)
+with Xila(disk=start_disk, net="e1000e") as x:
+    for _ in range(40):
+        if {row["item"]: row["value"] for row in x.table("net")}.get("address") == "10.0.2.15":
+            break
+        time.sleep(0.25)
+    time.sleep(1.5)
+    x.key("alt-1", 0.5)
+    log = [row.rstrip() for row in x.peek() if row.strip()]
+    check("events: the start of the system is said, and a program kept on the disk hears it", "on_notify_start: started: XilaOS 0.1" in log, log[-4:])
+    check("events: so is the address the network gave", "on_notify_network: the network says: address 10.0.2.15" in log, log[-4:])
 
 # Keys to services: kept on the disk, and shown by nothing.
 keys_disk = blank_disk(os.path.join(ROOT, "build", "keys.img"))

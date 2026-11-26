@@ -359,6 +359,24 @@ What the system sends by itself:
 | `create`, `drop` | The table itself was made or removed. |
 | `program report`, `drop report` | On the channel `programs`: a program was kept or removed. |
 
+The machine says what happens to it in the same way, on five channels
+of its own. Nothing has to be made for them: `listen network` is
+enough.
+
+| Channel | Event text | When |
+|---|---|---|
+| `start` | `XilaOS 0.1` | The system has started. Only a program kept on the disk can hear it. |
+| `network` | `cable in`, `cable out` | The cable of the network card. |
+| `network` | `address 10.0.2.15`, `address lost` | The address the network gives. |
+| `network` | `remote closed: wrong codes`, `web closed: wrong codes` | A door closed itself after twenty wrong codes. |
+| `disk` | `almost full: 9 of 10 pages used` | Nine tenths of the place for the tables are taken. |
+| `disk` | `stopped: a write failed`, `damaged page found` | The disk failed a write; a page did not read as it was written. |
+| `tasks` | `spin has the processor to itself` | A task other than `idle` kept nine tenths of the processor for ten seconds. |
+| `memory` | `short: 1900 KB free` | Less than a tenth of the kernel's memory is free. |
+
+The system looks once a second and says what has become true since:
+each thing once, and nothing of what lasted less than a second.
+
 - **An event says little**: the channel and a short text. Who receives it
   reads the row with a query, by its id.
 - **Events are sent after the commit.** A statement that fails sends none.

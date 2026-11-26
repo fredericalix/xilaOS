@@ -58,6 +58,8 @@ pub const ANSWER: usize = 64 * 1024;
 /// Who asked, when it was asked on the companion's own screen: no
 /// session of a prompt.
 pub const HERE: usize = usize::MAX;
+/// Questions of programs that wait their turn, at most.
+const WAITING: usize = 8;
 /// Ticks of silence a model is waited for: it may think for a while.
 pub const PATIENCE: u64 = 9000;
 
@@ -134,11 +136,21 @@ pub struct Companion {
     /// Calls made to the model since the start, and queries run for it.
     pub calls: u64,
     pub queries: u64,
+    /// What programs asked while it was busy, and which program: asked in
+    /// turn. And how many were let go because too many waited already.
+    waiting: [(FixedStr<ASKED>, crate::sql::Name); WAITING],
+    waiting_len: usize,
+    pub dropped: u64,
 }
 
 impl Companion {
     pub const fn new() -> Companion {
-        Companion { stage: Stage::Idle, turn: 0, rounds: 0, asker: 0, outcome: None, since: 0, refusal: FixedStr::new(), calls: 0, queries: 0 }
+        Companion { stage: Stage::Idle, turn: 0, rounds: 0, asker: 0, outcome: None, since: 0, refusal: FixedStr::new(), calls: 0, queries: 0, waiting: [(FixedStr::new(), FixedStr::new()); WAITING], waiting_len: 0, dropped: 0 }
+    }
+
+    /// Questions of programs that wait their turn.
+    pub fn waiting(&self) -> usize {
+        self.waiting_len
     }
 }
 
@@ -268,6 +280,40 @@ pub fn ask(sys: &mut System, text: &[u8], asker: usize) -> Result<(), Message> {
     (companion.stage, companion.turn, companion.rounds, companion.asker, companion.outcome, companion.since) = (Stage::Calling, turn, 0, asker, None, ticks);
     companion.refusal.clear();
     Ok(())
+}
+
+/// Takes a question from a program that runs by itself. Nobody waits
+/// for the answer: the question takes its turn, and what is said is
+/// written on the companion's screen. `who` is the name of the program.
+pub fn ask_later(sys: &mut System, text: &[u8], who: &[u8]) -> Result<(), Message> {
+    let text = text.trim_ascii();
+    if text.is_empty() || text.len() > ASKED {
+        return Err(Message::from_bytes(b"ask wants something to ask, of 150 characters at most."));
+    }
+    let companion = &mut sys.companion;
+    if companion.waiting_len == WAITING {
+        companion.dropped += 1;
+        return Err(Message::from_bytes(b"Eight questions wait for the companion: this one is let go."));
+    }
+    companion.waiting[companion.waiting_len] = (FixedStr::from_bytes(text), crate::sql::Name::from_bytes(who));
+    companion.waiting_len += 1;
+    Ok(())
+}
+
+/// Asks the next question a program left, when nothing else is being
+/// answered and whoever asked last has been told. Returns which program
+/// asked, what, and why not if it could not be asked: for the
+/// companion's screen, where all of it is written.
+pub fn next(sys: &mut System) -> Option<(crate::sql::Name, FixedStr<ASKED>, Result<(), Message>)> {
+    let companion = &mut sys.companion;
+    if companion.stage != Stage::Idle || companion.outcome.is_some() || companion.waiting_len == 0 {
+        return None;
+    }
+    let (text, who) = companion.waiting[0];
+    companion.waiting.copy_within(1..companion.waiting_len, 0);
+    companion.waiting_len -= 1;
+    let asked = ask(sys, text.bytes(), HERE);
+    Some((who, text, asked))
 }
 
 /// Gives up the question that is being answered.

@@ -248,7 +248,37 @@ of the program:
 | `text` | The text that was sent, for `on notify`. |
 
 `on insert`, `on update` and `on delete` take a stored table that exists. A
-system view is refused: it does not say when it changes.
+system view is refused: it does not say when it changes. What happens to
+the machine itself is heard with `on notify`: the channels `start`,
+`network`, `disk`, `tasks` and `memory`
+([LISTEN / NOTIFY](04-sql.md#listen-notify)).
+
+### Asking the companion
+
+A program can ask the [companion](14-the-companion.md) something, which
+is how the companion reacts to what happens:
+
+```
+on insert into expenses
+    if new.amount > 50
+        ask is {new.label} at {new.amount} unusual among my expenses?
+    end
+end
+
+every day at 8:00
+    ask sum up what the tables say changed since yesterday
+end
+
+on notify network
+    ask the network says: {text}. Is there anything I should do?
+end
+```
+
+`ask` takes the rest of the line as it is. Between `{` and `}`, a name
+or a calculation is replaced by its value. The program does not wait:
+the question takes its turn (eight may wait), and what is asked and
+answered is written on the companion's screen, under the name of the
+program.
 
 ### How they run
 

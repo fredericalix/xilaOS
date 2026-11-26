@@ -16,9 +16,9 @@ lives in.
 > and the server reads them: that is what it is for. Do not ask it
 > about tables that must stay here.
 
-This is its first form. It answers and it reads. It does not act, it
-keeps no notes and it does not react to what happens yet: see
-[what is left](#what-is-left).
+This is its first form. It answers, it reads, and it can be asked by a
+program when something happens. It does not act and it keeps no notes
+yet: see [what is left](#what-is-left).
 
 ## Asking
 
@@ -87,6 +87,46 @@ to an `ask` typed at the prompt comes at the prompt.
 The screen shows what was said since the machine started. What was
 said before is in the table `talk`, and still goes along with the
 next question.
+
+## Asked by a program: reacting to what happens
+
+`ask` is a statement like any other, so a program that runs by itself
+can ask the companion, and that is how the companion reacts to what
+happens: to a change in a table, to the clock, to the machine.
+
+```
+on insert into expenses
+    if new.amount > 50
+        ask is {new.label} at {new.amount} unusual among my expenses?
+    end
+end
+
+every day at 8:00
+    ask sum up what the tables say changed since yesterday
+end
+
+on notify network
+    ask the network says: {text}. Is there anything I should do?
+end
+```
+
+Between `{` and `}`, a name or a calculation is replaced by its value:
+what the row held, what the event said. The machine tells of itself on
+the channels `start`, `network`, `disk`, `tasks` and `memory`
+([LISTEN / NOTIFY](04-sql.md#listen-notify)).
+
+Nobody waits for such a question. It takes its turn behind the one
+being answered (eight may wait; the ninth is let go, and the log says
+so), and what is asked and answered is written on the companion's
+screen, under the name of the program:
+
+```
+19:36 <on_notify_alerts> the alert says: the disk is full. Anything to do?
+19:36 <xila> Nothing to do.
+```
+
+Each such question is a call to the model, and so has a price. What
+decides how often is the program: an `if`, a channel, an hour.
 
 ## What it sees
 
@@ -223,9 +263,8 @@ and against the real one when a key and the Internet are there.
   `disk erase`, `remote on` and `web on` refused to it. Until then it
   only reads.
 - **Notes** of its own, kept from one conversation to the next.
-- **Reacting** to changes in a table, to the state of the system, to
-  the clock; being called by a XilaScript program, and asked from the
-  prompt over the network.
+- Being asked from the prompt over the network, and a way for a
+  program to use the answer: today it is only shown.
 - Longer questions and answers, results that are not cut, and a
   conversation that is summed up instead of losing its oldest turns.
 - The other companions: more rows of `companions`.

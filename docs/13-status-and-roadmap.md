@@ -29,7 +29,7 @@ were also tried on the real machine.
 | SATA (AHCI), GPT partition of XilaOS's type | yes | yes |
 | `install`, `install system`, the USB stick image | yes | yes |
 | SQL: `SELECT`, `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`, expressions | yes | yes |
-| `disk check`: every page of the tables read and checked | yes | not tried |
+| `disk check`: every page of the tables read from the disk and checked (until 26 November 2026 a page already in memory was not read again) | yes | not tried |
 | SQL: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; rows reached by their `id`; `JOIN` and `LEFT JOIN` of two tables | yes | not tried |
 | `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | not tried |
 | LISTEN / NOTIFY | yes | yes |
@@ -42,6 +42,8 @@ were also tried on the real machine.
 | TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | not tried |
 | HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | not tried |
 | Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | not tried |
+| What happens to the machine said as events: `start`, `network`, `disk`, `tasks`, `memory` | yes; `disk` and `memory` by unit tests only | not tried |
+| The companion asked by programs (`ask` in an `on` or `every` program), which is how it reacts to what happens | yes | not tried |
 | The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
@@ -49,8 +51,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 26 November 2026: about 29,500 lines, 289
-unit tests, 440 system checks.
+about 300 system checks. On 26 November 2026: about 29,500 lines, 295
+unit tests, 447 system checks.
 
 ## Known limits of what is done
 
@@ -304,13 +306,17 @@ waits for it but who asked. It is described in
 Its screen came next, the same day: `Alt`+`2`, where what is typed is
 for the companion and what is said is written as a conversation.
 
+Reacting came after: a program that runs by itself can ask the
+companion (`ask`, with the values of what happened between braces),
+and what happens to the machine is said as events that such a program
+hears: its start, the network, the disk, the tasks, the memory.
+
 What is left:
 
-6. **Acting, notes, events**: commands it runs and data it changes,
-   each written in a table, with a command that stops it and four
-   commands refused to it; notes of its own; reactions to changes in
-   a table, to the state of the system and to the clock; a call from
-   a XilaScript program.
+6. **Acting and notes**: commands it runs and data it changes, each
+   written in a table, with a command that stops it and four commands
+   refused to it; notes of its own, kept from one conversation to the
+   next.
 
 Two things of the plan were not needed in the form they had: texts
 longer than 48 characters in SQL (what is said is kept as long lines
@@ -490,7 +496,6 @@ author's agreement. The order that was agreed:
 - What exactly is taken from OS/400: typed objects, single-level
   storage, or both.
 - One user, or several.
-- Which states of the system are events the companion hears.
 - How a HyperCard-like is driven with the keyboard alone.
 - Where a tenth system view goes: the `data` plot of the city has
   room for nine.

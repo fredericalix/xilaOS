@@ -970,6 +970,14 @@ pub struct System {
     /// it went and the start of what was said.
     /// The companion: what it is asked, and how far its answer is.
     pub companion: crate::companion::Companion,
+    /// The program that runs by itself now, if one does: who asks, when a
+    /// program asks the companion.
+    pub firing: Name,
+    /// What was last seen of the state of the system, to say what changes.
+    pub watch: crate::watch::Watch,
+    /// Pages of the tables found damaged since the start. Counted where
+    /// tables are read, which only looks at the system: hence the cell.
+    pub damaged: core::cell::Cell<u64>,
     pub asked_machine: crate::dns::Name,
     pub asked_path: FixedStr<200>,
     pub asked_text: Text,
@@ -1064,6 +1072,9 @@ impl System {
             installed: None,
             fetched: None,
             companion: crate::companion::Companion::new(),
+            firing: Name::new(),
+            watch: crate::watch::Watch::new(),
+            damaged: core::cell::Cell::new(0),
             asked_machine: FixedStr::new(),
             asked_path: FixedStr::new(),
             asked_text: Text::new(),
@@ -1636,6 +1647,9 @@ fn disk(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
                     true
                 }
                 Err(error) => {
+                    if matches!(error, xila_db::Error::Damaged(_)) {
+                        sys.damaged.set(sys.damaged.get() + 1);
+                    }
                     out.line(Style::Error, crate::change::engine_error(error, None).bytes());
                     out.line(Style::Error, b"The check stopped there. Nothing was changed.");
                     false
@@ -2342,13 +2356,56 @@ fn trim_end(bytes: &[u8]) -> &[u8] {
 /// `ask how many tasks are running?`: a question to the companion. Its
 /// answer comes when the model has given it: on the screen it is shown
 /// then, and the prompt is free meanwhile; the serial port waits for it.
+///
+/// In a program that runs by itself (`on insert into expenses`, `every
+/// day at 8:00`) nobody waits: the question takes its turn and what is
+/// said is written on the companion's screen. Between `{` and `}`, a
+/// name or a calculation is replaced by its value: `ask is {new.label}
+/// at {new.amount} unusual?`.
 fn ask(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
-    // the answer has to find its way back: those two sessions know how
-    if sys.session != crate::events::SCREEN && sys.session != crate::events::SERIAL {
-        out.line(Style::Error, b"ask is typed at the machine itself, or on its serial port.");
+    // what is asked, with the values of what stands between braces
+    let mut text = FixedStr::<{ crate::companion::ASKED }>::new();
+    let mut rest = arg;
+    let mut whole = true;
+    while let Some(open) = rest.iter().position(|byte| *byte == b'{') {
+        let Some(length) = rest[open..].iter().position(|byte| *byte == b'}') else {
+            break;
+        };
+        let mut lexer = crate::sql::Lexer::new(&rest[open + 1..open + length]);
+        let names = crate::expr::Names::without(&sys.vars[sys.session], b"Between { and } goes a name that has a value, or a calculation, not: ");
+        let value = crate::expr::parse(&mut lexer, names).and_then(|value| lexer.end().map(|_| value)).and_then(|value| value.eval(&[crate::sql::Value::Null; TABLE_COLS]));
+        match value {
+            Ok(value) => {
+                text.push_bytes(&rest[..open]);
+                for &byte in value.shown().bytes() {
+                    whole &= text.push(byte);
+                }
+            }
+            Err(message) => {
+                out.line(Style::Error, message.bytes());
+                return false;
+            }
+        }
+        rest = &rest[open + length + 1..];
+    }
+    for &byte in rest {
+        whole &= text.push(byte);
+    }
+    if !whole {
+        out.line(Style::Error, b"What is asked is 150 characters at most, values included.");
         return false;
     }
-    match crate::companion::ask(sys, arg, sys.session) {
+    let asked = match sys.session {
+        // a program that runs by itself: nobody waits, the question takes its turn
+        crate::events::BACKGROUND => {
+            let who = sys.firing;
+            crate::companion::ask_later(sys, text.bytes(), who.bytes())
+        }
+        crate::events::SCREEN | crate::events::SERIAL => crate::companion::ask(sys, text.bytes(), sys.session),
+        // the answer has to find its way back: from the network it would not
+        _ => Err(crate::sql::Message::from_bytes(b"ask is typed at the machine itself, or on its serial port.")),
+    };
+    match asked {
         Ok(()) => true,
         Err(message) => {
             out.line(Style::Error, message.bytes());
@@ -2757,18 +2814,31 @@ pub mod tests {
         let used = sys.db.storage().used;
         let (ok, out) = run_line(&mut sys, "disk check");
         assert_eq!((ok, out.lines), (true, vec![format!("The tables were read whole: {used} pages ({} KB), every one is right.", used * 4)]));
-        // one page after the other comes back changed: each time the check says which
-        let mut found = 0;
+        // one page after the other comes back changed: each time the check says which,
+        // though the page was read before and is kept in memory
+        let (mut found, mut met) = (0, 0);
         for page in 0..256 {
             rotten.set(Some(page));
             let (ok, out) = run_line(&mut sys, "disk check");
             if !ok {
                 assert_eq!(out.lines, [format!("The database is damaged: page {page} cannot be read."), "The check stopped there. Nothing was changed.".to_string()]);
                 found += 1;
+                // a query that has to read that page from the disk meets it too
+                met += !run_line(&mut sys, "select count(*) from notes").0 as u64;
             }
         }
-        // the two headers are not pages of the trees
-        assert_eq!(found, used - 2);
+        // every page of the trees (the two headers are not counted among the used)
+        assert_eq!(found, used);
+        assert!(met >= 1);
+        // each was counted, and is said as an event of the disk at the next look, once
+        assert_eq!(sys.damaged.get(), found + met);
+        run_line(&mut sys, "listen disk");
+        crate::watch::look(&mut sys);
+        let mut events = Vec::new();
+        while let Some(event) = sys.events.take(crate::events::SCREEN) {
+            events.push((String::from_utf8_lossy(event.channel.bytes()).to_string(), String::from_utf8_lossy(event.text.bytes()).to_string()));
+        }
+        assert_eq!(events, [("disk".to_string(), "damaged page found".to_string())]);
         rotten.set(None);
         assert!(run_line(&mut sys, "disk check").0);
         assert_eq!(run_line(&mut sys, "disk nonsense").1.lines, ["Usage: disk, disk check, or disk erase"]);
@@ -3440,6 +3510,23 @@ pub mod tests {
             assert!(told.lines.len() == 1 && told.lines[0].len() > 20 && told.lines[0].len() < COLS, "{:?}", told.lines);
         }
         assert_eq!(run_line(&mut sys, "companion").1.lines[6], "   calls to the model  8");
+        // between braces, a name or a calculation gives its value to what is asked
+        run_line(&mut sys, "let limit = 50");
+        assert!(run_line(&mut sys, "ask is {limit * 2} more than {limit}, {'yes' || ' or no'}? {not closed").0);
+        let mut asked = Vec::new();
+        let table = sys.db.find(b"talk").unwrap();
+        sys.db.scan(table, &mut |fields| {
+            if let xila_db::Field::Text(text) = fields[3] {
+                asked.push(String::from_utf8_lossy(text).to_string());
+            }
+        })
+        .unwrap();
+        assert_eq!(asked.last().unwrap(), "is 100 more than 50, yes or no? {not closed");
+        heard(&mut sys, Err(crate::ask::Failed::Silent));
+        tell(&mut sys, crate::events::SERIAL, COLS - 1, &mut Lines::default());
+        assert_eq!(run_line(&mut sys, "ask is {nothing} there?").1.lines, ["Between { and } goes a name that has a value, or a calculation, not: nothing"]);
+        assert_eq!(run_line(&mut sys, &format!("ask {} {{limit}}", "x".repeat(148))).1.lines, ["What is asked is 150 characters at most, values included."]);
+        assert_eq!(sys.companion.stage, Stage::Idle);
     }
 
     #[test]

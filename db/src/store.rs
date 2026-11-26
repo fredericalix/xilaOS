@@ -314,6 +314,13 @@ impl Store {
         Err(Error::Full)
     }
 
+    /// Forgets the pages kept in memory, so that the next reads are of the
+    /// volume itself: for who wants to know what the volume holds now,
+    /// not what it held when it was last read.
+    pub(crate) fn forget(&mut self) {
+        self.cache.clear();
+    }
+
     fn keep(&mut self, page: u64, data: Box<Page>) {
         if !self.volume.keeps() {
             // the volume is memory already

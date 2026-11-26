@@ -44,6 +44,7 @@ pub mod text;
 pub mod tftp;
 pub mod theme;
 pub mod ui;
+pub mod watch;
 pub mod web;
 
 /// Version shown in the header and by `about`.

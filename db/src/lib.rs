@@ -804,6 +804,10 @@ impl Database {
         let Some(store) = slot.as_mut() else {
             return Ok(());
         };
+        // every page is read from the volume, with its checksum: a page
+        // kept in memory from an earlier read would say nothing of what
+        // the volume holds now
+        store.forget();
         let mut seen = BTreeSet::new();
         let mut each = |page: u64| if seen.insert(page) { Ok(()) } else { Err(Error::Damaged(page)) };
         let catalog = store.catalog();

@@ -1044,6 +1044,8 @@ fn describe(sys: &mut System, happened: &Happened) -> Result<bool, Message> {
 /// and with its name before what it says.
 fn fire(sys: &mut System, program: &[u8], happened: Option<&Happened>, out: &mut dyn Out) {
     let session = core::mem::replace(&mut sys.session, BACKGROUND);
+    // who asks, if this program asks the companion something
+    sys.firing = crate::sql::Name::from_bytes(program);
     sys.vars[BACKGROUND] = Vars::new();
     sys.vars[BACKGROUND].clock = sys.now();
     // what this program causes is one step further down the chain
@@ -1063,6 +1065,7 @@ fn fire(sys: &mut System, program: &[u8], happened: Option<&Happened>, out: &mut
         Err(message) => named.line(Style::Error, message.bytes()),
     }
     sys.events.depth = 0;
+    sys.firing.clear();
     sys.session = session;
 }
 
