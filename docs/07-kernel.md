@@ -3,9 +3,10 @@
 The kernel is the crate `xila-kernel`, in `kernel/`: about 4,700 lines
 of Rust, some 260 of them assembly for the interrupt entry points (most
 of those are the 32 exception stubs).
-It has no dependency outside the workspace, builds with stable Rust for
-the target `x86_64-unknown-uefi`, and comes out as one file,
-`BOOTX64.EFI`, of a little under 1 MB.
+It builds with stable Rust for the target `x86_64-unknown-uefi` and
+comes out as one file, `BOOTX64.EFI`, of 1.4 MB, of which 0.4 MB are
+TLS: the only code in it that comes from outside the workspace (see
+[Networking](10-networking.md#tls)).
 
 It is a small kernel in the plainest sense: it owns the machine and
 everything runs inside it.
@@ -53,7 +54,7 @@ partition and calls `efi_main` with a handle and a table of services.
 
 ```text
  efi_main (main.rs)
-   Serial::init                 COM1 at 115200 baud, tested by loop-back
+   Serial::init                 COM1 at 115200 baud, tested by loop-back, interrupts off
    uefi::boot
      graphics                   list the modes, pick one, describe the framebuffer
      own_file                   read BOOTX64.EFI itself into memory, for `install`
@@ -113,6 +114,13 @@ stack. That task finishes the start-up, in this order:
 5. starts the `serial shell` task if there is a serial port;
 6. enters its loop.
 
+The serial port is tested first of all, while the firmware still runs:
+a byte written with the chip looped back on itself must come back. The
+firmware's console reads the same port at every tick of its timer and
+would take that byte for a key typed there, so interrupts are off for
+the test. (Before that was understood, about one start in 250 in QEMU
+found no serial port.)
+
 The boot log goes to its own screen (`Alt+1`) and to the serial port.
 In QEMU it reads:
 
@@ -135,6 +143,7 @@ Database ............ new, on the disk
 System file ......... 915 KB, kept in memory for install
 Network ............. no card XilaOS drives
 Clock ............... 2026-11-19 09:01:14
+Chance .............. none good enough for keys: no https
 Keyboard ............ layout us
 Serial port ......... development shell
 Tasks ............... switched 100 times per second
@@ -430,7 +439,7 @@ task that ran it calls `serve` (`main.rs`) right after:
 | `Measure` | Times the drawing of a whole screen (`display test`). |
 | `Flip(..)`, `Light(..)`, `Chip {..}` | Graphics chip: two pictures in turn, brightness, reading its state. |
 | `Ping(ip)`, `NetRegisters`, `NetRestart` | Network card and stack. |
-| `Get(ip, port)` | One HTTP question over TCP (`net get`), after finding the address of the machine if it was named. |
+| `Get(ip, port, secret)` | One HTTP question over TCP (`net get`), after finding the address of the machine if it was named; through TLS if asked, with keys drawn from the processor's source of chance (`arch::random`) and a client made on the heap for the time of the question. |
 | `Name` | Finds the address of a machine by its name (`net name`). |
 | `Fetch(ip)` | Fetches a system by TFTP (`install from`). |
 | `Install { disk, whole }` | Writes XilaOS on a disk. |

@@ -16,7 +16,7 @@ task, as tall as its share of the processor.
 > over two days in November 2026 and published as XilaOS 0.1; work
 > resumed on 23 November 2026, with no schedule and no promise. Do not
 > run it on a machine whose data matters: `install` erases a whole
-> disk, and nothing on the network is encrypted.
+> disk, and what it opens to the network is not encrypted.
 
 **Full documentation:** [docs/](docs/README.md), or as one file,
 [docs/xilaos.pdf](docs/xilaos.pdf).
@@ -81,13 +81,16 @@ prompt as the screen. `Ctrl+A` then `X` quits. Type `help` to begin;
 the steps for a real machine.
 
 ```sh
-cargo test -p xila-core -p xila-db          # more than 200 unit tests, on the host
+cargo test -p xila-core -p xila-db -p xila-tls   # more than 250 unit tests, on the host
 tools/build.sh && python3 tools/check.py    # more than 300 checks of the whole system, in QEMU
 ```
 
 ## Architecture
 
-About 25,000 lines of Rust in three crates, and nothing else linked in.
+About 29,500 lines of Rust in four crates. The fourth, `tls/`, is TLS
+1.3 for the pages XilaOS asks for; it is the only one that rests on
+libraries from elsewhere, for the arithmetic and for the checking of
+certificates.
 
 ```text
  ┌──────────────────────────────────────────────────────────────────┐
@@ -134,8 +137,8 @@ About 25,000 lines of Rust in three crates, and nothing else linked in.
 ## What it is not
 
 There are no programs outside the kernel, no memory protection, one
-processor core, no USB, no sound, no Wi-Fi, no encryption, no indexes in
-SQL. The plan is larger: a virtual machine for programs,
+processor core, no USB, no sound, no Wi-Fi, no encryption of what it
+serves to the network, no indexes in SQL. The plan is larger: a virtual machine for programs,
 applications as isolated zones with access lists, a mirrored disk, an
 encrypted protocol between machines.
 [Status and roadmap](docs/13-status-and-roadmap.md) says what is built,

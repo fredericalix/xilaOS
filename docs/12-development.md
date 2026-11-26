@@ -13,7 +13,7 @@ worth reusing.
 ## The commands
 
 ```sh
-cargo test -p xila-core -p xila-db           # unit tests of the logic and of the storage engine, on the host
+cargo test -p xila-core -p xila-db -p xila-tls   # unit tests of the logic, the storage engine and TLS, on the host
 cargo test -p xila-core ui::tests::menu      # one test, or a group, by name
 tools/build.sh                               # kernel -> build/esp/EFI/BOOT/BOOTX64.EFI
 python3 tools/check.py                       # the whole system in QEMU (after build.sh)
@@ -30,7 +30,7 @@ python3 tools/docs.py                        # this documentation as one PDF: do
 | `tools/build.sh` | Builds the kernel with the local cargo when it has the UEFI target, else in the Docker image `xilaos-build`, which it makes if missing. |
 | `tools/run.sh` | Builds, then QEMU with a window, 256 MB, a virtio disk on `build/data.img`, the serial port on the terminal. |
 | `tools/xq.py` | The `Xila` class and a small command line over it. |
-| `tools/check.py` | About 300 checks of the whole system, in more than thirty starts of QEMU. |
+| `tools/check.py` | About 400 checks of the whole system, in more than forty starts of QEMU. |
 | `tools/usb.sh` | The image of a USB stick, made on the host by the code of `install` itself (`core/examples/usb.rs`). |
 | `tools/netboot.py` | A proxy DHCP and TFTP server that hands the kernel to a PC starting from the network, and to `install from`. |
 | `tools/remote.py` | The client of the prompt over the network. |
@@ -41,6 +41,11 @@ Notes on building:
 
 - The kernel target is `x86_64-unknown-uefi`. `cargo build` for the
   whole workspace on the host does not work; always name the package.
+- `xila-tls` rests on libraries from the registry, so the first build
+  and the first `cargo test` fetch them and need the network. `build.sh`
+  keeps them in `target/docker-registry` when it builds in Docker.
+  Their versions are pinned in `Cargo.lock`; `.cargo/config.toml` tells
+  four of them not to use vector instructions in the kernel.
 - With Docker on macOS, a file written on the host can take a moment to
   appear in the container. `build.sh` runs `sync` first; if a build
   fails on a truncated file, build again.
@@ -179,7 +184,10 @@ hardware differs:
 7. the network: DHCP, ping, the captured frames re-read by other code
    for lengths and checksums; the remote prompt; the web pages fetched
    with `urllib`; `net get` against a small HTTP server on the host;
-   names against a small name server on the host;
+   names against a small name server on the host; TLS against OpenSSL
+   as the server, first for the crate alone on the host, then for
+   XilaOS, and against servers of the Internet when the host reaches
+   them;
 8. the clock a quarter of a minute before midnight; kept settings;
 9. two pictures shown in turn (the trial kind, in memory);
 10. QR codes, read back by the reader of macOS;

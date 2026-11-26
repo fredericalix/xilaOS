@@ -1,0 +1,28 @@
+[package]
+name = "xila-tls"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "TLS 1.3 for XilaOS, the side that calls: the protocol written here, the algorithms and the checking of certificates from established libraries"
+
+[lib]
+path = "src/lib.rs"
+
+# The only outside code of XilaOS. The protocol is written here; these are
+# the calculations it rests on, which are not to be written twice.
+[dependencies]
+# the key both sides agree on
+x25519-dalek = { version = "3", default-features = false }
+# what seals every record
+chacha20poly1305 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false, features = ["oid"] }
+hmac = { version = "0.13", default-features = false }
+# the signatures of certificates and of servers
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+rsa = { version = "0.10", default-features = false, features = ["encoding", "pkcs1v15"] }
+# whether a chain of certificates leads to an authority that is trusted
+rustls-webpki = { version = "0.103", default-features = false }
+rustls-pki-types = { version = "1", default-features = false }
+# the authorities that browsers trust
+webpki-roots = "1"

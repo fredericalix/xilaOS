@@ -22,6 +22,7 @@ mod task;
 mod uefi;
 mod virtio;
 
+use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -299,6 +300,11 @@ extern "C" fn interface(boot: usize) -> ! {
         match sys.now() {
             Some(now) => log(format_args!("Clock ............... {}", Ascii(xila_core::clock::Moment::at(now).text().bytes()))),
             None => log(format_args!("Clock ............... tells no time")),
+        }
+        // what keys are drawn from: without it nothing is asked through TLS
+        match arch::random(&mut [0; 8]) {
+            true => log(format_args!("Chance .............. the processor's own source")),
+            false => log(format_args!("Chance .............. none good enough for keys: no https")),
         }
         if kept > 0 {
             log(format_args!("Settings ............ {kept} kept from before, in the table kept_settings"));
@@ -589,9 +595,9 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
                 sys.chip = Some((chip::look(&card, generation), registers));
             }
         }
-        Some(Request::Get(to, port)) => {
+        Some(Request::Get(to, port, secret)) => {
             let got = match nic {
-                Some(nic) => get(sys, nic, to, port),
+                Some(nic) => get(sys, nic, to, port, secret),
                 None => Err(ask::Failed::NoAnswer),
             };
             sys.got = Some((port, got));
@@ -680,17 +686,33 @@ fn named(sys: &mut System, nic: &mut e1000::Nic, start: u64) -> Result<xila_core
 /// the start of what it said. The machine does nothing else meanwhile,
 /// five seconds at most, after the three at most that finding its
 /// address may take when it is asked by its name (`to` is then None).
-fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, port: u16) -> Result<(u16, FixedStr<640>), ask::Failed> {
+/// With `secret` it is asked through TLS: the client is made here, on
+/// the heap (it is 37 KB), and lives as long as the question.
+fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, port: u16, secret: bool) -> Result<(u16, FixedStr<640>), ask::Failed> {
     let start = arch::micros();
     // the time of the network, which stands still while a command is served
     let now = |sys: &System| sys.ticks + (arch::micros() - start) / 10_000;
+    // what TLS needs is looked at before anything is asked of anyone
+    let mut tls = match secret {
+        false => None,
+        true => {
+            let mut chance = [0u8; 64];
+            if !arch::random(&mut chance) {
+                return Err(ask::Failed::NoChance);
+            }
+            // the clock counts from the year 2000, certificates from 1970
+            let date = sys.now().ok_or(ask::Failed::NoClock)? + 946_684_800;
+            Some(Box::new(xila_tls::Client::new(sys.asked_machine.bytes(), &chance, date, xila_tls::public_roots())))
+        }
+    };
     let to = match to {
         Some(to) => to,
         None => named(sys, nic, start).map_err(ask::Failed::Name)?,
     };
     let (machine, path) = (sys.asked_machine, sys.asked_path);
+    let place = ask::Place { machine: machine.bytes(), ip: Some(to), port, path: path.bytes(), secret };
     let at = now(sys);
-    let mut asking = ask::Ask::start(&mut sys.net.tcp, to, port, machine.bytes(), b"GET", path.bytes(), b"", at)?;
+    let mut asking = ask::Ask::start(&mut sys.net.tcp, to, &place, b"GET", b"", at)?;
     let mut frame = [0u8; 2048];
     loop {
         while let Some(length) = nic.receive(&mut frame) {
@@ -700,7 +722,7 @@ fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, p
         }
         let at = now(sys);
         sys.net.tick(at, nic);
-        let step = asking.step(&mut sys.net.tcp, at);
+        let step = asking.step(&mut sys.net.tcp, tls.as_deref_mut(), at);
         sys.net.speak(at, nic);
         match step {
             ask::Step::Going => core::hint::spin_loop(),

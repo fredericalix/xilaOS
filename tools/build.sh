@@ -16,7 +16,9 @@ else
         printf 'FROM rust:1-slim\nRUN rustup target add x86_64-unknown-uefi\n' | docker build -t xilaos-build -
     fi
     sync
-    docker run --rm -v "$PWD":/x -w /x xilaos-build \
+    # the outside libraries (xila-tls) are fetched once and kept between builds
+    mkdir -p target/docker-registry
+    docker run --rm -v "$PWD":/x -v "$PWD/target/docker-registry":/usr/local/cargo/registry -w /x xilaos-build \
         cargo build --release -p xila-kernel --target x86_64-unknown-uefi --target-dir target/docker
     out=target/docker
 fi

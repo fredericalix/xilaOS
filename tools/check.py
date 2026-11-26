@@ -1138,7 +1138,127 @@ with Xila(net="e1000e") as x:
     else:
         print("skip  net name: a name of the Internet (no name server of the Internet answers this machine)")
     check("names: the rest of the network is as it was", x.cmd("net ping 10.0.2.2")[1][0].startswith("10.0.2.2 answered in "))
+    # The processor QEMU imitates unless told otherwise has no source of
+    # chance of its own: nothing is asked through TLS, and it is said why.
+    check("the boot log says there is no chance good enough for keys", "Chance .............. none good enough for keys: no https" in x.boot_log, x.boot_log)
+    ok, lines = x.cmd("net get https://%s/some/page" % there)
+    check("net get https: without a source of chance nothing is asked", not ok and lines == ["This processor has no source of chance: nothing here can be kept secret."], lines)
     listening.close()
+
+# TLS. First the crate by itself, on this machine, against OpenSSL as the
+# server: other code than ours on the other side, with certificates of
+# made-up authorities (tls/fixtures) that the example is told to trust.
+import shutil
+FIXTURES = os.path.join(ROOT, "tls", "fixtures")
+MEET = os.path.join(ROOT, "target", "release", "examples", "meet")
+openssl = shutil.which("openssl")
+if openssl:
+    built = subprocess.run(["cargo", "build", "--release", "-p", "xila-tls", "--example", "meet"], cwd=ROOT, capture_output=True, text=True)
+    if built.returncode != 0:
+        check("tls: the example that tries it on this machine is built", False, built.stderr[-400:])
+        openssl = None
+else:
+    print("skip  tls against OpenSSL (needs the openssl command)")
+
+
+def free_port():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def openssl_server(certificate, *more):
+    """Starts OpenSSL as a TLS server that answers any page with one of its
+    own, showing that certificate of tls/fixtures. Returns it and its port."""
+    port = free_port()
+    chain = ["-cert_chain", "between.pem"] if certificate == "leaf" else []
+    server = subprocess.Popen([openssl, "s_server", "-accept", str(port), "-cert", certificate + ".pem", "-key", certificate + "-key.pem"] + chain + ["-www", "-quiet"] + list(more),
+                              cwd=FIXTURES, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    return server, port
+
+
+def meet(port, *words):
+    return subprocess.run([MEET, "--at", "127.0.0.1:%d" % port] + list(words), capture_output=True, text=True, timeout=60).stdout.split("\n")
+
+
+if openssl:
+    root, rsa_root = os.path.join(FIXTURES, "root.der"), os.path.join(FIXTURES, "rsa-root.der")
+    curve, curve_port = openssl_server("leaf", "-tls1_3")
+    rsa, rsa_port = openssl_server("rsa-leaf", "-tls1_3")
+    said = meet(curve_port, "xila.test", "--root", root)
+    check("tls: a conversation with OpenSSL, certificates on curves", said[0] == "met: xila.test, and it said when it had finished" and "  HTTP/1.0 200 ok" in said, said[:4])
+    said = meet(rsa_port, "xila.test", "--root", rsa_root)
+    check("tls: a conversation with OpenSSL, RSA certificate and signature", said[0] == "met: xila.test, and it said when it had finished" and "  HTTP/1.0 200 ok" in said, said[:4])
+    check("tls: an authority that is not trusted is refused", meet(curve_port, "xila.test")[0] == "refused: Certificate(Unknown)" and meet(curve_port, "xila.test", "--root", rsa_root)[0] == "refused: Certificate(Unknown)")
+    check("tls: the certificate of another name is refused", meet(curve_port, "other.test", "--root", root)[0] == "refused: Certificate(WrongName)")
+    check("tls: a certificate out of its time is refused, after and before", meet(curve_port, "xila.test", "--root", root, "--days", "40000")[0] == "refused: Certificate(Expired)" and meet(curve_port, "xila.test", "--root", root, "--days", "-400")[0] == "refused: Certificate(NotYet)")
+    old, old_port = openssl_server("leaf", "-tls1_2")
+    said = meet(old_port, "xila.test", "--root", root)
+    check("tls: a server that only speaks TLS 1.2 is not spoken with", said[0] in ("refused: Alert(70)", "refused: Old"), said[:2])
+    other, other_port = openssl_server("leaf", "-tls1_3", "-groups", "P-256")
+    said = meet(other_port, "xila.test", "--root", root)
+    check("tls: nor one that wants another kind of key", said[0] in ("refused: NoCommon", "refused: Alert(40)"), said[:2])
+    aes, aes_port = openssl_server("leaf", "-tls1_3", "-ciphersuites", "TLS_AES_256_GCM_SHA384")
+    said = meet(aes_port, "xila.test", "--root", root)
+    check("tls: nor one that wants another cipher", said[0] in ("refused: NoCommon", "refused: Alert(40)"), said[:2])
+
+    # Then XilaOS itself, on a processor with a source of chance. It only
+    # trusts the authorities of the Internet, so what can be checked
+    # without the Internet is that the handshake with OpenSSL goes as far
+    # as the certificate, and that the certificate is then refused.
+    listening = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listening.bind(("127.0.0.1", 0))
+    threading.Thread(target=name_server, args=(listening,), daemon=True).start()
+    with Xila(net="e1000e", cpu="max") as x:
+        for _ in range(40):
+            if net_says().get("address") == "10.0.2.15":
+                break
+            time.sleep(0.25)
+        check("the boot log says the processor has a source of chance", "Chance .............. the processor's own source" in x.boot_log, x.boot_log)
+        heap = [row for row in x.table("mem") if row["kind"] == "kernel heap in use"]
+        x.cmd("net names 10.0.2.2:%d" % listening.getsockname()[1])
+        ok, lines = x.cmd("net get https://xila.test:%d/page" % curve_port, timeout=30)
+        check("net get https: a server nobody trusted vouches for is not asked", not ok and lines == ["No authority that XilaOS trusts vouches for that machine's certificate."], lines)
+        ok, lines = x.cmd("net get https://xila.test:%d/page" % rsa_port, timeout=30)
+        check("net get https: the same with an RSA certificate", not ok and lines == ["No authority that XilaOS trusts vouches for that machine's certificate."], lines)
+        ok, lines = x.cmd("net get https://xila.test:%d/page" % old_port, timeout=30)
+        check("net get https: a server that only speaks TLS 1.2", not ok and lines == ["That machine only speaks a TLS older than 1.3, which XilaOS does not."], lines)
+        ok, lines = x.cmd("net get https://xila.test:%d/page" % other_port, timeout=30)
+        check("net get https: a server that wants another kind of key", not ok and lines == ["That machine and XilaOS have no way in common of keeping a secret."], lines)
+        ok, lines = x.cmd("net get https://xila.test:%d/page" % aes_port, timeout=30)
+        check("net get https: a server that wants another cipher", not ok and lines == ["That machine and XilaOS have no way in common of keeping a secret."], lines)
+        del asked_of_us[:]
+        ok, lines = x.cmd("net get https://%s/some/page" % there, timeout=30)
+        check("net get https: a server that does not speak TLS is told nothing of the page", not ok and lines == ["That machine does not speak TLS there, or not as TLS is spoken."] and asked_of_us == [], (lines, asked_of_us))
+        ok, lines = x.cmd("net get http://xila.test:%d/some/page" % serving.server_address[1])
+        check("net get: plainly, on the same machine, as before", ok and lines[0].endswith(" answered 200."), lines)
+        if online:
+            x.cmd("net names " + public)
+            ok, lines = x.cmd("net get https://example.com/", timeout=40)
+            check("net get https: a page of the Internet, asked through TLS", ok and lines[0] == "example.com:443 answered 200." and len(lines) > 1, lines)
+            ok, lines = x.cmd("net get https://www.debian.org/", timeout=40)
+            check("net get https: one whose certificates are signed with RSA", re.fullmatch(r"www\.debian\.org:443 answered \d+\.", lines[0]), lines)
+            ok, lines = x.cmd("net get https://openrouter.ai/api/v1/models", timeout=40)
+            check("net get https: the server the companion will speak through", lines[0] == "openrouter.ai:443 answered 200.", lines)
+        else:
+            print("skip  net get https: a page of the Internet (no name server of the Internet answers this machine)")
+        check("net get https: the memory each conversation took is given back", [row for row in x.table("mem") if row["kind"] == "kernel heap in use"] == heap, heap)
+        check("net get https: the rest of the network is as it was", x.cmd("net ping 10.0.2.2")[1][0].startswith("10.0.2.2 answered in "))
+    if online:
+        # what went over the cable to and from port 443: nothing of the question or of the answer can be read
+        sealed = b"".join(frame[54:] for frame in frames_of(os.path.join(ROOT, "build", "net.pcap")) if frame[12:14] == b"\x08\x00" and frame[23] == 6 and 443 in struct.unpack(">HH", frame[34:38]))
+        check("net get https: nothing of what was asked or answered can be read on the cable", len(sealed) > 2000 and b"HTTP/1." not in sealed and b"GET /" not in sealed and b"/api/v1/models" not in sealed and b"<html" not in sealed, len(sealed))
+    listening.close()
+    for server in (curve, rsa, old, other, aes):
+        server.kill()
 serving.shutdown()
 mute.close()
 

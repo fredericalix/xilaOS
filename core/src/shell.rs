@@ -604,7 +604,7 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         }
         sys.asked_machine = FixedStr::from_bytes(place.machine);
         sys.asked_path = FixedStr::from_bytes(place.path);
-        sys.request = Some(Request::Get(place.ip, place.port));
+        sys.request = Some(Request::Get(place.ip, place.port, place.secret));
         return true;
     }
     if arg.eq_ignore_ascii_case(b"registers") {
@@ -687,6 +687,40 @@ fn unnamed(why: crate::dns::Failed) -> &'static [u8] {
         Failed::NoSuchName => b"The name server knows no machine of that name.",
         Failed::NoAddress => b"The name server gave no address for that name.",
     }
+}
+
+/// Why a machine could not be asked through TLS, for the user. Nothing
+/// was asked of it, or nothing of what it said is shown.
+fn unsure(why: crate::ask::Failed) -> FixedStr<COLS> {
+    use crate::ask::Failed;
+    use xila_tls::{Error, Refused};
+    let text: &[u8] = match why {
+        Failed::NoChance => b"This processor has no source of chance: nothing here can be kept secret.",
+        Failed::NoClock => b"This machine does not know the date: no certificate can be checked.",
+        Failed::Secret(Error::Certificate(why)) => match why {
+            Refused::Expired => b"That machine's certificate is out of date, by the clock of this one.",
+            Refused::NotYet => b"That machine's certificate is not good yet, by the clock of this one.",
+            Refused::WrongName => b"That machine showed the certificate of another: it is not who was asked.",
+            Refused::Unknown => b"No authority that XilaOS trusts vouches for that machine's certificate.",
+            Refused::Unsupported => b"That machine's certificate is signed in a way XilaOS cannot check.",
+            Refused::Forged => b"A signature in that machine's certificates is not its signer's.",
+            Refused::Bad => b"That machine's certificate cannot be read, or is not a server's.",
+        },
+        Failed::Secret(Error::NotTheirs) => b"That machine does not hold the key of the certificate it showed.",
+        Failed::Secret(Error::Forged) => b"What that machine said was changed on the way: nothing of it is shown.",
+        Failed::Secret(Error::NotTls) => b"That machine does not speak TLS there, or not as TLS is spoken.",
+        // said by us, or by the machine with the numbers TLS has for it
+        Failed::Secret(Error::Old | Error::Alert(70)) => b"That machine only speaks a TLS older than 1.3, which XilaOS does not.",
+        Failed::Secret(Error::NoCommon | Error::Alert(40)) => b"That machine and XilaOS have no way in common of keeping a secret.",
+        Failed::Secret(Error::TooLong) => b"That machine showed more certificates than XilaOS has room for.",
+        Failed::Secret(Error::Alert(number)) => {
+            let mut line = FixedStr::new();
+            let _ = write!(line, "That machine gave up before the conversation was secret (TLS alert {number}).");
+            return line;
+        }
+        _ => b"That machine could not be asked.",
+    };
+    FixedStr::from_bytes(text)
 }
 
 /// Lists what the PCI bus of the machine holds, and what XilaOS drives.
@@ -779,8 +813,9 @@ pub enum Request {
     /// Ask the machine `System::asked_machine` for the page at
     /// `System::asked_path`, on a port: answered in `System::got`. The
     /// address is that of the machine, or none when it was written as a
-    /// name whose address is to be found first.
-    Get(Option<crate::net::Ip>, u16),
+    /// name whose address is to be found first. The last says whether to
+    /// ask through TLS (`https://`).
+    Get(Option<crate::net::Ip>, u16, bool),
     /// Find the address of the machine named `System::asked_machine`:
     /// answered in `System::named`.
     Name,
@@ -2076,10 +2111,12 @@ fn answers(sys: &mut System, out: &mut dyn Out) {
             }
             // its address was not found: nothing was asked of it
             Err(Failed::Name(why)) => out.line(Style::Error, unnamed(why)),
+            // it could not be asked in secret: nothing was asked of it
+            Err(why @ (Failed::Secret(_) | Failed::NoChance | Failed::NoClock)) => out.line(Style::Error, unsure(why).bytes()),
             Err(why) => {
                 line.push_bytes(match why {
                     Failed::NoRoom => b" cannot be asked now: too many conversations at once.",
-                    Failed::NoAnswer | Failed::Name(_) => b" does not answer.",
+                    Failed::NoAnswer | Failed::Name(_) | Failed::Secret(_) | Failed::NoChance | Failed::NoClock => b" does not answer.",
                     Failed::Silent => b" took the call and then said nothing.",
                     Failed::NotAnAnswer => b" answered something that is not a page.",
                 });
@@ -3157,7 +3194,7 @@ pub mod tests {
             assert_eq!(run_line(&mut sys, wrong).1.lines, ["Type net get and where to ask: net get 192.168.1.20:8000/page"], "{wrong}");
         }
         assert!(run_line(&mut sys, "net get http://192.168.1.20:8000/notes/1").0);
-        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Get(Some([192, 168, 1, 20]), 8000)), &b"192.168.1.20"[..], &b"/notes/1"[..]));
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Get(Some([192, 168, 1, 20]), 8000, false)), &b"192.168.1.20"[..], &b"/notes/1"[..]));
         let said = |sys: &mut System, got| {
             sys.got = Some((8000, got));
             let mut out = Lines::default();
@@ -3171,8 +3208,30 @@ pub mod tests {
         assert_eq!(said(&mut sys, Err(crate::ask::Failed::NoAnswer)), (1, vec!["192.168.1.20:8000 does not answer.".to_string()]));
         // a machine asked by its name: the kernel finds its address first
         assert!(run_line(&mut sys, "net get Example.org:8000/notes/1").0);
-        assert_eq!((sys.request.take(), sys.asked_machine.bytes()), (Some(Request::Get(None, 8000)), &b"Example.org"[..]));
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes()), (Some(Request::Get(None, 8000, false)), &b"Example.org"[..]));
         assert_eq!(said(&mut sys, Ok((200, FixedStr::from_bytes(b"hello")))), (0, vec!["Example.org:8000 answered 200.".to_string(), "hello".to_string()]));
+        // through TLS: said by https:// before the place
+        assert!(run_line(&mut sys, "net get https://openrouter.ai/api/v1/models").0);
+        assert_eq!((sys.request.take(), sys.asked_machine.bytes(), sys.asked_path.bytes()), (Some(Request::Get(None, 443, true)), &b"openrouter.ai"[..], &b"/api/v1/models"[..]));
+        use crate::ask::Failed as NoPage;
+        use xila_tls::{Error as NoSecret, Refused};
+        let mut unsure = vec![NoPage::NoChance, NoPage::NoClock];
+        unsure.extend([Refused::Expired, Refused::NotYet, Refused::WrongName, Refused::Unknown, Refused::Unsupported, Refused::Forged, Refused::Bad].map(|why| NoPage::Secret(NoSecret::Certificate(why))));
+        unsure.extend([NoSecret::NotTheirs, NoSecret::Forged, NoSecret::NotTls, NoSecret::Old, NoSecret::NoCommon, NoSecret::TooLong, NoSecret::Alert(255)].map(NoPage::Secret));
+        let mut told = Vec::new();
+        for why in unsure {
+            let (errors, lines) = said(&mut sys, Err(why));
+            // one line each, that fits the screen, says "that machine" or "this" one, and is no other's
+            assert!(errors == 1 && lines.len() == 1 && lines[0].len() < COLS && lines[0].ends_with(['.', ')']), "{why:?}: {lines:?}");
+            assert!(lines[0].starts_with("That machine") || lines[0].starts_with("This ") || lines[0].starts_with("No authority") || lines[0].starts_with("A signature") || lines[0].starts_with("What that machine"), "{lines:?}");
+            assert!(!told.contains(&lines[0]) && lines[0] != "That machine could not be asked.", "{lines:?}");
+            told.push(lines[0].clone());
+        }
+        assert_eq!(said(&mut sys, Err(NoPage::Secret(NoSecret::Certificate(Refused::Unknown)))).1, ["No authority that XilaOS trusts vouches for that machine's certificate."]);
+        assert_eq!(said(&mut sys, Err(NoPage::Secret(NoSecret::Alert(80)))).1, ["That machine gave up before the conversation was secret (TLS alert 80)."]);
+        // two numbers say what XilaOS says itself in other cases
+        assert_eq!(said(&mut sys, Err(NoPage::Secret(NoSecret::Alert(40)))), said(&mut sys, Err(NoPage::Secret(NoSecret::NoCommon))));
+        assert_eq!(said(&mut sys, Err(NoPage::Secret(NoSecret::Alert(70)))), said(&mut sys, Err(NoPage::Secret(NoSecret::Old))));
         use crate::dns::Failed as NoName;
         let whys = [
             (NoName::NoServer, "The network named no server to ask for names. Type net names and an address."),

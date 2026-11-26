@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 xila-db = { path = "../db" }
+xila-tls = { path = "../tls" }

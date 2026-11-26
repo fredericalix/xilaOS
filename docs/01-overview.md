@@ -63,8 +63,9 @@ yet:
 - programs outside the kernel, and the virtual machine they are to be
   compiled for;
 - applications as isolated zones with access control lists;
-- TLS, or encryption of any kind: the network prompt and the web
-  pages send everything in clear on the local network;
+- encryption of what XilaOS serves: the network prompt and the web
+  pages send everything in clear on the local network (only a page it
+  asks for itself, with `net get https://`, goes through TLS);
 - sound, USB, Wi-Fi, NVMe, ACPI (so no clean power-off);
 - indexes, `BEGIN` / `COMMIT`, and values larger than 48
   characters in SQL;
@@ -117,7 +118,7 @@ and an interactive web mock-up called Trame, kept in
 | [Using XilaOS](03-using-xilaos.md) | The screen, the keys, every command. |
 | [The database and SQL](04-sql.md) | Tables, types, statements, events. |
 | [XilaScript](05-xilascript.md) | The language of the prompt. |
-| [Architecture](06-architecture.md) | The three crates and how the pieces fit. |
+| [Architecture](06-architecture.md) | The four crates and how the pieces fit. |
 | [The kernel](07-kernel.md) | Boot, memory, interrupts, tasks, drivers. |
 | [The storage engine](08-storage.md) | The database that stands in for a file system. |
 | [Disk layout and installation](09-disk-layout-and-install.md) | Partitions, the start-up partition, `install`. |

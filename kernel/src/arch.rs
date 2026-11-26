@@ -306,6 +306,31 @@ pub fn chance() -> u64 {
     counter() ^ drawn
 }
 
+/// Fills `bytes` from the processor's own source of chance (RDRAND), the
+/// only one here that is good enough to draw keys from. False if the
+/// processor has none, or if it gave nothing: then nothing was drawn
+/// that may be used.
+pub fn random(bytes: &mut [u8]) -> bool {
+    use core::arch::x86_64::{__cpuid, _rdrand64_step};
+    // bit 30 of what the processor says of itself: it has that source
+    if __cpuid(1).ecx & 1 << 30 == 0 {
+        return false;
+    }
+    for part in bytes.chunks_mut(8) {
+        let mut drawn = 0;
+        let mut tries = 0;
+        // the source may have nothing ready: it says so, and is asked again
+        while unsafe { _rdrand64_step(&mut drawn) } != 1 {
+            tries += 1;
+            if tries == 32 {
+                return false;
+            }
+        }
+        part.copy_from_slice(&drawn.to_le_bytes()[..part.len()]);
+    }
+    true
+}
+
 /// Measures the processor's counter against the timer, for `micros`. Takes
 /// 50 to 60 ms. Interrupts must be on.
 pub fn clock_init() {

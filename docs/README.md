@@ -16,7 +16,7 @@ The same content as one file: [xilaos.pdf](xilaos.pdf) (rebuild it with
 
 ## How it works
 
-6. [Architecture](06-architecture.md): the three crates and how the
+6. [Architecture](06-architecture.md): the four crates and how the
    pieces fit.
 7. [The kernel](07-kernel.md): boot, memory, page tables, interrupts,
    tasks, drivers.

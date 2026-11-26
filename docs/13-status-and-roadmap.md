@@ -39,13 +39,15 @@ were also tried on the real machine.
 | QR codes for output | yes, read back by another reader | yes |
 | Ethernet (Intel e1000 family), ARP, IPv4, ICMP, UDP, DHCP | yes | yes, after five trials |
 | Names (DNS): `net name`, `net names`, `net get` by name | yes | not tried |
+| TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks.
+about 300 system checks. On 26 November 2026: about 29,500 lines, 264
+unit tests, 395 system checks.
 
 ## Known limits of what is done
 
@@ -72,10 +74,13 @@ loses silently is not caught. No mirror, no snapshots. Details in
 clean power-off: `reboot` or the power button. A fatal error is only
 reported on the serial port. Details in [The kernel](07-kernel.md).
 
-**Network.** No TLS, no IPv6, no fragments, eight TCP
-conversations, no out-of-order reassembly. Names: IPv4 addresses
-only, and nothing proves who answered. **Nothing is encrypted and
-nothing is authenticated beyond a code sent in clear.** Details in
+**Network.** No IPv6, no fragments, eight TCP conversations, no
+out-of-order reassembly. Names: IPv4 addresses only, and nothing
+proves who answered. TLS only where XilaOS calls (`net get https://`):
+version 1.3 only, one cipher, no asking whether a certificate was
+revoked, and a protocol read by no specialist. **What XilaOS opens to
+the network (`remote`, `web`) is not encrypted, and authenticated by
+nothing beyond a code sent in clear.** Details in
 [Networking](10-networking.md).
 
 **Hardware.** One real machine. PS/2 keyboard only, no USB, no NVMe, no
@@ -95,7 +100,7 @@ The system is meant to grow in layers. Layer 0 (the base) and layer 1
 | 0. Base | Boot, memory, interrupts, tasks, screen, keyboard, interface | Done, without memory protection |
 | 1. Database | Storage, tables, SQL, transactions, LISTEN / NOTIFY | Done in a first form; no typed large objects, no access rights |
 | 2. Programs | A virtual machine, zones, public / private status, ACLs, installing applications, supervised services, a vault for secrets | Not started, except XilaScript and scheduled programs |
-| 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet, TCP/IP and DNS only |
+| 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet, TCP/IP, DNS and TLS for the side that calls |
 | 4. Sound | Audio driver, mixing, MP3, ambiences | Not started |
 | 5. Applications | Spreadsheet, database front end, a HyperCard-like, mail, text web browser, IRC, HTTP server, a port of Doom | Not started |
 | 6. Agents | AI companions with their own access rights to the data | A first companion is under way, without access rights |
@@ -172,9 +177,9 @@ and to let one machine hand work to others:
   accepts on the keyboard; afterwards the two recognise each other by
   their keys;
 - the handshake follows the published Noise framework, with the
-  algorithms taken from established Rust libraries (the first outside
-  code the kernel would have), `no_std` and without allocation, as a
-  state machine fed with bytes like `tcp.rs`;
+  algorithms taken from established Rust libraries (the ones TLS
+  brought in since: X25519, ChaCha20-Poly1305, SHA-256), `no_std` and
+  without allocation, as a state machine fed with bytes like `tcp.rs`;
 - a channel closes at the first message that does not verify; there is
   no mode without verification, not even for tests.
 
@@ -223,14 +228,15 @@ it. Its steps are [below](#the-companion).
 | The companion | A first AI companion: a screen to write to it, and its reactions to what happens in the system. Names (DNS), TLS and HTTPS first, since the model it speaks through is reached over the Internet | In progress |
 | 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Left: constraints and indexes, which change what is written on the disk; `BEGIN` / `COMMIT`; a view of the log, which waits for texts longer than 48 characters | Waits for the companion |
 | 3. XilaScript | Parameters and names of a program's own; a task of its own for a program, and for the commands that wait (`net ping`, `net get`, `install from`); an editor; `insert ... select`, the values of before, more rhythms | After 2 |
-| 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design and on the first outside code |
+| 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
 | 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
 
 **Waiting for the T430.** What these phases build is only verified in
 QEMU until it is tried there: the dead keys on the real keyboard,
 `install` showing its progress on a real disk, `disk check` on a
-real disk, and names asked of the name server of a real network.
+real disk, names asked of the name server of a real network, and TLS
+with the keys its processor draws and the time its clock tells.
 
 ### The companion
 
@@ -259,23 +265,24 @@ What has to be said with it: a companion that acts by itself follows
 what it reads, and any text of a table can steer it. Access lists do
 not exist yet to bound it; the three guards above are all there is.
 
-The steps, in order. Each is merged once verified. The first, names
-(DHCP asks for the name server, a question over UDP gives the address
-of a name, `net get` takes a name), was done on 26 November 2026.
+The steps, in order. Each is merged once verified. Two were done on
+26 November 2026:
 
-2. **TLS.** A client for TLS 1.3 only, written here as a machine fed
-   with bytes like `tcp.rs`, in a crate of its own (`tls/`) which holds
-   the first outside code of XilaOS: the algorithms (X25519,
-   ChaCha20-Poly1305, SHA-2, ECDSA on P-256 and P-384, RSA) from the
-   RustCrypto and dalek libraries, and the checking of certificates
-   from `rustls-webpki` against the public roots. Certificates are
-   checked against the machine's clock. No TLS 1.2, one cipher suite,
-   no asking whether a certificate was revoked, no session taken up
-   again. A machine whose processor has no source of chance of its own
-   does not start TLS.
-3. **HTTPS.** `net get https://...`, then a question with lines of its
-   own and a body, answers that come in chunks, and answers longer
-   than a kilobyte.
+- **Names**: DHCP asks for the name server, a question over UDP gives
+  the address of a name, `net get` takes a name.
+- **TLS**: a client for TLS 1.3 only, written here as a machine fed
+  with bytes like `tcp.rs`, in a crate of its own (`tls/`) which holds
+  the first outside code of XilaOS: the algorithms and the checking of
+  certificates. `net get https://` asks a page through it. A machine
+  whose processor has no source of chance of its own asks nothing
+  through TLS. What it does and does not make sure of is in
+  [Networking](10-networking.md#security).
+
+What is left:
+
+3. **HTTPS for a program.** A question with lines of its own and a
+   body, answers that come in chunks, and answers longer than a
+   kilobyte: what speaking to the model needs beyond `net get`.
 4. **Longer texts, and waiting without holding the system.** A text
    holds 48 characters today, and a command that waits for the network
    holds everything.
@@ -283,15 +290,10 @@ of a name, `net get` takes a name), was done on 26 November 2026.
    tables.
 6. **Acting, notes, events.**
 
-A trial of step 2, thrown away afterwards, was run on 26 November
-2026: a real handshake with the model's server and one question to the
-model through it; servers with ECDSA and with RSA certificates;
-refusals of an expired certificate, of a wrong name and of a
-certificate nobody vouches for. Built for the kernel, it added about
-50 outside crates and 400 KB, and the calculations of one handshake
-took 26 ms in QEMU the first time and 7 ms after. Four of the crates
-have to be told not to use vector instructions, which the kernel is
-compiled without.
+A trial of TLS, thrown away afterwards, came before it was built: a
+real handshake with the model's server and one question to the model
+through it, and the cost for the kernel (some fifty outside crates,
+400 KB, 7 to 26 ms of calculation for a handshake in QEMU).
 
 ### Loose ends of what exists
 
@@ -319,6 +321,9 @@ compiled without.
 - More than eight tasks; priorities, or at least a larger share for
   the interface.
 - A fatal error shown on the screen, not only on the serial port.
+- The serial port is tested by a byte that must come back, read at
+  once: an imitated chip hands it back at once, a real one takes the
+  time of one character. No real serial port has been tried.
 - A log kept in the database and read after a restart, for trials
   that can leave the screen dark.
 - The memory of the firmware's boot services taken back: the kernel
@@ -408,8 +413,9 @@ ways the emulator never shows.
 
 ### Network
 
-- TLS, which everything that reaches the Internet needs: step 2 of
-  the companion.
+- TLS where XilaOS is called: `remote` and `web` are still in clear.
+  TLS 1.2, for servers that have nothing newer; a session taken up
+  again; asking whether a certificate was revoked.
 - Names: addresses of sixteen bytes, an answer too long for UDP asked
   again over TCP, `net ping` and `install from` by name.
 - Fragments, segments that arrive out of order, more than eight

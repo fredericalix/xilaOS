@@ -1,8 +1,8 @@
 # Networking
 
-XilaOS has a small network stack of its own, written for it: no code from another system, no heap, no interrupt. Plugged by a cable into a local network, the machine asks for an address, answers a `ping`, finds the address of a machine known by its name (`net name`), and can do four things with other machines: take commands from one (`remote`), show its tables to a browser (`web`), ask one for a page (`net get`), and fetch a new system from one (`install from`).
+XilaOS has a small network stack of its own, written for it, with no heap and no interrupt. The one part that rests on code from elsewhere is TLS: its protocol is written here too, but its arithmetic and its checking of certificates come from established libraries (see [TLS](#tls)). Plugged by a cable into a local network, the machine asks for an address, answers a `ping`, finds the address of a machine known by its name (`net name`), and can do four things with other machines: take commands from one (`remote`), show its tables to a browser (`web`), ask one for a page (`net get`), and fetch a new system from one (`install from`).
 
-> **Nothing is encrypted.** Every code, command, table and file described in this chapter crosses the network as it is. All of it is meant for a local network one trusts, and all of it is closed when the machine starts. See [Security](#security).
+> **Almost nothing is encrypted.** Only a page asked with `net get https://...` goes through TLS. Every code, command, table and file of the rest of this chapter (the remote prompt, the pages for browsers, the system fetched from the network) crosses the network as it is. All of that is meant for a local network one trusts, and all of it is closed when the machine starts. See [Security](#security).
 
 ## What exists
 
@@ -16,14 +16,15 @@ XilaOS has a small network stack of its own, written for it: no code from anothe
 | DHCP | Client only: asks for an address, a mask, a gateway and a name server, and asks again at half of the lease. | `core/src/net.rs` |
 | DNS | Client only: asks the name server for the IPv4 address of a name, over UDP, and keeps the answer for as long as it says. Eight names remembered. | `core/src/dns.rs` |
 | TCP | Both sides: listens and calls. Eight conversations at once, four ports listened on. No out-of-order reassembly, no window scaling, no selective acknowledgement. | `core/src/tcp.rs` |
-| HTTP, asking | One `GET` (the code can also write a `POST`), HTTP/1.0, the first kilobyte of the answer is kept. | `core/src/ask.rs` |
+| TLS | Client only, version 1.3 only: one key exchange (X25519), one cipher (ChaCha20-Poly1305), certificates signed with ECDSA or RSA, checked against the authorities browsers trust. | `tls/` |
+| HTTP, asking | One `GET` (the code can also write a `POST`), HTTP/1.0, plainly or through TLS, the first kilobyte of the answer is kept. | `core/src/ask.rs` |
 | HTTP, serving | Read-only pages of the tables, one browser at a time. | `core/src/web.rs` |
 | Remote prompt | One command per UDP message on port 4000. | `core/src/remote.rs`, `tools/remote.py` |
 | TFTP | Client only, for one file: the system. | `core/src/tftp.rs` |
 | Network boot | A script on another computer serves the kernel to a PC that starts from its cable. | `tools/netboot.py` |
 | Driver | Intel cards of the e1000 family only. | `kernel/src/e1000.rs` |
 
-What does not exist: TLS or any other encryption, IPv6, Wi-Fi, any card that is not an Intel e1000, sockets for programs (XilaScript has no statement that opens a conversation), routing, and a firewall. An encrypted protocol between XilaOS machines is designed and not built yet.
+What does not exist: encryption of what XilaOS serves (`remote`, `web`), TLS 1.2, IPv6, Wi-Fi, any card that is not an Intel e1000, sockets for programs (XilaScript has no statement that opens a conversation), routing, and a firewall. An encrypted protocol between XilaOS machines is designed and not built yet.
 
 ## Using it
 
@@ -160,7 +161,17 @@ XilaOS|all:/>net get 10.0.2.2:1/
 10.0.2.2:1 does not answer.
 ```
 
-What comes back is shown and never run. The other failures say `took the call and then said nothing`, `answered something that is not a page`, or `cannot be asked now: too many conversations at once`. A machine that has not finished answering after five seconds is given up. There is no TLS, so `https://` is refused.
+What comes back is shown and never run. The other failures say `took the call and then said nothing`, `answered something that is not a page`, or `cannot be asked now: too many conversations at once`. A machine that has not finished answering after five seconds is given up.
+
+With `https://` before the place, the page is asked through TLS, on port 443 if none is said. Nobody on the way can read the question or the answer, and the machine has proved it is the one that was named:
+
+```
+XilaOS|all:/>net get https://example.com/
+example.com:443 answered 200.
+<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data
+```
+
+When that cannot be made sure of, nothing is asked, and one line says why: `No authority that XilaOS trusts vouches for that machine's certificate.`, `That machine showed the certificate of another: it is not who was asked.`, `That machine's certificate is out of date, by the clock of this one.`, `That machine only speaks a TLS older than 1.3, which XilaOS does not.`, `That machine and XilaOS have no way in common of keeping a secret.`, `That machine does not speak TLS there, or not as TLS is spoken.`, and a few more of the same kind. On a processor with no source of chance of its own, `This processor has no source of chance: nothing here can be kept secret.`: the boot log says which it is, on its `Chance` line.
 
 With a name in place of the address, the address is found first, as `net name` does, and the machine is told the name it was asked by, since one address may serve the pages of several names. When the address is not found, nothing is asked and the line says why, as `net name` would. Here a name server on the host knows the host as `xila.test`:
 
@@ -276,6 +287,7 @@ This is stated in the commands' own output and repeated here because it is the m
 - **The web pages cannot change anything.** This is by construction and not by a check: nothing a browser sends reaches the shell. The first line of its request is read, the name of a table is accepted only if it is letters, digits and underscores, and the only thing ever run is `select`, through a reference to the system that does not allow changes. Any method but `GET` gets `405 Method Not Allowed`. Cell contents are escaped. The pages ask browsers not to keep them (`Cache-Control: no-store`) and not to tell other sites their address (`Referrer-Policy: no-referrer`).
 - **TFTP authenticates nothing.** Nothing says who the server is nor that the file is the right one; `install from` only checks that the file has the shape of a UEFI program for this kind of machine. That is why it only fetches, shows a size and a check number, and writes nothing until `install system` is typed at the machine, and why no form of `install` is accepted from the network.
 - **`net get` shows and never runs** what comes back.
+- **What `https://` makes sure of, and what it does not.** The server must show a certificate for the name that was asked, in its time by this machine's clock, that leads to one of the authorities browsers trust (Mozilla's list, compiled in: no command adds one), and must prove it holds the key of that certificate. Then everything is sealed under keys drawn from the processor's own source of chance; without one, nothing is asked. Not checked: whether a certificate was taken back by its authority since it was made. The clock is the battery clock as it is, with no time zone: a clock that is wrong by years refuses every server, and one set to another year could accept a certificate that is over. The protocol is written here and was read by no specialist.
 - **Nothing says who answers a question about a name.** The answer is taken from the address and port the question went to, with the number and the name of the question, and from nobody else; but whoever can put a message on the cable with those can give a wrong address. Until what is spoken with a machine proves who it is (TLS, not built yet), a name is no safer than the network it was asked on.
 
 ## How it is built
@@ -304,6 +316,27 @@ The DHCP client asks after 2, 4, then every 8 seconds until it is offered an add
 The card raises no interrupt. The interface task, the one that also reads the keyboard and redraws the screen, calls `network` in `kernel/src/main.rs` at each pass of its loop: it takes up to 32 frames from the card, gives each to `Net::receive`, then calls `Net::tick`. A packet therefore waits up to a hundredth of a second. If one of the messages is a command for the remote prompt, it is run there and then, exactly as the serial task runs a line. Then `web::step` does a little of the pages' work and `Net::speak` sends what TCP has ready.
 
 Commands that wait for the network (`net ping`, `net name`, `net get`, `install from`) run their own loop of the same kind while the command is served, holding the system for up to one second, three seconds, five seconds (after the three of a name) and one minute respectively.
+
+### TLS
+
+`tls/` is a crate of its own, `xila-tls`, and the only place in XilaOS with code from elsewhere. What is written here is the protocol, TLS 1.3 as RFC 8446 has it, for the side that calls: the messages of the handshake and their order, the keys drawn at each step, the records. Like `tcp.rs` it is a machine fed with bytes: `Client::input` takes what came from the server (`wants` says how much it can take), `Client::output` hands out what to send, `write` and `read` carry the conversation. `Ask::step` in `core/src/ask.rs` moves those bytes over TCP.
+
+What is not written here is what a mistake in would be silent and fatal:
+
+| From | What |
+|---|---|
+| `x25519-dalek` | The key both sides agree on. |
+| RustCrypto: `chacha20poly1305`, `sha2`, `hmac` | What seals each record, and what the keys are drawn with. |
+| RustCrypto: `p256`, `p384`, `rsa` | The signatures of certificates and of servers. |
+| `rustls-webpki`, `webpki-roots` | Whether a chain of certificates leads to a trusted authority, for that name, at that date; and the authorities, as Mozilla lists them. |
+
+With what they need themselves that is some fifty crates, all under MIT, Apache 2.0, BSD or ISC licences (the list of authorities under CDLA Permissive 2.0), pinned in `Cargo.lock`. The kernel is compiled without vector instructions, and four of them would choose such instructions while running: `.cargo/config.toml` tells each to use its plain code for the kernel's target.
+
+One way of each thing, on purpose: a server that wants another key exchange or another cipher is told there is nothing in common. No session is taken up again later, XilaOS has no certificate of its own to show, and new keys in the middle of a conversation are followed when the server asks.
+
+The client holds its buffers itself, about 37 KB: a whole record as it arrives (16 KB at most), the messages of the handshake until they are whole (the certificates are the long ones), and what waits to be sent. The kernel makes one on its heap for each `net get https://` and frees it after. The `rsa` library allocates while it checks a signature: it is, with the storage engine, the only code under `core/` that does. One handshake costs the processor about 7 ms in QEMU, 26 ms the first time.
+
+The unit tests of the crate play the server with made-up certificates (`tls/fixtures`). Since that server shares the drawing of keys with the client, the keys are also checked against values worked out by other code (Python's `hmac`), and the whole against other implementations: `tools/check.py` runs OpenSSL as the server, for the crate alone on the host (`tls/examples/meet.rs`) and then for XilaOS in QEMU.
 
 ### Names
 
@@ -430,6 +463,8 @@ with Xila(net="e1000e", forward=4000, web=8080, tftp="some/folder") as x:
     far = Machine("127.0.0.1", CODE, 4000)   # far.cmd("tasks") returns what x.cmd does
 ```
 
+The processor QEMU imitates by default has no source of chance of its own, so nothing is asked through TLS there: `Xila(cpu="max")` picks one that has. QEMU's small network leads to the Internet, so `net get https://example.com/` works from the guest when the host is connected.
+
 The small network names 10.0.2.3 as name server; QEMU passes what it is asked on to the host's own name server. With some of those (a VPN's, for one) no answer comes back: `net names 1.1.1.1`, or any server of the Internet, then asks one directly. `tools/check.py` runs a small name server of its own on the host and tells the guest to ask it (`net names 10.0.2.2:PORT`), so the checks need no Internet.
 
 `net="e1000"` gives the 82540EM instead. `forward` is a UDP port of the host that leads to port 4000 of the guest, `web` a TCP port that leads to port 80, and `tftp` a folder whose files QEMU serves at 10.0.2.2, which is how `install from 10.0.2.2` is checked. From the guest, a server on the host is at 10.0.2.2: `python3 -m http.server` answers `net get`.
@@ -444,4 +479,4 @@ Every frame that goes by is kept in `build/net.pcap`. `tools/check.py` reads tha
 - `net ping`, `net name`, `net get` and `install from` hold the whole system while they wait.
 - TCP is only used by the kernel's own `web` and `net get`; the language has no way to open a conversation.
 - The parts specific to the 82579 ran on a single T430. The driver has never met another real card.
-- No encryption anywhere.
+- Encryption only where XilaOS calls (`net get https://`), never where it is called (`remote`, `web`). TLS 1.3 only, one cipher, no revocation, and of an answer only the first kilobyte.

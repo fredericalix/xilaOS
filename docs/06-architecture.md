@@ -1,9 +1,10 @@
 # Architecture
 
-XilaOS is about 25,000 lines of Rust in three crates, plus 2,400 lines
-of Python and shell for building and testing. Nothing outside the
-workspace is linked in: no crate from the registry, no boot loader, no
-C.
+XilaOS is about 29,500 lines of Rust in four crates, plus 2,800 lines
+of Python and shell for building and testing. No boot loader and no C
+are linked in. One crate, `xila-tls`, rests on libraries from the
+registry, for the arithmetic of TLS and the checking of certificates;
+nothing else does.
 
 ```text
  ┌──────────────────────────────────────────────────────────────────┐
@@ -26,9 +27,15 @@ C.
  └──────────────────────────────────────────────────────────────────┘
 ```
 
+`core/` also uses `tls/` (`xila-tls`, 1,300 lines without its tests):
+TLS 1.3 for the side that calls, with no hardware and no network under
+it, as `tcp.rs` is. It is described with the network, in
+[Networking](10-networking.md#tls).
+
 | Crate | Builds for | Allocates | Tested by |
 |---|---|---|---|
-| `xila-db` | host and UEFI, `no_std` + `alloc` | yes: the only crate that does | 24 unit tests, power cuts included |
+| `xila-db` | host and UEFI, `no_std` + `alloc` | yes | 25 unit tests, power cuts included |
+| `xila-tls` | host and UEFI, `no_std` | not itself; the `rsa` library it uses does, while it checks a signature | 14 unit tests against a server played by the tests, then OpenSSL in `tools/check.py` |
 | `xila-core` | host and UEFI, `no_std` outside tests | no: fixed-size buffers only (`System::db` aside) | more than 200 unit tests |
 | `xila-kernel` | UEFI only | yes, through its own allocator | `tools/check.py`: more than 300 checks on the whole system in QEMU |
 

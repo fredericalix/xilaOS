@@ -360,8 +360,12 @@ impl Tcp {
         let count = c.received_len.min(into.len());
         into[..count].copy_from_slice(&c.received[..count]);
         c.received.copy_within(count..c.received_len, 0);
-        // they were told there was no room: now there is
-        if c.received_len == IN && count > 0 && c.live() {
+        // They were told how little room there was, when what waits here
+        // came: less than half of all there ever is. Now there is half or
+        // more again, and they are told. A sender with more to say than
+        // the little room it was told of may well wait to be told.
+        let (before, after) = (IN - c.received_len, IN - c.received_len + count);
+        if count > 0 && before < IN / 2 && after >= IN / 2 && c.live() {
             c.owes = true;
         }
         c.received_len -= count;
@@ -1023,6 +1027,23 @@ mod tests {
         assert!(read[..600].iter().all(|b| *b == 5) && read[600..IN].iter().all(|b| *b == 6));
         let got = peer.hear(&mut tcp, 2);
         assert_eq!((got.len(), got[0].room as usize), (1, IN));
+        // not full, but more than half: they were told of little room, and
+        // may wait to hear of more before they say the rest
+        peer.next = start + IN as u32;
+        peer.say(&mut tcp, ACK, &[7; 600], 3);
+        assert_eq!(peer.hear(&mut tcp, 3)[0].room as usize, IN - 600);
+        // a few bytes read leave less than half: nothing is worth telling
+        assert_eq!(tcp.read(id, &mut read[..5]), 5);
+        assert!(peer.hear(&mut tcp, 4).is_empty());
+        // the rest read: half and more is free again, and they are told
+        assert_eq!(tcp.read(id, &mut read), 595);
+        let got = peer.hear(&mut tcp, 5);
+        assert_eq!((got.len(), got[0].room as usize), (1, IN));
+        // from little that waited, nothing was ever worth telling
+        peer.say(&mut tcp, ACK, &[8; 100], 6);
+        assert_eq!(peer.hear(&mut tcp, 6)[0].room as usize, IN - 100);
+        assert_eq!(tcp.read(id, &mut read), 100);
+        assert!(peer.hear(&mut tcp, 7).is_empty());
     }
 
     #[test]

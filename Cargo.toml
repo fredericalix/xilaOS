@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["db", "core", "kernel"]
+members = ["db", "tls", "core", "kernel"]
 
 [profile.release]
 opt-level = 2
