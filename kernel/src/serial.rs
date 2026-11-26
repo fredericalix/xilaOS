@@ -15,9 +15,19 @@ impl Serial {
         Serial { present: false }
     }
 
-    /// Sets the port to 115200 baud, 8 bits, no parity, and checks that it exists.
+    /// Sets the port to 115200 baud, 8 bits, no parity, and checks that it
+    /// exists: a byte written while the chip is looped back on itself
+    /// must come back.
+    ///
+    /// This runs first of all, while the firmware still does: its console
+    /// reads the same port at every tick of its timer, and would take the
+    /// byte of the test for a key typed there. So nothing of the firmware
+    /// may run between the writing of the byte and its reading: interrupts
+    /// are off for the test. Without that, about one start in 250 in QEMU
+    /// found no port, and the system ran without its serial shell.
     pub fn init() -> Serial {
-        unsafe {
+        let were_on = crate::arch::interrupts_save();
+        let present = unsafe {
             outb(BASE + 1, 0x00); // no interrupts
             outb(BASE + 3, 0x80); // divisor access
             outb(BASE, 0x01); // divisor 1: 115200 baud
@@ -28,8 +38,10 @@ impl Serial {
             outb(BASE, 0xae);
             let present = inb(BASE) == 0xae;
             outb(BASE + 4, 0x0f); // normal operation
-            Serial { present }
-        }
+            present
+        };
+        crate::arch::interrupts_restore(were_on);
+        Serial { present }
     }
 
     pub fn present(&self) -> bool {
