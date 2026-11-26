@@ -17,7 +17,7 @@ use crate::theme::THEMES;
 pub const PROMPT: &[u8] = b"XilaOS|all:/>";
 
 /// The virtual screens, in the order of their Alt+digit shortcut.
-pub const SCREENS: [&[u8]; 2] = [b"overview", b"boot log"];
+pub const SCREENS: [&[u8]; 3] = [b"overview", b"boot log", b"companion"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Style {
@@ -2348,7 +2348,7 @@ fn ask(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         out.line(Style::Error, b"ask is typed at the machine itself, or on its serial port.");
         return false;
     }
-    match crate::companion::ask(sys, arg) {
+    match crate::companion::ask(sys, arg, sys.session) {
         Ok(()) => true,
         Err(message) => {
             out.line(Style::Error, message.bytes());
@@ -3187,12 +3187,16 @@ pub mod tests {
     fn screens_are_listed_and_switched() {
         let mut sys = System::new();
         let (_, out) = run_line(&mut sys, "screen");
-        assert_eq!(out.lines[1], " [1] [Alt]+[0]  overview  shown");
-        assert_eq!(out.lines[2], " [2] [Alt]+[1]  boot log  ");
+        assert_eq!(out.lines[1], " [1] [Alt]+[0]  overview   shown");
+        assert_eq!(out.lines[2], " [2] [Alt]+[1]  boot log   ");
+        assert_eq!(out.lines[3], " [3] [Alt]+[2]  companion  ");
         assert!(run_line(&mut sys, "2").0);
         assert_eq!(sys.screen, 1);
         assert!(run_line(&mut sys, "screen overview").0);
         assert_eq!(sys.screen, 0);
+        assert!(run_line(&mut sys, "screen companion").0);
+        assert_eq!(sys.screen, 2);
+        sys.screen = 0;
         assert!(!run_line(&mut sys, "screen 9").0);
     }
 
@@ -3394,7 +3398,7 @@ pub mod tests {
         assert!(ok && out.lines.is_empty());
         assert!(waits(&sys, crate::events::SERIAL) && !waits(&sys, crate::events::SCREEN));
         let mut told = Lines::default();
-        assert_eq!((tell(&mut sys, crate::events::SERIAL, &mut told), tell(&mut sys, crate::events::SCREEN, &mut told)), (None, None));
+        assert_eq!((tell(&mut sys, crate::events::SERIAL, COLS - 1, &mut told), tell(&mut sys, crate::events::SCREEN, COLS - 1, &mut told)), (None, None));
         sys.ticks += 250;
         assert_eq!(run_line(&mut sys, "companion").1.lines[4..6], ["   key                 openrouter: kept", "   now                 answering, for 2 s"]);
         assert_eq!(run_line(&mut sys, "ask and now?").1.lines, ["The companion is still answering the last question."]);
@@ -3404,8 +3408,8 @@ pub mod tests {
         heard(&mut sys, Ok((200, answer.as_bytes())));
         assert_eq!((sys.companion.stage, sys.companion.outcome), (Stage::Idle, Some(Outcome::Said(1))));
         assert!(waits(&sys, crate::events::SERIAL));
-        assert_eq!(tell(&mut sys, crate::events::SCREEN, &mut told), None, "not the one who asked");
-        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(true));
+        assert_eq!(tell(&mut sys, crate::events::SCREEN, COLS - 1, &mut told), None, "not the one who asked");
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, COLS - 1, &mut told), Some(true));
         assert_eq!(told.lines, ["Fine.".to_string(), "word ".repeat(15).trim_end().to_string(), "word ".repeat(15) + "end", String::new(), "A last line with a tab here.".to_string()]);
         assert!(told.lines.iter().all(|line| line.len() < COLS) && told.errors == 0);
         // told once
@@ -3416,23 +3420,23 @@ pub mod tests {
         let long = "x".repeat(950);
         heard(&mut sys, Ok((200, format!(r#"{{"choices":[{{"message":{{"content":"Found: {long}"}}}}]}}"#).as_bytes())));
         let mut told = Lines::default();
-        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(true));
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, COLS - 1, &mut told), Some(true));
         // (a line is cut at its last space, or where the screen ends when it has none)
         assert_eq!(told.lines[..3], ["Let me look.".to_string(), "Found:".to_string(), "x".repeat(79)]);
         assert_eq!(told.lines[2..].concat(), long);
-        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), None);
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, COLS - 1, &mut told), None);
         // a question that fails is a command that fails, in the server's own words when it has some
         run_line(&mut sys, "ask hello?");
         heard(&mut sys, Ok((402, br#"{"error":{"message":"This request requires more credits than the key has left, or the account is not allowed to use this model at all today","code":402}}"#)));
         let mut told = Lines::default();
-        assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(false));
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, COLS - 1, &mut told), Some(false));
         assert_eq!(told.lines.len(), 2);
         assert!(told.lines[0].starts_with("The model's server refused (402): This request requires more credits") && told.errors == 2, "{:?}", told.lines);
         for why in [crate::ask::Failed::Silent, crate::ask::Failed::Name(crate::dns::Failed::NoSuchName), crate::ask::Failed::NoChance, crate::ask::Failed::Cut] {
             run_line(&mut sys, "ask hello?");
             heard(&mut sys, Err(why));
             let mut told = Lines::default();
-            assert_eq!(tell(&mut sys, crate::events::SERIAL, &mut told), Some(false));
+            assert_eq!(tell(&mut sys, crate::events::SERIAL, COLS - 1, &mut told), Some(false));
             assert!(told.lines.len() == 1 && told.lines[0].len() > 20 && told.lines[0].len() < COLS, "{:?}", told.lines);
         }
         assert_eq!(run_line(&mut sys, "companion").1.lines[6], "   calls to the model  8");

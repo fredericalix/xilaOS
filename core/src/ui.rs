@@ -102,13 +102,20 @@ impl Rhythm {
 }
 
 const LOGO: &[u8] = b"XILAOS";
-const TITLES: [&[u8]; 2] = [b"OVERVIEW", b"BOOT LOG"];
+const TITLES: [&[u8]; 3] = [b"OVERVIEW", b"BOOT LOG", b"COMPANION"];
+/// The screens by their number: the boot log has no line to type on,
+/// and the companion's is a conversation.
+const LOG: usize = 1;
+const COMPANION: usize = 2;
 
 pub struct Ui {
     pub grid: Grid,
-    /// One terminal per screen: the prompt, and the boot log.
-    terms: [Term; 2],
+    /// One terminal per screen: the prompt, the boot log, and what is
+    /// said with the companion.
+    terms: [Term; 3],
     editor: LineEditor,
+    /// The line being typed for the companion, on its screen.
+    chat: LineEditor,
     /// The selected line of the menu, when it is open.
     menu: Option<usize>,
     /// Something changed that `render` must show.
@@ -117,6 +124,28 @@ pub struct Ui {
     /// What the title bar last said of the doors to the network, the
     /// prompt and the pages: open or not, and who asked last.
     shown_remote: (bool, Option<crate::net::Ip>, bool, Option<crate::net::Ip>),
+}
+
+/// Writes what is said on the companion's screen, as a conversation is
+/// written: who speaks before the first line, the others under it.
+struct ChatOut<'a> {
+    term: &'a mut Term,
+    head: FixedStr<64>,
+    first: bool,
+    ink: u8,
+}
+
+impl Out for ChatOut<'_> {
+    fn line(&mut self, style: Style, text: &[u8]) {
+        self.term.new_row();
+        match core::mem::take(&mut self.first) {
+            true => self.term.put(self.head.bytes(), role::TERM_PROMPT),
+            false => self.term.put(&[b' '; 64][..self.head.len()], role::TERM_PROMPT),
+        }
+        self.term.put(text, if style == Style::Error { role::ERROR } else { self.ink });
+    }
+
+    fn table(&mut self, _: &Table) {}
 }
 
 /// Writes command output to a terminal.
@@ -152,8 +181,9 @@ impl Ui {
     pub const fn new() -> Ui {
         Ui {
             grid: Grid::new(),
-            terms: [Term::new(role::TERM_BASE), Term::new(role::BOOT_BASE)],
+            terms: [Term::new(role::TERM_BASE), Term::new(role::BOOT_BASE), Term::new(role::TERM_BASE)],
             editor: LineEditor::new(),
+            chat: LineEditor::new(),
             menu: None,
             dirty: true,
             shown_meter: 0,
@@ -176,6 +206,7 @@ impl Ui {
         hello.push_bytes(crate::VERSION);
         hello.push_bytes(b". Type help to begin. [Alt]+[E] opens the menu of screens.");
         term.line(hello.bytes(), role::TERM_OUT);
+        self.terms[COMPANION].line(b"The companion is here. Ask what you want to know: [Enter] sends, [Esc] leaves.", role::TERM_OUT);
         self.dirty = true;
     }
 
@@ -225,7 +256,7 @@ impl Ui {
 
         let page = self.term_rows(sys.screen).saturating_sub(1);
         let term = &mut self.terms[sys.screen];
-        let hidden = (term.len() + (sys.screen == 0) as usize).saturating_sub(page + 1);
+        let hidden = (term.len() + (sys.screen != LOG) as usize).saturating_sub(page + 1);
         match ev.key {
             Key::PageUp => {
                 term.scroll = (term.scroll + page).min(hidden);
@@ -241,26 +272,31 @@ impl Ui {
             }
             _ => {}
         }
-        if sys.screen != 0 {
+        if sys.screen == LOG {
             return;
         }
 
         term.scroll = 0;
+        // the line that is typed: a command at the prompt, or something to ask the companion
+        let talking = sys.screen == COMPANION;
+        let editor = if talking { &mut self.chat } else { &mut self.editor };
         match ev.key {
-            Key::Char(c) => {
-                self.editor.insert(c);
+            Key::Char(c) => editor.insert(c),
+            Key::Backspace => editor.backspace(),
+            Key::Delete => editor.delete(),
+            Key::Left => editor.left(),
+            Key::Right => editor.right(),
+            Key::Home => editor.home(),
+            Key::End => editor.end(),
+            Key::Up => editor.older(),
+            Key::Down => editor.newer(),
+            Key::Tab if !talking => self.complete(),
+            Key::Enter if talking => {
+                let line = editor.take();
+                self.say(sys, line.bytes());
             }
-            Key::Backspace => self.editor.backspace(),
-            Key::Delete => self.editor.delete(),
-            Key::Left => self.editor.left(),
-            Key::Right => self.editor.right(),
-            Key::Home => self.editor.home(),
-            Key::End => self.editor.end(),
-            Key::Up => self.editor.older(),
-            Key::Down => self.editor.newer(),
-            Key::Tab => self.complete(),
             Key::Enter => {
-                let line = self.editor.take();
+                let line = editor.take();
                 if shell::typed(line.bytes()) != line {
                     // it holds a secret: the arrow keys do not bring it back
                     self.editor.forget();
@@ -269,6 +305,39 @@ impl Ui {
             }
             _ => {}
         }
+    }
+
+    /// What starts a line of the conversation: the time, if the machine
+    /// knows it, and who speaks.
+    fn speaker(sys: &System, name: &[u8]) -> FixedStr<64> {
+        let mut head = FixedStr::new();
+        if let Some(now) = sys.now() {
+            // `2026-11-26 16:34:58`: the hour and the minute of it
+            head.push_bytes(&crate::clock::Moment::at(now).text().bytes()[11..16]);
+            head.push(b' ');
+        }
+        head.push(b'<');
+        head.push_bytes(name);
+        head.push_bytes(b"> ");
+        head.lower();
+        head
+    }
+
+    /// Asks the companion what was typed on its screen.
+    fn say(&mut self, sys: &mut System, line: &[u8]) {
+        let line = crate::text::trim(line);
+        if line.is_empty() {
+            return;
+        }
+        let term = &mut self.terms[COMPANION];
+        let head = Ui::speaker(sys, b"you");
+        let mut said = ChatOut { term, head, first: true, ink: role::TERM_CMD };
+        crate::text::wrap(line, COLS - 1 - head.len(), &mut |part| said.line(Style::Out, part));
+        if let Err(message) = crate::companion::ask(sys, line, crate::companion::HERE) {
+            ChatOut { term, head: FixedStr::from_bytes(b"      * "), first: true, ink: role::ERROR }.line(Style::Error, message.bytes());
+        }
+        sys.nudge(50);
+        self.dirty = true;
     }
 
     /// Runs a line as if it had been typed at the prompt of the screen.
@@ -352,9 +421,17 @@ impl Ui {
             self.terms[0].line(line.bytes(), role::TERM_PROMPT);
             self.dirty = true;
         }
-        // The companion's answer to what was asked here, when it has come.
-        if crate::companion::tell(sys, events::SCREEN, &mut TermOut { term: &mut self.terms[0] }).is_some() {
+        // The companion's answer, when it has come: at the prompt if it
+        // was asked there, in the conversation if it was asked on its screen.
+        if crate::companion::tell(sys, events::SCREEN, COLS - 1, &mut TermOut { term: &mut self.terms[0] }).is_some() {
             self.terms[0].scroll = 0;
+            self.dirty = true;
+        }
+        if sys.companion.asker == crate::companion::HERE && sys.companion.outcome.is_some() {
+            let head = Ui::speaker(sys, crate::companion::who(&sys.db).name.bytes());
+            let term = &mut self.terms[COMPANION];
+            term.scroll = 0;
+            crate::companion::tell(sys, crate::companion::HERE, COLS - 1 - head.len(), &mut ChatOut { term, head, first: true, ink: role::TERM_OUT });
             self.dirty = true;
         }
         let lost = sys.events.take_lost(events::SCREEN);
@@ -482,7 +559,7 @@ impl Ui {
         for row in BODY_TOP..top {
             self.grid.fill(row, 0, COLS, Cell::new(b' ', role::TERM_OUT, term.bg));
         }
-        let prompt = sys.screen == 0;
+        let prompt = sys.screen != LOG;
         let total = term.len() + prompt as usize;
         let first = total.saturating_sub(height);
         let first = first - term.scroll.min(first);
@@ -496,13 +573,19 @@ impl Ui {
                     self.grid.put(col, row, cell);
                 }
             } else if prompt && i == term.len() {
-                let mut col = self.grid.text(0, row, shell::prompt(sys, events::SCREEN), role::TERM_PROMPT, term.bg);
+                // at the prompt, a command; on the companion's screen, something to ask it
+                let (mark, editor): (&[u8], &LineEditor) = match sys.screen {
+                    COMPANION if sys.companion.stage == crate::companion::Stage::Calling && sys.companion.asker == crate::companion::HERE => (b"(thinking) ", &self.chat),
+                    COMPANION => (b"<you> ", &self.chat),
+                    _ => (shell::prompt(sys, events::SCREEN), &self.editor),
+                };
+                let mut col = self.grid.text(0, row, mark, role::TERM_PROMPT, term.bg);
                 // a line longer than the row slides to the left under the
                 // prompt, so that the cursor stays in sight
                 let room = COLS - col;
-                let typed = self.editor.bytes();
-                let start = self.editor.cursor().saturating_sub(room - 1);
-                let cursor = col + self.editor.cursor() - start;
+                let typed = editor.bytes();
+                let start = editor.cursor().saturating_sub(room - 1);
+                let cursor = col + editor.cursor() - start;
                 col = self.grid.text(col, row, &typed[start..typed.len().min(start + room)], role::TERM_CMD, term.bg);
                 self.grid.fill(row, col, COLS, blank);
                 let under = self.grid.get(cursor, row).ch;
@@ -551,6 +634,10 @@ mod tests {
 
     fn alt(c: u8, digit: Option<u8>) -> KeyEvent {
         KeyEvent { key: Key::Char(c), alt: true, ctrl: false, digit }
+    }
+
+    fn alt_digit(digit: u8) -> KeyEvent {
+        alt(b'0' + digit, Some(digit))
     }
 
     fn type_text(ui: &mut Ui, sys: &mut System, text: &str) {
@@ -788,6 +875,54 @@ mod tests {
         ui.tick(&mut sys, 1);
         ui.render(&mut sys);
         assert_eq!(body(&ui).len(), 6, "said once");
+    }
+
+    #[test]
+    fn the_companion_has_a_screen_where_one_talks_with_it() {
+        let (mut ui, mut sys) = start();
+        ui.welcome();
+        sys.net.ip = Some([10, 0, 2, 15]);
+        // 26 November 2026, 16:34:58
+        sys.clock = Some((849_026_098, 0));
+        ui.key(&mut sys, alt_digit(2));
+        ui.render(&mut sys);
+        assert!(row(&ui, 4).contains("COMPANION"));
+        assert_eq!(body(&ui), ["The companion is here. Ask what you want to know: [Enter] sends, [Esc] leaves.", "<you>"]);
+        // what is typed here is for the companion, not for the prompt
+        type_text(&mut ui, &mut sys, "mood calm");
+        ui.render(&mut sys);
+        assert_eq!(body(&ui)[1], "<you> mood calm");
+        ui.key(&mut sys, key(Key::Enter));
+        ui.render(&mut sys);
+        // no key yet: said in the conversation
+        assert_eq!(body(&ui)[1..], ["16:34 <you> mood calm", "      * No key opens the model. Type key set openrouter and the key.", "<you>"]);
+        assert_eq!(sys.mood.name(), b"auto", "nothing was run");
+        crate::secrets::set(&mut sys.db, b"openrouter", b"sk-or-v1-secret").unwrap();
+        // a long question is written under itself
+        let question = "which of my notes has the most stars, and how many stars is that, compared with the others?";
+        type_text(&mut ui, &mut sys, question);
+        ui.key(&mut sys, key(Key::Enter));
+        ui.tick(&mut sys, 100);
+        ui.render(&mut sys);
+        assert_eq!(body(&ui)[3..], ["16:34 <you> which of my notes has the most stars, and how many stars is that,", "            compared with the others?", "(thinking)"]);
+        assert_eq!((sys.companion.asker, sys.companion.stage), (crate::companion::HERE, crate::companion::Stage::Calling));
+        // one can go and type at the prompt meanwhile; what was being typed here stays
+        type_text(&mut ui, &mut sys, "and");
+        ui.key(&mut sys, alt_digit(0));
+        type_text(&mut ui, &mut sys, "mood calm");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(sys.mood.name(), b"calm");
+        // the answer comes into the conversation, not at the prompt
+        crate::companion::heard(&mut sys, Ok((200, br#"{"choices":[{"message":{"content":"\"holidays\" has the most stars: 5. That is two more than rent, and four more than taxes.\nAsk me again."}}]}"#)));
+        ui.tick(&mut sys, 6000);
+        ui.render(&mut sys);
+        assert!(!body(&ui).iter().any(|row| row.contains("holidays")));
+        ui.key(&mut sys, alt_digit(2));
+        ui.render(&mut sys);
+        assert_eq!(body(&ui)[5..], ["16:35 <xila> \"holidays\" has the most stars: 5. That is two more than rent, and", "             four more than taxes.", "             Ask me again.", "<you> and"]);
+        // Esc goes back to the overview, as on the other screens
+        ui.key(&mut sys, key(Key::Esc));
+        assert_eq!(sys.screen, 0);
     }
 
     #[test]

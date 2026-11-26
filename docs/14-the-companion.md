@@ -17,8 +17,8 @@ lives in.
 > about tables that must stay here.
 
 This is its first form. It answers and it reads. It does not act, it
-keeps no notes, it does not react to what happens, and it has no
-screen of its own yet: see [what is left](#what-is-left).
+keeps no notes and it does not react to what happens yet: see
+[what is left](#what-is-left).
 
 ## Asking
 
@@ -69,6 +69,24 @@ model's server does not answer.`, `What the model's server said is not
 an answer.`, `The companion looked again and again without answering:
 given up.`, or what `net get https://` says of a server it does not
 trust.
+
+## Its screen
+
+`Alt`+`2` shows the companion's own screen. What is typed there is for
+it, with no `ask` before it, and what is said is written as a
+conversation is: the time, who speaks, and what they say under it.
+
+![The companion's screen](screenshots/companion.png)
+
+While the model thinks, the line to type on says `(thinking)`; one can
+go to the prompt (`Alt`+`0`) and work there meanwhile, and what was
+being typed stays. `PgUp` and `PgDn` scroll, `Esc` goes back to the
+overview. The answer to a question asked here comes here; the answer
+to an `ask` typed at the prompt comes at the prompt.
+
+The screen shows what was said since the machine started. What was
+said before is in the table `talk`, and still goes along with the
+next question.
 
 ## What it sees
 
@@ -173,7 +191,8 @@ TLS client and an `Ask`, steps them until the answer is whole, hands
 it to `heard`, and starts again if the companion is still `Calling`.
 Nothing waits in a loop, so the keyboard, the screen and the serial
 port go on. The session that asked is told when the outcome is there
-(`companion::tell`): the screen at its next tick, the serial task by
+(`companion::tell`): the screen at its next tick (at the prompt, or in the conversation of
+the companion's screen when it was asked there), the serial task by
 looking at each tick before it writes its status line.
 
 `core/src/json.rs` writes and reads JSON without a heap: writing goes
@@ -199,8 +218,6 @@ and against the real one when a key and the Internet are there.
 
 ## What is left
 
-- **A screen of its own**, where the conversation scrolls and what is
-  typed is for the companion.
 - **Acting**: running commands and changing data, with every action
   written in a table, a command that stops it, and `install`,
   `disk erase`, `remote on` and `web on` refused to it. Until then it

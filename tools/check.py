@@ -140,7 +140,7 @@ with Xila(disk=disk) as x:
     # numbered results
     x.type("screen")
     x.key("ret")
-    check("screen lists the screens with numbers", " [2] [Alt]+[1]  boot log" in body(x)[-3], body(x)[-4:])
+    check("screen lists the screens with numbers", " [2] [Alt]+[1]  boot log" in body(x)[-4] and " [3] [Alt]+[2]  companion" in body(x)[-3], body(x)[-5:])
     # a list belongs to who was shown it: the serial port has its own
     ok, lines = x.cmd("1")
     check("a list shown on the screen is not the serial port's", not ok and lines == ["There is no list to follow yet."], lines)
@@ -1412,6 +1412,27 @@ with Xila(net="e1000e") as x:
     took = time.time() - start
     screen = [row for row in x.peek() if row.strip()]
     check("ask: the answer comes to the screen that asked, when the model gives it", any("Slow but sure." in row for row in screen) and 2.5 < took < 12, (screen[-4:], took))
+    # Its own screen: what is typed there is for it, and what is said is
+    # written as a conversation is.
+    model_says[:] = [{"said": "Here I am.\nOn my own screen.", "wait": 1}]
+    x.key("alt-2", 0.4)
+    empty = [row.rstrip() for row in x.peek() if row.strip()]
+    check("companion screen: [Alt]+[2] shows it, with a line to type on", "COMPANION" in empty[4] and empty[-1] == "<you>" and empty[-2].startswith("The companion is here."), empty[4:])
+    x.type("are you here?")
+    x.key("ret", 0.3)
+    thinking = [row.rstrip() for row in x.peek() if row.strip()]
+    check("companion screen: what is typed is asked, and it says the companion thinks", re.fullmatch(r"\d\d:\d\d <you> are you here\?", thinking[-2]) and thinking[-1] == "(thinking)", thinking[-2:])
+    for _ in range(60):
+        if any("On my own screen." in row for row in x.peek()):
+            break
+        time.sleep(0.2)
+    said = [row.rstrip() for row in x.peek() if row.strip()]
+    check("companion screen: the answer is written under who says it", re.fullmatch(r"\d\d:\d\d <xila> Here I am\.", said[-3]) and said[-2] == " " * 13 + "On my own screen." and said[-1] == "<you>", said[-4:])
+    check("companion screen: the model was asked what was typed there", model_asked[-1][1]["messages"][-1] == {"role": "user", "content": "are you here?"}, model_asked[-1][1]["messages"][-1])
+    x.key("esc", 0.4)
+    back = x.peek()
+    check("companion screen: [Esc] goes back, and the prompt's screen did not get the answer", "OVERVIEW" in back[4] and not any("On my own screen." in row for row in back), [row for row in back if row.strip()][-3:])
+    check("companion screen: it is one of the screens", [row["name"] for row in x.table("select name from screens")] == ["overview", "boot log", "companion"])
     told = {row["item"]: row["value"] for row in x.table("companion")}
     check("companion: says who it is and what it has done", (told.get("model"), told.get("key"), told.get("character"), told.get("now"), told.get("queries run for it")) == ("made-up/model", "openrouter: kept", "You are brief.", "nothing asked", "5"), told)
 

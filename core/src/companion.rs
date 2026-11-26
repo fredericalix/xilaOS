@@ -55,6 +55,9 @@ const TURNS: i64 = 6;
 /// Room the kernel gives for a question to the model, and for its answer.
 pub const REQUEST: usize = 48 * 1024;
 pub const ANSWER: usize = 64 * 1024;
+/// Who asked, when it was asked on the companion's own screen: no
+/// session of a prompt.
+pub const HERE: usize = usize::MAX;
 /// Ticks of silence a model is waited for: it may think for a while.
 pub const PATIENCE: u64 = 9000;
 
@@ -226,9 +229,11 @@ fn say(db: &mut Database, turn: i64, who: &[u8], text: &[u8]) -> Option<u64> {
     }
 }
 
-/// Takes a question. The answer comes later: `System::companion` says
-/// when (`outcome`). Returns why not, when it cannot even be asked.
-pub fn ask(sys: &mut System, text: &[u8]) -> Result<(), Message> {
+/// Takes a question, from a session of a prompt or from the companion's
+/// screen (`HERE`). The answer comes later: `System::companion` says when
+/// (`outcome`), and `tell` gives it to who asked. Returns why not, when
+/// it cannot even be asked.
+pub fn ask(sys: &mut System, text: &[u8], asker: usize) -> Result<(), Message> {
     let text = text.trim_ascii();
     if text.is_empty() || text.len() > ASKED {
         return Err(Message::from_bytes(b"Type ask and what you want to know: ask how many tasks are running?"));
@@ -259,7 +264,6 @@ pub fn ask(sys: &mut System, text: &[u8]) -> Result<(), Message> {
     let turn = last + 1;
     say(&mut sys.db, turn, b"you", text).ok_or(Message::from_bytes(b"The question could not be kept: the tables cannot be written."))?;
     let ticks = sys.ticks;
-    let asker = sys.session;
     let companion = &mut sys.companion;
     (companion.stage, companion.turn, companion.rounds, companion.asker, companion.outcome, companion.since) = (Stage::Calling, turn, 0, asker, None, ticks);
     companion.refusal.clear();
@@ -605,10 +609,10 @@ pub fn waits(sys: &System, session: usize) -> bool {
 }
 
 /// Tells the session that asked how its question ended, once that is
-/// known: the answer, in lines no longer than the screen is wide, or why
+/// known: the answer, in lines of `width` characters at most, or why
 /// there is none. Returns whether there was an answer; None while there
 /// is nothing to tell, or when it is another session that asked.
-pub fn tell(sys: &mut System, session: usize, out: &mut dyn crate::shell::Out) -> Option<bool> {
+pub fn tell(sys: &mut System, session: usize, width: usize, out: &mut dyn crate::shell::Out) -> Option<bool> {
     use crate::shell::Style;
     if sys.companion.asker != session {
         return None;
@@ -625,7 +629,7 @@ pub fn tell(sys: &mut System, session: usize, out: &mut dyn crate::shell::Out) -
                 }
                 for &byte in text {
                     // a line ends where the text says, or at the last space that fits
-                    if byte == b'\n' || line.len() == crate::grid::COLS - 1 {
+                    if byte == b'\n' || line.len() >= width {
                         let cut = if byte == b'\n' { line.len() } else { line.bytes().iter().rposition(|byte| *byte == b' ').unwrap_or(line.len()) };
                         out.line(Style::Out, line.bytes()[..cut].trim_ascii_end());
                         line = FixedStr::from_bytes(line.bytes()[cut..].trim_ascii_start());
@@ -643,7 +647,7 @@ pub fn tell(sys: &mut System, session: usize, out: &mut dyn crate::shell::Out) -
         Outcome::Failed(why) => {
             let words = trouble(sys, why);
             // a refusal in the server's own words may be longer than a line
-            for part in words.bytes().chunks(crate::grid::COLS - 1) {
+            for part in words.bytes().chunks(width) {
                 out.line(Style::Error, part);
             }
             Some(false)
@@ -726,9 +730,8 @@ mod tests {
     fn a_question_is_kept_and_sent_with_who_the_companion_is() {
         let mut sys = ready();
         assert_eq!((sys.companion.stage, talk(&sys.db)), (Stage::Idle, None));
-        sys.session = crate::events::SERIAL;
         sys.ticks = 700;
-        assert_eq!(ask(&mut sys, b"  how many notes do I have?  "), Ok(()));
+        assert_eq!(ask(&mut sys, b"  how many notes do I have?  ", crate::events::SERIAL), Ok(()));
         let companion = &sys.companion;
         assert_eq!((companion.stage, companion.turn, companion.asker, companion.outcome, companion.since), (Stage::Calling, 1, crate::events::SERIAL, None, 700));
         assert_eq!(rows(&mut sys), ["[1, [121, 111, 117], [104, 111, 119, 32, 109, 97, 110, 121, 32, 110, 111, 116, 101, 115, 32, 100, 111, 32, 73, 32, 104, 97, 118, 101, 63]]"]);
@@ -758,7 +761,7 @@ mod tests {
     #[test]
     fn the_model_looks_at_the_tables_before_it_answers() {
         let mut sys = ready();
-        ask(&mut sys, b"how many notes do I have?").unwrap();
+        ask(&mut sys, b"how many notes do I have?", crate::events::SERIAL).unwrap();
         // it says it will look, and asks for two queries
         heard(&mut sys, Ok((200, &answer(Some("I'll check."), &["select count(*) from notes", "select label, stars from notes where stars > 4"]))));
         assert_eq!((sys.companion.stage, sys.companion.outcome, sys.companion.calls, sys.companion.queries), (Stage::Calling, None, 1, 2));
@@ -778,7 +781,7 @@ mod tests {
         let seen = run_line(&mut sys, "select turn, who, text from talk order by id").1.lines;
         assert_eq!(seen[1..], ["   1     you     how many notes do I have?", "   1     xila    I'll check.", "   1     select  select count(*) from notes", "   1     select  select label, stars from notes where stars > 4", "   1     result  count 2", "   1     result  label stars a \"quoted\" one 5", "   1     xila    You have 2 notes. One has 5 stars."]);
         // the next question goes with what was said before
-        ask(&mut sys, b"and the other one?").unwrap();
+        ask(&mut sys, b"and the other one?", crate::events::SERIAL).unwrap();
         assert_eq!(sys.companion.turn, 2);
         let messages = messages_of(&sent(&sys));
         assert_eq!(messages.len(), 7);
@@ -793,7 +796,7 @@ mod tests {
     #[test]
     fn the_only_way_in_reads_and_reads_what_sql_reads() {
         let mut sys = ready();
-        ask(&mut sys, b"clean up").unwrap();
+        ask(&mut sys, b"clean up", crate::events::SERIAL).unwrap();
         // what is not a query is not run, a table that is not there is said not to be, and keys are nobody's
         let wanted = ["delete from notes", "select * from kept_keys", "drop table notes", "select * from nowhere"];
         heard(&mut sys, Ok((200, &answer(None, &wanted))));
@@ -829,14 +832,14 @@ mod tests {
     #[test]
     fn a_model_that_never_answers_is_given_up() {
         let mut sys = ready();
-        ask(&mut sys, b"how many notes?").unwrap();
+        ask(&mut sys, b"how many notes?", crate::events::SERIAL).unwrap();
         for round in 1..=ROUNDS {
             assert_eq!(sys.companion.stage, Stage::Calling, "round {round}");
             heard(&mut sys, Ok((200, &answer(None, &["select count(*) from notes"]))));
         }
         assert_eq!((sys.companion.stage, sys.companion.outcome), (Stage::Idle, Some(Outcome::Failed(Trouble::TooMany))));
         // the next question can be asked, and what was left unfinished does not break it
-        ask(&mut sys, b"well?").unwrap();
+        ask(&mut sys, b"well?", crate::events::SERIAL).unwrap();
         let messages = messages_of(&sent(&sys));
         assert_eq!(messages.last().unwrap().1, "well?");
         assert_eq!(messages.iter().filter(|message| message.0 == "tool").count(), ROUNDS as usize);
@@ -846,9 +849,9 @@ mod tests {
     fn what_goes_wrong_is_said_in_words() {
         let mut sys = ready();
         // what cannot even be asked
-        assert_eq!(ask(&mut sys, b"   ").unwrap_err().bytes(), b"Type ask and what you want to know: ask how many tasks are running?");
-        assert!(ask(&mut sys, &[b'x'; ASKED + 1]).is_err() && ask(&mut sys, &[b'x'; ASKED]).is_ok());
-        assert_eq!(ask(&mut sys, b"again?").unwrap_err().bytes(), b"The companion is still answering the last question.");
+        assert_eq!(ask(&mut sys, b"   ", crate::events::SERIAL).unwrap_err().bytes(), b"Type ask and what you want to know: ask how many tasks are running?");
+        assert!(ask(&mut sys, &[b'x'; ASKED + 1], crate::events::SERIAL).is_err() && ask(&mut sys, &[b'x'; ASKED], crate::events::SERIAL).is_ok());
+        assert_eq!(ask(&mut sys, b"again?", crate::events::SERIAL).unwrap_err().bytes(), b"The companion is still answering the last question.");
         // the server refuses, in its own words
         heard(&mut sys, Ok((401, br#"{"error":{"message":"No auth credentials found","code":401}}"#)));
         assert_eq!(sys.companion.outcome, Some(Outcome::Failed(Trouble::Refused(401))));
@@ -862,35 +865,35 @@ mod tests {
             (200, br#"{"choices":[{"message":{"content":"  "}}]}"#, Trouble::Lost),
             (200, b"", Trouble::Lost),
         ] {
-            ask(&mut sys, b"hello?").unwrap();
+            ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap();
             heard(&mut sys, Ok((status, said)));
             assert_eq!((sys.companion.stage, sys.companion.outcome), (Stage::Idle, Some(Outcome::Failed(why))), "{status} {:?}", String::from_utf8_lossy(said));
             assert!(trouble(&sys, why).len() > 20);
         }
-        ask(&mut sys, b"hello?").unwrap();
+        ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap();
         heard(&mut sys, Err(crate::ask::Failed::Silent));
         assert_eq!(sys.companion.outcome, Some(Outcome::Failed(Trouble::Ask(crate::ask::Failed::Silent))));
         // no key, no address, a place that is not one, a table in the way
         let mut sys = ready();
         crate::secrets::forget(&mut sys.db, b"openrouter").unwrap();
-        assert_eq!(ask(&mut sys, b"hello?").unwrap_err().bytes(), b"No key opens the model. Type key set openrouter and the key.");
+        assert_eq!(ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap_err().bytes(), b"No key opens the model. Type key set openrouter and the key.");
         assert_eq!(talk(&sys.db), None, "nothing was made for a question that was not asked");
         let mut sys = ready();
         sys.net.ip = None;
-        assert_eq!(ask(&mut sys, b"hello?").unwrap_err().bytes(), b"This machine has no address on the network yet. Type net to see why.");
+        assert_eq!(ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap_err().bytes(), b"This machine has no address on the network yet. Type net to see why.");
         let mut sys = ready();
-        ask(&mut sys, b"hello?").unwrap();
+        ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap();
         heard(&mut sys, Ok((200, &answer(Some("Hello."), &[]))));
         run_line(&mut sys, "update companions set place = 'nowhere at all'");
-        assert_eq!(ask(&mut sys, b"hello?").unwrap_err().bytes(), b"The place of the model, in the table companions, is not a place.");
+        assert_eq!(ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap_err().bytes(), b"The place of the model, in the table companions, is not a place.");
         // a plain place needs no key: none would go there anyway
         run_line(&mut sys, "update companions set place = 'http://10.0.2.2:8000/v1/chat'");
         crate::secrets::forget(&mut sys.db, b"openrouter").unwrap();
-        assert_eq!(ask(&mut sys, b"hello?"), Ok(()));
+        assert_eq!(ask(&mut sys, b"hello?", crate::events::SERIAL), Ok(()));
         assert_eq!(json::get(&sent(&sys), b"reasoning"), None, "only said to the server that knows the word");
         let mut sys = ready();
         run_line(&mut sys, "create table talk (n int)");
-        assert_eq!(ask(&mut sys, b"hello?").unwrap_err().bytes(), b"The table talk is not the one the companion keeps what is said in.");
+        assert_eq!(ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap_err().bytes(), b"The table talk is not the one the companion keeps what is said in.");
     }
 
     #[test]
@@ -899,7 +902,7 @@ mod tests {
         // an answer longer than a row holds is kept in several, and is one again when it is sent
         let long: String = (0..2000).map(|at| char::from(b'a' + (at % 26) as u8)).collect();
         for turn in 1..=9 {
-            ask(&mut sys, format!("question {turn}").as_bytes()).unwrap();
+            ask(&mut sys, format!("question {turn}").as_bytes(), crate::events::SERIAL).unwrap();
             heard(&mut sys, Ok((200, &answer(Some(&long), &[]))));
             assert_eq!(sys.companion.outcome, Some(Outcome::Said(turn)));
         }
@@ -910,7 +913,7 @@ mod tests {
             pieces.push(more);
         });
         assert_eq!((all, pieces), (long.clone(), vec![false, true, true]));
-        ask(&mut sys, b"question 10").unwrap();
+        ask(&mut sys, b"question 10", crate::events::SERIAL).unwrap();
         let messages = messages_of(&sent(&sys));
         // who it is, five turns whole, and the question
         assert_eq!(messages.len(), 1 + 2 * 5 + 1);

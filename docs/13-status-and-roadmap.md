@@ -42,15 +42,15 @@ were also tried on the real machine.
 | TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | not tried |
 | HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | not tried |
 | Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | not tried |
-| The companion, first form: `ask`, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | not tried |
+| The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 26 November 2026: about 29,500 lines, 288
-unit tests, 434 system checks.
+about 300 system checks. On 26 November 2026: about 29,500 lines, 289
+unit tests, 440 system checks.
 
 ## Known limits of what is done
 
@@ -89,7 +89,7 @@ nothing beyond a code sent in clear.** Details in
 **Hardware.** One real machine. PS/2 keyboard only, no USB, no NVMe, no
 sound, no Wi-Fi. Details in [Hardware and graphics](11-hardware.md).
 
-**Interface.** Two virtual screens (the overview and the boot log). The
+**Interface.** Three virtual screens (the overview, the boot log and the companion's). The
 `sound` and `irc` labels of the header come from the mock-up and have
 nothing behind them.
 
@@ -301,10 +301,11 @@ in the table `talk`, as long lines; who it is in the table
 waits for it but who asked. It is described in
 [The companion](14-the-companion.md).
 
-What is left, in order:
+Its screen came next, the same day: `Alt`+`2`, where what is typed is
+for the companion and what is said is written as a conversation.
 
-5. **Its screen**, where the conversation scrolls and what is typed is
-   for the companion.
+What is left:
+
 6. **Acting, notes, events**: commands it runs and data it changes,
    each written in a table, with a command that stops it and four
    commands refused to it; notes of its own; reactions to changes in

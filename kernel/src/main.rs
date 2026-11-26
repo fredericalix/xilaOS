@@ -1054,7 +1054,7 @@ extern "C" fn serial_shell(_: usize) -> ! {
                             if !xila_core::companion::waits(sys, events::SERIAL) {
                                 break;
                             }
-                            if let Some(told) = xila_core::companion::tell(sys, events::SERIAL, &mut SerialOut { serial: &serial }) {
+                            if let Some(told) = xila_core::companion::tell(sys, events::SERIAL, xila_core::grid::COLS - 1, &mut SerialOut { serial: &serial }) {
                                 ok &= told;
                                 break;
                             }

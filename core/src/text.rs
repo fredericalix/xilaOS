@@ -132,6 +132,23 @@ pub fn trim(mut bytes: &[u8]) -> &[u8] {
 }
 
 /// Splits at the first space: the first word, and the trimmed remainder.
+/// Cuts a text into lines of `width` characters at most, at its line
+/// breaks and at spaces, and calls `visit` with each.
+pub fn wrap(text: &[u8], width: usize, visit: &mut dyn FnMut(&[u8])) {
+    for mut line in text.split(|byte| *byte == b'\n') {
+        loop {
+            if line.len() <= width {
+                visit(line);
+                break;
+            }
+            // at the last space that fits, or where the width ends if there is none
+            let cut = line[..width + 1].iter().rposition(|byte| *byte == b' ').filter(|cut| *cut > 0).unwrap_or(width);
+            visit(line[..cut].trim_ascii_end());
+            line = line[cut..].trim_ascii_start();
+        }
+    }
+}
+
 pub fn split_word(bytes: &[u8]) -> (&[u8], &[u8]) {
     let bytes = trim(bytes);
     match bytes.iter().position(|&b| b == b' ') {

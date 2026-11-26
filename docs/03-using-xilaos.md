@@ -55,12 +55,13 @@ XilaOS 0.1. Type help to begin. [Alt]+[E] opens the menu of screens.
 
 ## Screens and keys
 
-There are two virtual screens:
+There are three virtual screens:
 
 | Key | Screen | What it holds |
 |---|---|---|
 | `Alt`+`0` | overview | The city and the prompt. |
 | `Alt`+`1` | boot log | What the system found at start, then what the programs that run by themselves say. |
+| `Alt`+`2` | companion | The conversation with the companion: what is typed there is for it. See [The companion](14-the-companion.md). |
 
 `Alt`+`E` opens the menu of screens at the top right of the body. `Up` and
 `Down` move the selection, `Enter` shows the selected screen, `Esc` or
