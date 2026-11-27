@@ -212,9 +212,21 @@ class Xila:
         text = data[:-len(PROMPT)].decode("ascii", "replace").replace("\r", "")
         return [line for line in text.split("\n")]
 
+    def begin(self, line):
+        """Sends a command and does not wait for its end: for a program the
+        prompt waits for, which `stop` then ends."""
+        self.serial.sendall(line.encode() + b"\r")
+
+    def stop(self, timeout=20):
+        """Sends Ctrl+C to the program the serial prompt waits for, and reads
+        to the prompt. Returns (ok, output lines), as `cmd` does."""
+        self.serial.sendall(b"\x03")
+        return self.cmd(None, timeout)
+
     def cmd(self, line, timeout=20):
         """Runs a command on the serial shell. Returns (ok, output lines)."""
-        self.serial.sendall(line.encode() + b"\r")
+        if line is not None:
+            self.serial.sendall(line.encode() + b"\r")
         lines = self.read_until_prompt(timeout, (b"#ok\r\n", b"#error\r\n"))
         lines = lines[1:]  # the echo of the command
         while lines and lines[-1] == "":

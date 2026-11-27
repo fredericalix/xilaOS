@@ -79,7 +79,8 @@ The keys, all of them (`help k` lists them on the system):
 | `Alt`+`E` | Opens or closes the menu of screens. |
 | `Alt`+`0`, `Alt`+`1` | Shows a screen. The digit is the one printed on the key, so no `Shift` is needed on a French keyboard. |
 | `Alt`+`X` | Changes the mood: calm, auto, intense, and calm again. |
-| `Esc` | Closes the menu; otherwise goes back to the overview. |
+| `Esc` | Closes the menu; at the prompt, stops the program it waits for; otherwise goes back to the overview. |
+| `Alt`+`B` | Sends the program the prompt waits for to the background: it goes on as a job, and the prompt is back. |
 | `PgUp`, `PgDn` | Scrolls the terminal of the screen shown, a page at a time. |
 | `Tab` | Completes the command being typed. |
 | `Up`, `Down` | Recalls the lines already typed. |
@@ -195,7 +196,9 @@ busy, in which case they go between `elsewhere` and `running`. The three lines
 that leave `elsewhere` for the right edge are fixed. The sky above the horizon
 warms up with the mood.
 
-The `data` plot is full: there are nine views of the system and nine places.
+The `data` plot is full: nine places, for nine of the ten views of the
+system. The tenth, `jobs`, has no block there: each job that runs is a
+block of the `running` plot, beside the tasks, as tall as what it has run.
 A tenth stored table would not show on `home` either.
 
 `city` returns the same scene as a table, which is how a program on the

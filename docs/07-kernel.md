@@ -346,8 +346,17 @@ keeps its lines and its rows in the room of the virtual machine
 |---|---|
 | `idle` | The flow that booted. Halts the processor until the next interrupt. Runs when no other task is ready. |
 | `interface` | Keyboard, the interface, the network, the screen. One pass per tick. |
-| `serial shell` | Reads lines from COM1 and runs them. One pass per tick. |
+| `serial shell` | Reads lines from COM1 and runs them. One pass per tick; while it waits for a program, a turn of that program then the processor to the others, again and again. |
+| `jobs` | Carries the jobs nobody waits for: those submitted or sent to the background, and the programs that run by themselves. Under the lock it lets one of them run for three milliseconds, serves what it asked of the kernel, and gives the lock back. Sleeps a tick when none is ready. |
 | `spin` | Started by the `spin` command: a loop that never rests, there to show that the others keep running. `stop N` ends it. |
+
+A job is not a task: the eight jobs people may run and the one of the
+system are nine virtual machines, 270 KB each, that the kernel makes in
+its memory at start from one kept in its file (`rooms` in `main.rs`),
+and the `jobs` task gives them the processor in turn. The job a prompt
+waits for is given its turns by the task of that prompt: the interface
+task gives the screen's eight milliseconds of each tick. Nothing a job
+does keeps the lock longer than a turn and one instruction.
 
 The `tasks` command shows them with the time each one had the
 processor, and the `tasks` table adds the share each one gets, computed

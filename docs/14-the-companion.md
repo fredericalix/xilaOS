@@ -232,6 +232,7 @@ with an error the model reads, when it is:
 | `ask`, `companion on` | It does not ask itself, nor turn itself on again. |
 | A block: `if`, `while`, `for`, `program`, `on`, `every` | One line at a time. |
 | `qr` | Its code takes the screen of who asked for it, and the companion is nobody at a prompt. Refused to any program that runs by itself. |
+| `submit`, `job n end`, `job n hold`, `job n release` | Nothing it starts may outlive its answer, and the user's jobs are not its own to stop. It may read them: `jobs`, `job n`, `select ... from jobs`. |
 | A change to the tables `programs`, `acts` or `companions`, or another table given one of those names; `drop program` | See below. |
 | What needs the kernel while it is served: `net ping`, `net get`, `net restart`, `display test`, `disk check`... | The answer would come later, to nobody. |
 

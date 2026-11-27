@@ -52,6 +52,7 @@ columns of any of them, and of the stored tables too.
 | `memory` | `kind`, `kb` | Memory of the machine, of the kernel and of the database, in KB. |
 | `city` | `plot`, `block`, `height`, `lit` | What the city of the overview screen shows: one row per block. |
 | `commands` | `name` | The words the prompt knows. |
+| `jobs` | `job`, `program`, `state`, `by`, `began`, `statements` | The [jobs](05-xilascript.md#jobs): programs that run turn by turn, and those that ended and are still listed. |
 | `machine` | `item`, `value` | Processor, firmware, screen, graphics chip, clock, disk, and where the stored tables are kept. |
 
 The commands `tasks` and `city` read the same state as the views of the same

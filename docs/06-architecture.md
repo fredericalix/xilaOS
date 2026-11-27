@@ -118,7 +118,8 @@ storage engine allocates.
 | `shell.rs` | 3,167 | `System`, `exec`, every command, `Table`, the help texts. |
 | `lang.rs` | 1,499 | XilaScript: blocks, the table of programs, `on` and `every`. |
 | `code.rs` | 431 | XilaScript compiled: the instructions, the compiler, the faults of form. |
-| `machine.rs` | 628 | The virtual machine that runs them: units, programs three deep, loops over rows. |
+| `machine.rs` | 921 | The virtual machine that runs them: units, programs three deep, loops over rows; turns, and the rooms it runs in. |
+| `jobs.rs` | 897 | Jobs: programs that run turn by turn as who started them, what they said, `job_log`. |
 | `tcp.rs` | 1,305 | TCP as a state machine with no hardware. |
 | `net.rs` | 1,015 | Ethernet, ARP, IPv4, ICMP, UDP, the DHCP client. |
 | `sql.rs` | 1,523 | Lexer, `SELECT`, values, the `Source` trait, the cursor a loop reads its rows through. |
@@ -190,7 +191,9 @@ and run by the virtual machine (`machine.rs`, whose room is `System::vm`):
 `let`, `say`, the blocks, `run` and `return` are instructions of their
 own; everything else is the instruction `command`, which goes to
 `shell::command`, so every command is a statement. Programs are rows of
-the stored table `programs`. See [XilaScript](05-xilascript.md).
+the stored table `programs`. A program runs as a job (`jobs.rs`): the
+machine gives it turns in a room of its own, so that it holds nothing.
+See [XilaScript](05-xilascript.md).
 
 **Events.** A session listens to channels. `change` notifies the
 channel named after the table for each committed change. `Ui::tick`

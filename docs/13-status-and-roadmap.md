@@ -38,6 +38,7 @@ were also tried on the real machine.
 | LISTEN / NOTIFY | yes | yes |
 | XilaScript: variables, blocks, stored programs, `on` and `every` programs | yes | yes |
 | XilaScript compiled for the virtual machine, which runs it; what is wrong with the form of a program told when it is kept; loops over the rows of a stored table without a limit | yes | not tried |
+| Programs as jobs that hold nothing: the screen and the serial port wait for a program while the system lives (`Esc`, `Alt`+`B`, Ctrl+C); `submit`, `jobs`, `job`; the programs that run by themselves as jobs; `job_log` | yes | not tried |
 | Clock, `now` and `today`, `every day at` | yes | yes |
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
@@ -59,8 +60,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 37,000 lines, 349
-unit tests, 515 system checks.
+about 300 system checks. On 27 November 2026: about 39,000 lines, 369
+unit tests, 533 system checks.
 
 ## Known limits of what is done
 
@@ -77,7 +78,11 @@ date type. Details in
 **XilaScript.** No parameters, no editor (a program is retyped to be
 changed), no `insert ... select`. A loop reads every row of a stored
 table, but 32 at most of what is sorted, grouped or joined. A program
-holds the whole system while it runs. Details in
+runs as a job that holds nothing, at the screen, at the serial port
+and when it is submitted; one long instruction still holds the
+system, and so does a program run from the prompt over the network or
+for the companion. A submitted program has no names but its own, and
+no parameters to be given any. Details in
 [XilaScript](05-xilascript.md).
 
 **Storage.** A damaged page is detected, not repaired. A write the disk
@@ -617,12 +622,19 @@ pass.
    spare under a `SELECT`, so nothing large may stand on it while
    instructions run (a `SELECT` typed at the screen froze the system
    until that was seen to).
-2. Jobs: the kernel task and its slices, the prompts that wait, Esc
-   and Alt+B, `submit`, `jobs`, `job`, the programs that run by
-   themselves and the companion's lines as jobs, `job_log`. A loop
-   typed at the screen or the serial port then runs until it is
-   stopped: the checks that expect it cut after 10 000 rounds change
-   here.
+2. Done on 27 November 2026: jobs. The machine runs in turns, in
+   rooms the kernel makes in its memory; the screen and the serial
+   port wait for a program while the system lives (`Esc`, `Alt`+`B`,
+   Ctrl+C); `submit`, `jobs`, `job`; the programs that run by
+   themselves are jobs, one after the other; `job_log`. In QEMU a
+   `while` goes round about 440 000 times a second. Left as they
+   were, by the author's choice: what the prompt over the network and
+   the companion run, at once and with the limits. What it showed for
+   what comes next: a submitted program has names of its own and no
+   way to be given any, so parameters (step 3) are what makes
+   `submit` useful for more than programs that read everything from
+   tables; a job started through a command that types a line (`qr`)
+   still runs to its end inside that instruction.
 3. What the machine makes possible in the language: parameters, and
    names that belong to one program. How they are written, and how a
    program gives a value back, is chosen with the author before this

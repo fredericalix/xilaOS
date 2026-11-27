@@ -103,7 +103,10 @@ end
 | `while condition` ... `end` | Runs the lines again and again while the condition holds. |
 | `for row in select ...` ... `end` | Runs the lines for each row of the result; `row.column` gives its values. Any name can stand in place of `row`. |
 | `program name` ... `end` | Keeps the lines under a name, in the database. |
-| `run name`, or `name` alone | Runs a program. |
+| `run name`, or `name` alone | Runs a program. At the screen and at the serial port the prompt waits for it while the rest of the system lives ([jobs](#jobs)). |
+| `submit name` | Runs a program as a job nobody waits for: the prompt answers at once. |
+| `jobs` | Lists the jobs: those that run, and those that ended and are still listed. |
+| `job 3` | Shows a job, and the last lines it said. `job 3 end` stops it, `job 3 hold` keeps it from running, `job 3 release` lets it go on. |
 | `return` | Leaves the program that is running. |
 | `on insert into table` ... `end` | Keeps the lines, and runs them each time a row is added. Also `on update table`, `on delete from table`, `on notify channel`. |
 | `every 5 minutes` ... `end` | Keeps the lines, and runs them again and again: `seconds`, `minutes`, `hours`, `days`. |
@@ -352,8 +355,9 @@ model that can change the tables ([what holds it](14-the-companion.md#what-holds
 | Rows a `for` goes through | Any number, for a `select` of one stored table that neither sorts, groups nor limits; 32 for any other (a join, a view, `order by`, `group by`, a function over the rows): with more, it refuses to start rather than forget some |
 | Loops over rows, one inside the other | 4, the programs that are running counted together |
 | Calculations in one program | About ten values and operations a line for 48 lines (512 in all); beyond, the program is refused when it is kept: `Too many calculations for one program: split it in two.` |
-| Rounds of a `while` | 10 000, then it is stopped |
-| Statements run by one line typed at the prompt | 100 000, then it is stopped: that is also how far a loop over a large table goes, one statement for each line of its body at each row |
+| Rounds of a `while` | 10 000, then it is stopped, for a program that runs by itself and for what runs at once; none for a job a person started |
+| Jobs running or held | 8, the programs that run by themselves apart |
+| Statements run by a program that runs by itself, or by what runs at once | 100 000, then it is stopped: that is also how far its loop over a large table goes, one statement for each line of its body at each row, each round of a `while` counting for one more. None for a job a person started |
 | Programs that run programs | 3 deep. A program run through a command that types a line (`qr name`) counts for two |
 | `on` programs | 16 |
 | `every` programs, `every day at` included | 8 |
@@ -368,12 +372,93 @@ What is not there:
 - The values from before the change in `on update` and `on delete`.
 - Other rhythms by the clock (`every monday at 9:00`).
 - An editor.
-- **A program holds the system while it runs.** It runs in the task of
-  whoever started it, with the system locked: the screen does not answer
-  until it ends. This is why loops and programs are stopped after a number
-  of rounds and statements. The virtual machine was made so that this can
-  end: programs as jobs that hold nothing are the next step of the
-  [plan](13-status-and-roadmap.md#the-virtual-machine-and-the-jobs).
+- **What still holds the system while it runs**: one instruction, however
+  long (a `select` over a large table, `disk check`, `net get`), and whole
+  programs started from the prompt over the network or run for the
+  companion, which are not jobs yet. Those two keep the limits that stop a
+  program nobody watches.
+
+## Jobs
+
+A program no longer holds the system while it runs. It runs as a *job*:
+some of its instructions, then the system is given back, then some more.
+Between two instructions of a job the screen answers, the network is
+served and other jobs run. One statement is still whole, which is what
+keeps two jobs that change the same table from seeing half of what the
+other does.
+
+**At the prompt, a program is waited for.** At the screen and at the
+serial port, a program run by its name or by `run`, and a block typed
+there, become a job that prompt waits for. What it says is shown as it
+runs. At the screen the edit row says so, and how to have the prompt back:
+
+```
+XilaOS|all:/>inventory
+Counting shelves...
+Running inventory. [Esc] stops it, [Alt]+[B] sends it to the background.
+```
+
+`Esc` stops it and says where it was (`Stopped at line 12 of inventory.`).
+`Alt`+`B` lets it go on with nobody waiting: `Job 7 goes on in the
+background: job 7 shows it, job 7 end stops it.` At the serial port the
+status line comes when the job has ended, which is what a program that
+drives the machine wants; a Ctrl+C byte stops the job. A single line
+that is no program is not a job: it has run when the prompt comes back,
+so `jobs` and `job 3 end` can always be typed.
+
+**`submit name` runs a program that nobody waits for.**
+
+```
+XilaOS|all:/>submit inventory
+Job 7 submitted: inventory.
+XilaOS|all:/>jobs
+     job  program    state    by      since     statements
+ [1] 7    inventory  running  screen  14:02:10  4310
+XilaOS|all:/>1
+Job 7 is running: inventory
+Started at the screen at 14:02:10. 4310 statements run.
+Counting shelves...
+```
+
+- **What it says is kept with it**, its last lines (two thousand
+  characters), for as long as it is listed. `job 7` shows them.
+- **It has names of its own.** A job nobody waits for does not see the
+  names of the prompt that started it, and its own are gone when it ends.
+  A program that counts on a name made at the prompt (`let floor = 3`,
+  then `submit report`) stops with `Unknown name: floor`. Programs have no
+  parameters yet: what a submitted program needs, it reads from a table.
+  A job the prompt waits for sees and changes the names of that prompt,
+  as a program always did; sent to the background, it leaves with a copy.
+- **It is who started it.** A job submitted from the prompt over the
+  network runs as that prompt: `web on` in it is refused, as it is there.
+- **Eight jobs** may run or be held at one time, beside the programs that
+  run by themselves. A ninth is refused: `Eight jobs are running or held:
+  end one, or wait.` A job that ended stays listed until its place is
+  needed, the oldest leaving first. Numbers count up from the start of
+  the machine and are never given twice.
+- **`job 7 hold`** keeps a job from running, **`job 7 release`** lets it
+  go on, **`job 7 end`** stops it for good.
+- **When it ends, it is written in the stored table `job_log`**: `job`,
+  `program`, `by` (`screen`, `serial`, `network`, `program`), `began`,
+  `ended`, `went` (`done`, `failed at line 3 of name`, `stopped`),
+  `statements`. Only the jobs nobody waited for. Nobody is told of those
+  rows (no `on insert into job_log` starts), and nothing trims the table:
+  `delete from job_log where ended < '2026-12-01'` does.
+- **`select * from jobs`** reads the same list as a view: `job`, `program`,
+  `state`, `by`, `began`, `statements`.
+
+**The programs that run by themselves are jobs too**, one after the
+other, in the order of what happened. They show in `jobs` while they
+run, started `by` `program`. What they say still goes to the log, and
+they are not written in `job_log`.
+
+**The limits that stop a program nobody watches are not a job's.** A
+loop typed at the screen or submitted goes on until it ends or is
+stopped. The programs that run by themselves keep them (10 000 rounds of
+a `while`, 100 000 statements), and so does what runs at once.
+
+**The companion** neither submits nor stops jobs: `Jobs are not the
+companion's to start or stop.` Nothing it starts outlives its answer.
 
 ## How a loop reads its rows
 
@@ -430,7 +515,7 @@ the table of programs, the programs that run by themselves), `code.rs`
   runs it. Everything it knows of a run is in `System::vm` (which units
   are in use, where each is, the rounds of its loops, the cursors), not on
   the stack of the task: a run can be left between two instructions, which
-  is what jobs will need. One case is not so yet: a command that types a
+  is what jobs rest on. One case is not so yet: a command that types a
   line (`qr`) runs that line to its end from inside the instruction. Its room is fixed: four units, for lines typed
   and programs three deep, and four cursors. A command that types at the
   prompt from inside a program (`qr`) enters the machine again on the next
@@ -444,6 +529,19 @@ the table of programs, the programs that run by themselves), `code.rs`
   when it runs.
 - **A `for`** reads its rows through a `sql::Cursor`, which walks a stored
   table by `id` or takes a result whole (see above).
+- **Jobs** (`jobs.rs`). The machine runs in *turns* (`machine::turn`):
+  instructions until its time is over, asked after each one and never
+  inside. A job is a run of the machine in a *room* of its own, one of
+  nine machines the kernel makes in its memory at start
+  (`System::rooms`); the machine inside `System` still runs what runs at
+  once. Each turn of a job sets the session that started it, the
+  companion's mark and its names, and puts them back. Three places give
+  turns: the interface task to the job the screen waits for (eight
+  milliseconds of each tick), the serial task to its own, and a kernel
+  task, `jobs`, to those nobody waits for, three milliseconds at a time,
+  each in its turn. `lang::background` no longer runs the programs that
+  run by themselves: it starts the next one as a job when the one before
+  has ended.
 - **Programs** are read from and written to the table `programs` through
   the storage engine directly, not through SQL, because a line is longer
   than the 48 bytes a SQL value holds. Storing a program is one

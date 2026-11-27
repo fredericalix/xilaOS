@@ -209,7 +209,7 @@ with Xila(disk=disk) as x:
 
     # tasks
     names = [row["name"] for row in x.table("tasks")]
-    check("tasks: interface, idle and serial shell", names == ["interface", "idle", "serial shell"], names)
+    check("tasks: interface, idle, serial shell and jobs", names == ["interface", "idle", "serial shell", "jobs"], names)
     x.cmd("spin")
     time.sleep(2)
     tasks = {row["name"]: row for row in x.table("tasks")}
@@ -231,7 +231,7 @@ with Xila(disk=disk) as x:
     # the city shows the real state of the system
     city = lambda: {(row["plot"], row["block"]): row for row in x.table("city")}
     blocks = city()
-    check("city: one block per task", {b for p, b in blocks if p == "running"} == {"interface", "idle", "serial shell"}, blocks.keys())
+    check("city: one block per task", {b for p, b in blocks if p == "running"} == {"interface", "idle", "serial shell", "jobs"}, blocks.keys())
     check("city: settings, logs and the serial port", all(k in blocks for k in [("settings", "mood"), ("logs", "boot log"), ("elsewhere", "serial port")]), blocks.keys())
     x.cmd("spin")
     time.sleep(1.5)
@@ -304,14 +304,14 @@ with Xila(disk=disk) as x:
 
     # SQL on the tables of the system
     names = [row["name"] for row in x.table("select name from tasks order by name")]
-    check("select: the tasks, sorted", names == ["idle", "interface", "serial shell"], names)
-    # nine views of the system, and the table the settings are kept in since the theme was changed
+    check("select: the tasks, sorted", names == ["idle", "interface", "jobs", "serial shell"], names)
+    # ten views of the system, and the table the settings are kept in since the theme was changed
     count = x.table("select count(*) from tables")
-    check("select: count", count == [{"count": "10"}], count)
+    check("select: count", count == [{"count": "11"}], count)
     ok, lines = x.cmd("select nope from tasks")
     check("select: an unknown column is an error", not ok and lines == ["Unknown column: nope"], lines)
     listed = [row["name"] for row in x.table("tables")]
-    check("tables lists the catalog", listed[:3] == ["tables", "columns", "tasks"] and listed[9:] == ["kept_settings"], listed)
+    check("tables lists the catalog", listed[:3] == ["tables", "columns", "tasks"] and listed[9:] == ["jobs", "kept_settings"], listed)
     x.type("select value from settings where name = 'keymap'")
     x.key("ret")
     check("select typed at the keyboard", body(x)[-2].strip() == "us", body(x)[-3:])
@@ -467,10 +467,106 @@ with Xila(disk=disk) as x:
     x.cmd("end")
     ok, lines = x.cmd("broken")
     check("a program that fails says where", not ok and lines == ["before", "Division by zero.", "Stopped at line 2 of broken."], lines)
-    ok, lines = x.cmd("while 1 = 1")
+    # a loop that never ends runs until it is stopped: the prompt waits for it, and Ctrl+C ends it
+    x.cmd("let floor = 0")
+    x.cmd("while 1 = 1")
     x.cmd("let floor = floor + 1")
-    ok, lines = x.cmd("end")
-    check("a loop that never ends is stopped", not ok and lines[0] == "This loop went round 10000 times and was stopped.", lines)
+    x.begin("end")
+    time.sleep(1.0)
+    ok, lines = x.stop()
+    check("a loop that never ends is stopped by Ctrl+C", not ok and lines == ["Stopped."], lines)
+    ok, lines = x.cmd("say floor > 10000")
+    check("and it went round more than a program nobody watches may", ok and lines == ["1"], lines)
+
+    # programs as jobs: submitted, listed, shown, held, stopped
+    for line in ("program slow", "let n = 0", "while n < 100000000", "let n = n + 1", "end", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("submit slow")
+    began = re.fullmatch(r"Job (\d+) submitted: slow\.", lines[0]) if lines else None
+    check("submit runs a program as a job, and the prompt is free at once", ok and began and len(lines) == 1, lines)
+    number = began.group(1) if began else "?"
+    one = lambda rows: next((row for row in rows if row["job"] == number), {})
+    time.sleep(0.5)
+    first = one(x.table("jobs"))
+    check("jobs lists it while it runs", (first.get("program"), first.get("state"), first.get("by")) == ("slow", "running", "serial"), first)
+    time.sleep(0.5)
+    second = one(x.table("jobs"))
+    check("the system lives while a job runs", int(second.get("statements", 0)) > int(first.get("statements", 0)) > 0 and x.cmd("say 1 + 1") == (True, ["2"]), (first, second))
+    x.type("say 'typed while it runs'")
+    x.key("ret")
+    check("and the screen answers what is typed there", body(x)[-2].strip() == "typed while it runs", body(x)[-3:])
+    seen = x.table("select job, state from jobs where state = 'running'")
+    check("select reads the jobs", {"job": number, "state": "running"} in seen, seen)
+    block = {(row["plot"], row["block"]): row for row in x.table("city")}.get(("running", "slow"), {})
+    data = [row["block"] for row in x.table("select block from city where plot = 'data'")]
+    check("the city has a block for a job that runs, and none for the view among the data", block.get("lit") == "yes" and len(data) == 9 and "jobs" not in data, (block, data))
+    ok, lines = x.cmd("job %s hold" % number)
+    held = one(x.table("jobs"))
+    time.sleep(0.5)
+    still = one(x.table("jobs"))
+    check("job n hold keeps it from running", ok and lines == ["Job %s is held." % number] and held.get("state") == "held" and held.get("statements") == still.get("statements"), (lines, held, still))
+    ok, lines = x.cmd("job %s release" % number)
+    time.sleep(0.5)
+    check("job n release lets it go on", ok and lines == ["Job %s goes on." % number] and int(one(x.table("jobs")).get("statements", 0)) > int(still.get("statements", 0)), lines)
+    ok, lines = x.cmd("job " + number)
+    check("job n shows it", ok and lines[0] == "Job %s is running: slow" % number and lines[1].startswith("Started at the serial port"), lines)
+    ok, lines = x.cmd("job %s end" % number)
+    logged = x.table("select program, by, went from job_log where job = " + number)
+    check("job n end stops it, and it is written in job_log", ok and lines == ["Job %s is stopped." % number] and logged == [{"program": "slow", "by": "serial", "went": "stopped"}], (lines, logged))
+    for line in ("program quick", "say 'one'", "say 2 / 0", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("submit quick")
+    quick = lines[0].split()[1] if ok else "?"
+    time.sleep(0.5)
+    ok, lines = x.cmd("job " + quick)
+    logged = x.table("select went from job_log where job = " + quick)
+    check("job n shows what a job said, and how it went",
+          ok and lines[0] == "Job %s is failed: quick" % quick and lines[2:] == ["one", "Division by zero.", "Stopped at line 2 of quick."] and logged == [{"went": "failed at line 2 of quick"}], (lines, logged))
+    many = [x.cmd("submit slow") for _ in range(9)]
+    check("a ninth job is refused", all(ok for ok, _ in many[:8]) and many[8] == (False, ["Eight jobs are running or held: end one, or wait."]), many[7:])
+    for row in x.table("jobs"):
+        if row["state"] == "running":
+            x.cmd("job %s end" % row["job"])
+    # two jobs that change the same table, turn by turn: each statement is whole, nothing is lost
+    x.cmd("create table shared (n int)")
+    for _ in range(8):
+        x.cmd("insert into shared values (0), (0), (0), (0), (0), (0), (0), (0)")
+    for name, change in (("adds", "n + 1"), ("doubles", "n * 2")):
+        for line in ("program " + name, "for row in select id from shared", "update shared set n = %s where id = row.id" % change, "end", "end"):
+            x.cmd(line)
+    x.cmd("submit adds")
+    x.cmd("submit doubles")
+    for _ in range(100):
+        if not [row for row in x.table("jobs") if row["state"] == "running"]:
+            break
+        time.sleep(0.2)
+    values = x.table("select n, count(*) from shared group by n")
+    check("two jobs that change the same table lose nothing", sum(int(row["count"]) for row in values) == 64 and {row["n"] for row in values} <= {"1", "2"}, values)
+    # the screen waits for a program: Esc stops it, Alt+B sends it to the background
+    x.type("slow")
+    x.key("ret")
+    time.sleep(0.5)
+    check("the screen waits for a program, and says how to have the prompt back", body(x)[-1].strip() == "Running slow. [Esc] stops it, [Alt]+[B] sends it to the background.", body(x)[-2:])
+    x.type("say 'too soon'")
+    x.key("ret")
+    x.key("esc")
+    time.sleep(0.3)
+    check("Esc stops it, and what was typed meanwhile was not taken",
+          body(x)[-2].strip().startswith("Stopped at line") and body(x)[-1].strip() == "XilaOS|all:/>" and not any("too soon" in row for row in body(x)), body(x)[-3:])
+    x.type("slow")
+    x.key("ret")
+    time.sleep(0.3)
+    x.key("alt-b")
+    time.sleep(0.3)
+    aside = [row for row in x.table("jobs") if row["state"] == "running"]
+    check("Alt+B sends it to the background, where it goes on",
+          "goes on in the background" in body(x)[-2] and body(x)[-1].strip() == "XilaOS|all:/>" and len(aside) == 1 and aside[0]["by"] == "screen", (body(x)[-2:], aside))
+    for row in aside:
+        x.cmd("job %s end" % row["job"])
+    for name in ("slow", "quick", "adds", "doubles"):
+        x.cmd("drop program " + name)
+    x.cmd("drop table shared")
+    x.cmd("drop table job_log")
     # what is wrong with the form of a program is told when it is kept
     for line in ("program bad", "say 'one'", "say 2 +"):
         x.cmd(line)
@@ -530,7 +626,7 @@ with Xila(disk=disk) as x:
           ok and lines == ["alive"] and not any("Read this code" in row for row in seen) and any("qr is typed at a prompt" in row for row in logged), (lines, logged))
     x.cmd("drop program on_notify_typed")
     ok, lines = x.cmd("help l")
-    check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 23, lines[:2])
+    check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 26, lines[:2])
     x.cmd("drop program broken")
 
     # programs that run by themselves
@@ -948,6 +1044,16 @@ with Xila(net="e1000e", forward=forwarded) as x:
     web_is = {row["item"]: row["value"] for row in x.table("web")}.get("the tables")
     check("remote: a program written there, running by itself, opens nothing either", all(ok for ok, _ in planted) and web_is == "closed to the network" and log[:1] == ["on_notify_way_around: web on is typed at the machine itself."], (planted, web_is, log))
     far.cmd("drop program on_notify_way_around")
+    # nor is a job submitted from there: it runs as the prompt over the network
+    planted = [far.cmd("program opens"), far.cmd("web on"), far.cmd("end"), far.cmd("submit opens")]
+    time.sleep(0.5)
+    number = planted[3][1][0].split()[1] if planted[3][1] else "?"
+    ok, shown = x.cmd("job " + number)
+    web_is = {row["item"]: row["value"] for row in x.table("web")}.get("the tables")
+    check("remote: a job submitted there runs as that prompt, and opens nothing",
+          all(ok for ok, _ in planted) and web_is == "closed to the network" and shown[:1] == ["Job %s is failed: opens" % number] and "web on is typed at the machine itself." in shown, (planted, shown, web_is))
+    far.cmd("drop program opens")
+    x.cmd("drop table job_log")
     # who the companion is says where its key is sent: that table is not made, named or changed from here
     wanted = (False, ["The table companions is changed at the machine: it says where the key goes."])
     held = [far.cmd("create table companions (name text, place text, model text, key text, character text)"), far.cmd("create table elsewhere (name text)"), far.cmd("alter table elsewhere rename to companions"),
