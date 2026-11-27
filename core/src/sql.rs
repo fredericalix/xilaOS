@@ -593,6 +593,21 @@ impl Cursor {
         }
     }
 
+    /// The next row when it is already read, which asks nothing of the
+    /// tables. None says nothing by itself: `more` tells whether `next`
+    /// could find one.
+    pub fn ready(&mut self) -> Option<[Value; MAX_COLUMNS]> {
+        (self.at < self.rows.count).then(|| {
+            self.at += 1;
+            self.rows.rows[self.at - 1]
+        })
+    }
+
+    /// Whether rows may be left that are not read yet.
+    pub fn more(&self) -> bool {
+        self.at < self.rows.count || !(self.walk.whole || self.walk.done)
+    }
+
     /// The names of the columns of the rows.
     pub fn headers(&self) -> &[Name] {
         &self.rows.headers[..self.rows.cols]
@@ -1403,6 +1418,16 @@ mod tests {
         assert_eq!((seen[0], seen[189]), ((Value::Int(10), Value::Int(20)), (Value::Int(199), Value::Int(398))));
         // in the order of their id, none twice
         assert!(seen.windows(2).all(|two| two[0].0.compare(&two[1].0) == Ordering::Less));
+        // the rows already read are given without the tables, the others are asked for
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        let mut ready = 0;
+        while cursor.ready().is_some() {
+            ready += 1;
+        }
+        assert!(ready > 0 && ready <= 32 && cursor.more());
+        assert_eq!(cursor.next(&sys, query).unwrap().unwrap()[0], seen[ready].0);
+        while cursor.next(&sys, query).unwrap().is_some() {}
+        assert!(!cursor.more() && cursor.ready().is_none());
         // what the condition says of the id is where the walk starts and ends
         let query = b"select id from many where id between 150 and 160";
         cursor.open(&sys, &NO_VARS, query).unwrap();

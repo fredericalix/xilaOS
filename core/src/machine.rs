@@ -22,11 +22,12 @@
 use core::fmt::Write;
 
 use crate::code::{self, Code, Instr, Op, What, LOOPS, WHILES};
+use crate::expr::VAR_NAME;
 use crate::grid::COLS;
-use crate::lang::Line;
-use crate::shell::{self, Out, Style, System, Table};
-use crate::sql::{self, Cursor, Message, Name, Value};
-use crate::text::{trim, FixedStr};
+use crate::lang::{self, Line, MAX_LINES};
+use crate::shell::{self, Out, Style, System, Table, Text};
+use crate::sql::{self, Cursor, Message, Value, MAX_COLUMNS};
+use crate::text::{split_word, trim, FixedStr};
 
 /// Units of code: lines typed, then programs three deep.
 pub const UNITS: usize = 4;
@@ -45,13 +46,17 @@ struct Call {
     /// How many times each `while` went round since it was entered.
     rounds: [u32; WHILES],
     /// The name of the program, or nothing for lines typed.
-    program: Name,
+    program: Text,
     /// How many lines were given, for lines typed: one alone has no place to tell.
     lines: usize,
+    /// The first of the machine's cursors that is this unit's, and how
+    /// many it has open: those of who called it are before.
+    cursors: usize,
+    open: usize,
 }
 
 impl Call {
-    const NONE: Call = Call { next: 0, rounds: [0; WHILES], program: Name::new(), lines: 0 };
+    const NONE: Call = Call { next: 0, rounds: [0; WHILES], program: Text::new(), lines: 0, cursors: 0, open: 0 };
 }
 
 pub struct Machine {
@@ -63,7 +68,7 @@ pub struct Machine {
     programs: usize,
     /// Statements run since the first unit was taken.
     steps: u32,
-    #[allow(dead_code)]
+    /// The loops over rows that are open, in all the units together.
     cursors: [Cursor; LOOPS],
 }
 
@@ -121,29 +126,76 @@ pub fn lines(sys: &mut System, lines: &[Line], out: &mut dyn Out) -> bool {
         }
         return false;
     }
-    enter(sys, Name::new(), lines.len());
+    enter(sys, Text::new(), lines.len());
     run(sys, unit, out)
 }
 
+/// Runs a program kept in the database to the end, as the system does
+/// for one that runs by itself. Says what failed, and returns whether
+/// all went well.
+pub fn program(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
+    let base = sys.vm.depth;
+    match call(sys, name, out) {
+        Ok(()) => run(sys, base, out),
+        Err(message) => {
+            if !message.is_empty() {
+                out.line(Style::Error, message.bytes());
+            }
+            false
+        }
+    }
+}
+
+/// Starts a program: its lines are read from the database and compiled
+/// into the next unit, which is then the one that runs. Programs are
+/// three deep at most, whoever started the first.
+fn call(sys: &mut System, name: &[u8], out: &mut dyn Out) -> Result<(), Message> {
+    if sys.vm.programs == MAX_LEVELS || sys.vm.depth == UNITS {
+        return Err(Message::from_bytes(b"Programs run programs three deep at most."));
+    }
+    // read here and given to the compiler, which keeps them: not held while the program runs
+    let mut lines = [Line::new(); MAX_LINES];
+    let Some(count) = lang::load(&sys.db, name, &mut lines)? else {
+        return Err(crate::sql::error(b"Unknown program: ", name).also(b". Type programs to list them."));
+    };
+    let unit = sys.vm.depth;
+    if let Err(fault) = code::compile(&lines[..count], &mut sys.vm.units[unit]) {
+        // kept by a system that did not compile what it kept: nothing of it runs
+        out.line(Style::Error, fault.message.bytes());
+        let mut place = FixedStr::<COLS>::new();
+        let _ = write!(place, "Stopped at line {} of {}.", fault.line, Text::from_bytes(name));
+        out.line(Style::Error, place.bytes());
+        return Err(said());
+    }
+    enter(sys, Text::from_bytes(name), count);
+    Ok(())
+}
+
 /// Takes the next unit, whose code is ready, for a program or for lines.
-fn enter(sys: &mut System, program: Name, lines: usize) {
+fn enter(sys: &mut System, program: Text, lines: usize) {
     let machine = &mut sys.vm;
     if machine.depth == 0 {
         machine.steps = 0;
     }
-    machine.calls[machine.depth] = Call { program, lines, ..Call::NONE };
+    // its cursors come after those of who called it
+    let cursors = machine.depth.checked_sub(1).map_or(0, |caller| machine.calls[caller].cursors + machine.calls[caller].open);
+    machine.calls[machine.depth] = Call { program, lines, cursors, ..Call::NONE };
     machine.depth += 1;
     if !program.is_empty() {
         machine.programs += 1;
     }
 }
 
-/// Gives the unit at the top back.
+/// Gives the unit at the top back, and the cursors it left open.
 fn leave(sys: &mut System) {
     let machine = &mut sys.vm;
     machine.depth -= 1;
-    if !machine.calls[machine.depth].program.is_empty() {
+    let call = machine.calls[machine.depth];
+    if !call.program.is_empty() {
         machine.programs -= 1;
+    }
+    for cursor in machine.cursors.iter_mut().skip(call.cursors).take(call.open) {
+        cursor.close();
     }
 }
 
@@ -178,7 +230,7 @@ fn run(sys: &mut System, base: usize, out: &mut dyn Out) -> bool {
             }
             let mut place = FixedStr::<COLS>::new();
             if !call.program.is_empty() {
-                let _ = write!(place, "Stopped at line {line} of {}.", shell::Text::from_bytes(call.program.bytes()));
+                let _ = write!(place, "Stopped at line {line} of {}.", call.program);
             } else if call.lines > 1 {
                 let _ = write!(place, "Stopped at line {line}.");
             }
@@ -247,12 +299,70 @@ fn step(sys: &mut System, unit: usize, instr: Instr, out: &mut dyn Out) -> Resul
                 return Err(Message::from_bytes(b"This loop went round 10000 times and was stopped."));
             }
         }
-        Op::Open(_) | Op::Next(..) | Op::Close(_) | Op::Call => return Err(Message::from_bytes(b"Not built yet.")),
+        Op::Open(which) => {
+            let at = sys.vm.calls[unit].cursors + which as usize;
+            if at >= LOOPS {
+                return Err(Message::from_bytes(b"Loops over rows go four deep at most."));
+            }
+            let (_, query) = code::for_parts(text).unwrap_or((b"", b""));
+            // a cursor reads the tables of the system it is kept in: it is
+            // taken out for that time
+            let mut cursor = core::mem::take(&mut sys.vm.cursors[at]);
+            let opened = cursor.open(&*sys, &sys.vars[sys.session], query);
+            sys.vm.cursors[at] = cursor;
+            opened?;
+            sys.vm.calls[unit].open = which as usize + 1;
+        }
+        Op::Next(which, done) => {
+            let at = sys.vm.calls[unit].cursors + which as usize;
+            let (name, query) = code::for_parts(text).unwrap_or((b"", b""));
+            let mut row = sys.vm.cursors[at].ready();
+            if row.is_none() && sys.vm.cursors[at].more() {
+                let mut cursor = core::mem::take(&mut sys.vm.cursors[at]);
+                let next = cursor.next(&*sys, query);
+                sys.vm.cursors[at] = cursor;
+                row = next?;
+            }
+            let Some(row) = row else {
+                sys.vm.calls[unit].next = done as usize;
+                return Ok(());
+            };
+            // the columns of the row, as name.column
+            let mut headers = [sql::Name::new(); MAX_COLUMNS];
+            let columns = sys.vm.cursors[at].headers().len();
+            headers[..columns].copy_from_slice(sys.vm.cursors[at].headers());
+            for (header, value) in headers[..columns].iter().zip(row) {
+                let mut column = FixedStr::<VAR_NAME>::from_bytes(name);
+                if column.len() + 1 + header.len() > VAR_NAME {
+                    return Err(crate::sql::error(b"This name is too long: ", name).also(b".").also(header.bytes()));
+                }
+                column.push(b'.');
+                column.push_bytes(header.bytes());
+                if !sys.vars[sys.session].set(column.bytes(), value) {
+                    return Err(Message::from_bytes(b"There is no room for one more name: 32 are kept at most."));
+                }
+            }
+        }
+        Op::Close(which) => {
+            let call = &mut sys.vm.calls[unit];
+            call.open = which as usize;
+            let at = call.cursors + which as usize;
+            sys.vm.cursors[at].close();
+        }
+        Op::Call => call(sys, code::rest(text), out)?,
         Op::Command => {
-            // inside a program, what a command did is not announced
-            let done = if sys.vm.programs > 0 { shell::command(sys, text, &mut Quiet(out)) } else { shell::command(sys, text, out) };
-            if !done {
-                return Err(said());
+            let (name, arguments) = split_word(text);
+            let mut lower = Text::from_bytes(name);
+            lower.lower();
+            if !shell::knows(lower.bytes()) && arguments.is_empty() && lang::exists(&sys.db, name) {
+                // the name of a program is a command
+                call(sys, name, out)?;
+            } else {
+                // inside a program, what a command did is not announced
+                let done = if sys.vm.programs > 0 { shell::command(sys, text, &mut Quiet(out)) } else { shell::command(sys, text, out) };
+                if !done {
+                    return Err(said());
+                }
             }
         }
         Op::Return => sys.vm.calls[unit].next = usize::MAX,
@@ -413,5 +523,154 @@ mod tests {
         assert_eq!(block(&mut sys, &["say 'before'", "say 1 / 0"]), (false, vec!["before".to_string(), "Division by zero.".to_string(), "Stopped at line 2.".to_string()]));
         // and the machine is whole after each
         assert_eq!(block(&mut sys, &["say 'still here'"]), (true, vec!["still here".to_string()]));
+    }
+
+    /// Types lines at the prompt, which keeps programs: all must go well.
+    fn typed(sys: &mut System, text: &[&str]) {
+        for line in text {
+            assert!(shell::exec(sys, line.as_bytes(), &mut Lines::default()), "{line}");
+        }
+    }
+
+    fn texts(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn programs_run_programs_and_say_where_they_fail() {
+        let mut sys = System::new();
+        typed(&mut sys, &["program inner", "say 'in'", "if depth > 1", "return", "end", "let x = 1 / zero", "say 'not reached'", "end"]);
+        typed(&mut sys, &["program outer", "say 'out'", "inner", "say 'back'", "end"]);
+        each(&mut sys, &["let depth = 2", "let zero = 0"]);
+        // `return` leaves the program it is in, not the one that ran it
+        assert_eq!(block(&mut sys, &["outer"]), (true, texts(&["out", "in", "back"])));
+        each(&mut sys, &["let depth = 0"]);
+        assert_eq!(block(&mut sys, &["outer"]), (false, texts(&["out", "in", "Division by zero.", "Stopped at line 5 of inner.", "Stopped at line 2 of outer."])));
+        // run by `run`, from lines that are more than one
+        assert_eq!(
+            block(&mut sys, &["say 'first'", "run outer", "say 'not here'"]),
+            (false, texts(&["first", "out", "in", "Division by zero.", "Stopped at line 5 of inner.", "Stopped at line 2 of outer.", "Stopped at line 2."]))
+        );
+        // a program that runs itself is stopped
+        typed(&mut sys, &["program again", "let depth = depth + 1", "run again", "end"]);
+        let (ok, out) = block(&mut sys, &["again"]);
+        assert!(!ok);
+        assert_eq!(out, ["Programs run programs three deep at most.", "Stopped at line 2 of again.", "Stopped at line 2 of again.", "Stopped at line 2 of again."]);
+        assert_eq!(each(&mut sys, &["say depth"]), ["3"]);
+        // and is three deep whoever started the first
+        let mut out = Lines::default();
+        each(&mut sys, &["let depth = 0"]);
+        assert!(!program(&mut sys, b"again", &mut out));
+        assert_eq!(out.lines.len(), 4);
+        assert_eq!(each(&mut sys, &["say depth"]), ["3"]);
+        // one that is not there
+        assert_eq!(block(&mut sys, &["run nowhere"]), (false, texts(&["Unknown program: nowhere. Type programs to list them."])));
+        let mut out = Lines::default();
+        assert!(!program(&mut sys, b"nowhere", &mut out));
+        assert_eq!(out.lines, ["Unknown program: nowhere. Type programs to list them."]);
+        // inside a program, what a command did is not announced
+        typed(&mut sys, &["create table doubled (label text, amount decimal)"]);
+        typed(&mut sys, &["program quiet", "insert into doubled values ('x', 0)", "mood calm", "mood", "say 'done'", "delete from doubled where label = 'x'", "end"]);
+        assert_eq!(block(&mut sys, &["quiet"]), (true, texts(&["Mood is calm.", "done"])));
+        let mut out = Lines::default();
+        assert!(program(&mut sys, b"quiet", &mut out));
+        assert_eq!(out.lines, ["Mood is calm.", "done"]);
+        // one that was kept with a fault of form says it when it is run, and nothing of it runs
+        typed(&mut sys, &["program old", "say 'first'", "else", "end"]);
+        assert_eq!(block(&mut sys, &["old"]), (false, texts(&["else belongs to an if.", "Stopped at line 2 of old."])));
+        assert_eq!(block(&mut sys, &["say 1", "old"]).1, ["1", "else belongs to an if.", "Stopped at line 2 of old.", "Stopped at line 2."]);
+        // the machine is whole after all that
+        assert_eq!(block(&mut sys, &["quiet"]), (true, texts(&["Mood is calm.", "done"])));
+    }
+
+    #[test]
+    fn loops_over_rows_read_them_one_by_one() {
+        let mut sys = books();
+        assert_eq!(
+            block(&mut sys, &["for row in select label, amount from expenses where amount > 2 order by amount desc", "say row.label + ': ' + row.amount", "end"]),
+            (true, texts(&["train: 42.00", "coffee: 3.50"]))
+        );
+        // loops inside loops, and changes made from a loop
+        each(&mut sys, &["create table doubled (label text, amount decimal)"]);
+        let (ok, out) = block(
+            &mut sys,
+            &["for row in select label, amount from expenses", "    let times = 2", "    while times > 0", "        insert into doubled values (row.label, row.amount * times)", "        let times = times - 1", "    end", "end"],
+        );
+        assert!(ok, "{out:?}");
+        assert_eq!(out.len(), 6);
+        assert_eq!(out[5], "1 row added to doubled, with id 6.");
+        assert_eq!(each(&mut sys, &["select count(*), sum(amount) from doubled"]), ["   count  sum", "   6      140.10"]);
+        // the names of the SELECT are those of the moment the loop began
+        assert_eq!(block(&mut sys, &["let least = 2", "for row in select label from expenses where amount > least", "let least = 100", "say row.label", "end"]).1, ["coffee", "train"]);
+        // a name too long to be kept
+        let (ok, out) = block(&mut sys, &["for quite_a_long_name_here in select label as a_long_header_too from expenses", "end"]);
+        assert!(!ok);
+        assert_eq!(out, ["This name is too long: quite_a_long_name_here.a_long_header_too", "Stopped at line 1."]);
+        // a table that is not there
+        assert_eq!(block(&mut sys, &["say 1", "for row in select n from nowhere", "end"]).1, ["1", "Unknown table: nowhere. Type tables to list them.", "Stopped at line 2."]);
+    }
+
+    #[test]
+    fn a_loop_over_rows_has_no_limit_and_ends() {
+        let mut sys = System::new();
+        each(&mut sys, &["create table many (n int)"]);
+        for _ in 0..25 {
+            each(&mut sys, &["insert into many values (1), (1), (1), (1), (1), (1), (1), (1)"]);
+        }
+        // 200 rows, where 32 was the most
+        assert_eq!(block(&mut sys, &["let sum = 0", "for row in select n from many", "let sum = sum + row.n", "end", "say sum"]), (true, texts(&["200"])));
+        // the last row stays under its names after the loop, as it did
+        assert_eq!(each(&mut sys, &["say row.n"]), ["1"]);
+        // a loop that adds to the table it reads ends: it sees the rows that were there
+        let (ok, out) = block(&mut sys, &["let seen = 0", "for row in select n from many", "insert into many values (2)", "let seen = seen + 1", "end", "say seen"]);
+        assert!(ok);
+        assert_eq!(out.last().unwrap(), "200");
+        // a loop that removes the row it is at, and the one after it
+        assert!(block(&mut sys, &["for row in select id from many", "delete from many where id = row.id or id = row.id + 1", "end"]).0);
+        assert_eq!(each(&mut sys, &["say select count(*) from many"]), ["0"]);
+        // what is worked out whole keeps its limit and says so
+        for _ in 0..5 {
+            each(&mut sys, &["insert into many values (1), (2), (3), (4), (5), (6), (7), (8)"]);
+        }
+        assert_eq!(
+            block(&mut sys, &["for row in select n from many order by n", "say row.n", "end"]),
+            (false, texts(&["A loop takes 32 rows at most; this query has 40.", "Stopped at line 1."]))
+        );
+        assert!(block(&mut sys, &["for row in select n from many limit 3", "let n = row.n", "end"]).0);
+        // the table goes under the loop: said when the next rows are asked for, at the line of the loop
+        let (ok, out) = block(&mut sys, &["let gone = 0", "for row in select n from many", "if gone = 0", "drop table many", "let gone = 1", "end", "end"]);
+        assert!(!ok, "{out:?}");
+        assert!(out[out.len() - 2].starts_with("Unknown table: many") && out[out.len() - 1] == "Stopped at line 2.", "{out:?}");
+        // loops in loops, and return from inside them: the cursors are given back
+        each(&mut sys, &["create table two (n int)", "insert into two values (1), (2)"]);
+        for _ in 0..3 {
+            let deep = ["for a in select n from two", "for b in select n from two", "for c in select n from two", "for d in select n from two", "if d.n = 2", "return", "end", "end", "end", "end", "end", "say 'not here'"];
+            assert_eq!(block(&mut sys, &deep), (true, vec![]));
+        }
+        // the four cursors are shared: a program run from inside two loops has two left
+        typed(&mut sys, &["program three", "for x in select n from two", "for y in select n from two", "for z in select n from two", "say 'deep'", "end", "end", "end", "end"]);
+        let (ok, out) = block(&mut sys, &["for a in select n from two", "for b in select n from two", "three", "end", "end"]);
+        assert!(!ok);
+        assert_eq!(out, ["Loops over rows go four deep at most.", "Stopped at line 3 of three.", "Stopped at line 3."]);
+        typed(&mut sys, &["program one", "for x in select n from two", "say x.n", "end", "end"]);
+        assert_eq!(block(&mut sys, &["for a in select n from two", "for b in select n from two", "for c in select n from two", "one", "end", "end", "end"]).1.len(), 16);
+    }
+
+    #[test]
+    fn the_machine_is_entered_again_by_a_command_it_runs() {
+        let mut sys = System::new();
+        typed(&mut sys, &["program inner", "say 'in'", "end", "program outer", "qr inner", "say 'after'", "end"]);
+        let mut out = Lines::default();
+        assert!(program(&mut sys, b"outer", &mut out), "{:?}", out.lines);
+        // what inner said went to the code, not here
+        assert_eq!(out.lines, ["after"]);
+        // with every unit taken, one more is refused, and the machine is whole after
+        typed(&mut sys, &["program a", "qr b", "say 'a went on'", "end", "program b", "qr c", "end", "program c", "qr d", "end", "program d", "say 'too deep'", "end"]);
+        let mut out = Lines::default();
+        program(&mut sys, b"a", &mut out);
+        let mut out = Lines::default();
+        assert!(program(&mut sys, b"inner", &mut out));
+        assert_eq!(out.lines, ["in"]);
+        assert_eq!(block(&mut sys, &["outer"]), (true, texts(&["after"])));
     }
 }

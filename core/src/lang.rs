@@ -497,7 +497,7 @@ fn programs(db: &Database) -> Result<Option<usize>, Message> {
 }
 
 /// Reads the lines of a program. `None` if there is no such program.
-fn load(db: &Database, name: &[u8], into: &mut [Line; MAX_LINES]) -> Result<Option<usize>, Message> {
+pub(crate) fn load(db: &Database, name: &[u8], into: &mut [Line; MAX_LINES]) -> Result<Option<usize>, Message> {
     let Some(table) = programs(db)? else {
         return Ok(None);
     };
