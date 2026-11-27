@@ -114,7 +114,7 @@ The system is meant to grow in layers. Layer 0 (the base) and layer 1
 | 2. Programs | A virtual machine, zones, public / private status, ACLs, installing applications, supervised services, a vault for secrets | Not started, except XilaScript and scheduled programs |
 | 3. Network | Ethernet, TCP/IP, DNS, TLS, a stack per zone, webhooks and mail with a durable queue | Ethernet, TCP/IP, DNS and TLS for the side that calls |
 | 4. Sound | Audio driver, mixing, MP3, ambiences | Not started |
-| 5. Applications | Spreadsheet, database front end, a HyperCard-like, mail, text web browser, IRC, HTTP server, a port of Doom | Not started |
+| 5. Applications | Spreadsheet, database front end, a HyperCard-like, mail, text web browser, IRC, HTTP server | Not started |
 | 6. Agents | AI companions with their own access rights to the data | A first companion answers, reads the tables, acts and remembers; it has no access rights |
 | 7. Later | Wi-Fi, USB, RISC-V | Not started |
 
@@ -132,13 +132,16 @@ choices that are visible in the code.
 - **Programs are compiled for a virtual machine**, not to native code,
   as on OS/400. It gives independence from the processor, isolation by
   construction, and an application that installs as one object. The
-  machine itself has not been chosen: WebAssembly, or one made for
-  XilaOS around objects and tables.
-- **Two levels of language.** Heavy programs (Doom, a spreadsheet
-  engine) compiled for the virtual machine from an existing language;
-  and the house language, XilaScript, interpreted, for everything
-  written on the machine itself. Its words are English, one statement
-  per line, blocks closed by `end`.
+  machine was chosen on 27 November 2026: one made for XilaOS around
+  values and tables, and no other
+  ([below](#the-virtual-machine-and-the-jobs)).
+- **One language of the house.** XilaScript, for everything written
+  on the machine itself: its words are English, one statement per
+  line, blocks closed by `end`. It is interpreted today and will be
+  compiled for the virtual machine. The first notes had a second
+  level, heavy programs (Doom, a spreadsheet engine) compiled from an
+  existing language: with a machine of the house alone, that level is
+  given up.
 - **An application is a zone**, isolated from the others, in the manner
   of FreeBSD jails or illumos zones, with a public or private status
   and access control lists. Private by default. Isolation is to come
@@ -239,9 +242,9 @@ it. Its steps are [below](#the-companion).
 | 1. Loose ends | The small things that were off; an apostrophe in a text; the dead keys of `fr`; a command that reads the whole database; `install` that shows it is writing | Done on 23 November 2026 |
 | The companion | A first AI companion: a screen to write to it, and its reactions to what happens in the system. Names (DNS), TLS and HTTPS first, since the model it speaks through is reached over the Internet | Done on 26 November 2026, in QEMU; not tried on the T430 |
 | 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Resumed on 27 November 2026 with what a column asks: `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`, kept in the catalog (format version 2; version 1 is read). Then indexes on one column, the same day (`CREATE INDEX ON t (c)`; format version 3), which `SELECT`, joins and `UNIQUE` use. Then `ALTER TABLE` (columns added, dropped, renamed; what they ask changed). Left: `BEGIN` / `COMMIT`; indexes for `UPDATE` and `DELETE`, on several columns, and a choice between two; a view of the log, which waits for texts longer than 48 characters | Under way |
-| 3. XilaScript | Parameters and names of a program's own; a task of its own for a program, and for the commands that wait (`net ping`, `net get`, `install from`); an editor; `insert ... select`, the values of before, more rhythms | After 2 |
+| 3. XilaScript | An editor; `insert ... select`, the values of before, more rhythms. Parameters, names of a program's own and a program that holds nothing went to phase 5 on 27 November 2026 | After 5 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
-| 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
+| 5. The virtual machine | The machine, XilaScript compiled for it, and programs as jobs that hold nothing; with it what phase 3 had of parameters, names of a program's own and commands that wait | Designed on 27 November 2026 ([below](#the-virtual-machine-and-the-jobs)), put ahead by the author; then application screens, batch work and the scheduling of jobs, each with a design of its own |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
 
 **Tried on the T430, and what still waits.** On 27 November 2026 the
@@ -419,6 +422,196 @@ real handshake with the model's server and one question to the model
 through it, and the cost for the kernel (some fifty outside crates,
 400 KB, 7 to 26 ms of calculation for a handshake in QEMU).
 
+### The virtual machine and the jobs
+
+What the author decided on 27 November 2026:
+
+- **Closer to an IBM mainframe and an AS/400.** Jobs that are
+  scheduled; data imported, sorted and processed in batches;
+  application screens to work on the data, as RPG has them. Four
+  pieces of work, in this order: programs that hold nothing (jobs);
+  application screens, the first of them to manage a stock of
+  equipment; batch work; the scheduling of jobs. Each gets its own
+  design; this one is the first.
+- **A XilaScript program must no longer hold the system** while it
+  runs.
+- **At the prompt, a program that is run is waited for while the rest
+  of the system lives**, as an interactive call on an AS/400: what it
+  says is shown as it runs, a key stops it, another sends it to the
+  background. `submit name` runs it as a batch job without waiting.
+- **The virtual machine first**, rather than the interpreter made to
+  run in steps.
+- **The machine is one made for XilaOS, and the only one.** No
+  WebAssembly. So no program compiled from C or Rust: a port of Doom
+  has no path any more.
+- **XilaScript is compiled for it.** It is still typed line by line
+  at the prompt; a program that is kept is translated once.
+
+The design, agreed in outline that day and not built:
+
+**What the machine works on.** The values of the database as they are
+(`Null`, a whole number, an exact decimal, a text), and three kinds of
+objects: a *cursor* over a `select`, a *call* of a program with names
+of its own, and later the *format* of a screen.
+
+**Its instructions** speak of what the system has, not of what a
+processor has. A program and what it becomes:
+
+```
+program restock                     0  open   c1, select name, qty from stock where qty < 5
+  for item in select name, qty      1  next   c1 as item, else 4
+      from stock where qty < 5      2  say    item.name
+    say item.name                   3  jump   1
+  end                               4  close  c1
+end                                 5  return
+```
+
+The set, to begin with: keep a value under a name; say one; jump,
+always or unless a condition holds; open a cursor, take its next row,
+close it; call a program and come back; and `command`, which gives a line to the prompt's own
+commands, the statements of SQL that change tables among them. Every
+instruction keeps the number of the line it came from, so that a
+failure still says `Stopped at line 3 of restock.`
+
+- **Values are worked out by `expr.rs`**, which SQL uses too: the
+  machine does not get an arithmetic of its own. An expression is
+  read once, when its program is compiled, and the instruction keeps
+  it read. That asks one new thing of `expr.rs`, which today takes
+  the value of a name while it reads: a name that is looked up when
+  the expression is worked out. The text of a statement of SQL is
+  still read each time it runs.
+- **One door to the system.** Whatever touches a table, an event or,
+  later, a screen goes through one function that knows which job
+  asks. The rights of zones will be checked there.
+- **A `for` is a cursor**, read row by row, so its limit of 32 rows
+  goes, and a job can be left between two rows of a large table. A
+  cursor over a plain `select` of one table walks it by `id` and
+  keeps only the last `id` it gave: it sees each row as it is when it
+  reaches it, changes made by others meanwhile included. A `select`
+  that sorts, groups or joins is worked out whole when the cursor
+  opens, within the limits a result has today, until batch work gives
+  sorting its room. The columns of the row stay names (`item.name`),
+  which count among the 32 and keep the last row after the loop, as
+  today.
+
+**Compiling.** A program is translated when it is kept (the last
+`end` of `program`, `on`, `every`), and the faults of its form are
+told then: a block that is not closed, an `else` without its `if`, a
+line that is no statement, an expression that cannot be read. What
+cannot be known then (a name with no value yet, a table that is not
+there) is told when it runs, as today. The lines stay in the table
+`programs` and `show name` gives them back. The code is not kept on
+the disk for now: it is made again when the job starts. What is typed
+at a prompt goes the same way, so there is one way to run and the
+interpreter of `lang.rs` leaves: a single line is one instruction,
+run at once in the task of who typed it, as today, and takes no place
+among the jobs (so `jobs` and `job 3 end` can always be typed); a
+block typed there, and a program run by its name, are jobs the prompt
+waits for.
+
+**A job** is one run of the machine: its code, its calls, its names,
+its cursors, who started it, and a state: ready, running, waiting
+(for the kernel to serve a request; later for a screen), held, ended
+(done, failed at a line, stopped).
+
+- **In `core/`, with no heap**: `jobs::step` runs instructions of the
+  ready jobs in turn and returns. Eight places for the jobs people
+  start, each with a fixed room, and one more for those the system
+  starts; with the eight taken by jobs that have not ended, one more
+  is refused and the answer says so. A job has a number that counts
+  up from the start of the machine, and stays in the list once ended
+  until its place is needed, the oldest first. One instruction is
+  whole: a statement is a
+  transaction, which is what keeps a job from seeing half of what
+  another changes.
+- **A kernel task carries it**, as one carries the companion's bytes:
+  it takes the lock, lets the jobs run for a slice of a few
+  milliseconds, serves the request a job may have left, gives the
+  lock back. The interface is never kept longer than a slice and one
+  instruction. An instruction can be long (a `select` over a large
+  table, `disk check`, `install`, `net get`): it still holds the
+  system for that time, and the documentation says so.
+- **Who started it stays with it.** Every instruction of a job runs
+  as the session that started it, and with `System::acting` set if
+  the companion did; a job submitted by a job gets the same. So what
+  is refused to the network prompt, to a program that runs by itself
+  and to the companion is refused to their jobs, and `submit` is no
+  way around.
+- **The prompt waits as the serial port waits for the companion
+  today**: lock given back, asking at each tick what was said and
+  whether it ended. The screen shows the lines as they come; Esc
+  stops the job, Alt+B sends it to the background. The serial port
+  writes them and ends with its status line when the job ends; a
+  Ctrl+C byte stops it. The prompt over the network answers when the
+  job ends, and its protocol does not change: a job waited for from
+  there keeps the limits of a program nobody watches, so that it
+  ends, and a line that comes from there meanwhile is refused with
+  the number of the job. For long work there, `submit`, then `job n`.
+- **Names.** A job has one set of names, which the programs it calls
+  share, as today; a call is made so that it can have names of its
+  own in step 3. A job that a prompt waits for sees and changes the
+  names of that session, as a program does today. Sent to the
+  background it leaves with a copy of them. A job that is submitted,
+  or that the system starts, begins with none.
+- **The programs that run by themselves become jobs** (`on`,
+  `every`): made when their time comes, run one after the other in
+  the order of what happened, as today, beside the jobs that people
+  start. What they say still goes to the log screen under their name.
+  They keep the limits that stop a program nobody watches (100 000
+  statements, 10 000 rounds of a `while`); a job a person started
+  loses them, since it can be stopped.
+- **What the companion runs** (`run`) is a job it waits for before it
+  answers the model, recorded in `acts` as today. What holds it stays
+  whole: its job keeps the limits of a program nobody watches; a
+  command that leaves a request for the kernel stays refused to it,
+  at the door, though a job could now wait for the answer (it would
+  give it `net get` and `net post`); and `submit`, `job n end`,
+  `hold` and `release` are refused to it for now, so that nothing it
+  started outlives its answer and `companion off` has nothing of its
+  own to stop. Each gets its line in the tests of what is refused to
+  it and its row in the table of `docs/14-the-companion.md`.
+- **What a job nobody waits for says** is kept with it, its last
+  lines, for as long as it stays in the list.
+
+**Commands.** `submit name`; `jobs`, also a view for SQL (job,
+program, state, started by, since, statements run); `job n` (its
+state and what it said); `job n end`, `job n hold`, `job n release`.
+A row is added to a stored table `job_log` when a job that nobody
+waited for ends (program, started by, began, ended, how it went,
+statements run): what ran last night is the first thing asked of a
+machine that works in batches. Only the jobs people submit or send to
+the background for now: a row for each run of an `on insert` program
+would be a commit for each row added. Which runs of the programs that
+run by themselves are recorded is for the design of scheduling. The
+rows are written as those of `acts` are, not through `change.rs`, and
+nobody is told of them, so that no program starts on its own record.
+`jobs` is a tenth view, and the `data` plot of the city has room for
+nine: where it shows there is decided before step 2.
+
+**The steps.** Each is merged when its unit tests and its checks
+pass.
+
+1. The machine and the compiler, for the XilaScript of today, run to
+   the end where the interpreter ran, with the limits of today.
+   Nothing changes for whoever types, but for faults of form told at
+   `end` and a `for` of more than 32 rows. Every test and check that
+   exists passes, changed only where a fault is now told earlier.
+2. Jobs: the kernel task and its slices, the prompts that wait, Esc
+   and Alt+B, `submit`, `jobs`, `job`, the programs that run by
+   themselves and the companion's lines as jobs, `job_log`. A loop
+   typed at the screen or the serial port then runs until it is
+   stopped: the checks that expect it cut after 10 000 rounds change
+   here.
+3. What the machine makes possible in the language: parameters, and
+   names that belong to one program. How they are written, and how a
+   program gives a value back, is chosen with the author before this
+   step starts: it ends up in programs kept on disks.
+4. The commands that wait for the network (`net get`, `net ping`,
+   `install from`) as waits of a job, so that they hold nothing
+   either.
+
+Then the screens, and the stock of equipment.
+
 ### Loose ends of what exists
 
 - Characters outside ASCII leave as `?` on the serial port and in QR
@@ -576,14 +769,13 @@ author's agreement. The order that was agreed:
   application, supervised services, a vault for secrets.
 - **Sound.** Mixing, MP3, ambiences that follow the mood.
 - **Applications.** A spreadsheet, a database front end, a
-  HyperCard-like, mail, a text web browser, IRC, a port of Doom.
+  HyperCard-like, mail, a text web browser, IRC.
 - **Agents.** Companions that are written to and answer in writing,
   each a zone with its own rights on the data, drawn as pixel-art
   characters.
 
 ### Decisions still to take
 
-- Which virtual machine.
 - How an application is installed, and where it comes from.
 - What exactly is taken from OS/400: typed objects, single-level
   storage, or both.

@@ -103,7 +103,7 @@ To add a command: write the function in `shell.rs`, add it to the `match` in `co
 ## What must not be lost
 
 - It is not a Unix. Do not reach for files, fork, POSIX or a Unix shell by default. The model is OS/400: a database at the core of the system, with data shared between applications under access control. SQL is its query language, and it has an internal LISTEN / NOTIFY.
-- Programs are compiled for a virtual machine, not to native code. XilaOS also has its own interpreted language, which is the language of the command prompt, with SQL built in. Its words are English.
+- Programs are compiled for a virtual machine, not to native code: one made for XilaOS around the values and the tables of the database, and no other (decided on 2026-11-27; no WebAssembly). XilaScript, the language of the command prompt, with SQL built in, is interpreted today and is to be compiled for that machine, where a program runs as a job that holds nothing: the design is in `docs/13-status-and-roadmap.md` ("The virtual machine and the jobs"), not built. Its words are English.
 - An application is an isolated zone with a public or private status and ACLs.
 - The interface is in characters, with the V2_OS font, and is driven by the keyboard only.
 - The system must keep working well in QEMU with the serial shell, so that an AI can run commands, develop and test.
