@@ -486,6 +486,16 @@ with Xila(disk=disk) as x:
     time.sleep(0.3)
     rows = [row["what"] for row in x.table("select what from heard")]
     check("on: it ran for each row, with the row", rows == ["added tea, row 4", "added milk, row 5"], rows)
+    # the time is known there too, beside the names of what happened
+    x.cmd("create table dated (label text, day text)")
+    for line in ("on insert into heard", "insert into dated values (new.what, today)", "end"):
+        x.cmd(line)
+    x.cmd("insert into heard values ('a day')")
+    time.sleep(0.3)
+    rows = x.table("select label, day from dated")
+    check("on: a program that hears a row knows the day", len(rows) == 1 and rows[0]["label"] == "a day" and re.fullmatch(r"20\d\d-\d\d-\d\d", rows[0]["day"]), rows)
+    x.cmd("drop program on_insert_heard")
+    x.cmd("drop table dated")
     x.cmd("screen 1")
     log_rows = [row.strip() for row in x.peek()]
     x.cmd("screen 0")

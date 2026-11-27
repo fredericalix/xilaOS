@@ -29,26 +29,26 @@ were also tried on the real machine.
 | SATA (AHCI), GPT partition of XilaOS's type | yes | yes |
 | `install`, `install system`, the USB stick image | yes | yes |
 | SQL: `SELECT`, `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`, expressions | yes | yes |
-| `disk check`: every page of the tables read from the disk and checked (until 26 November 2026 a page already in memory was not read again) | yes | not tried |
-| SQL: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; rows reached by their `id`; `JOIN` and `LEFT JOIN` of two tables | yes | not tried |
-| What a column asks: `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`; `show table`; the format of the database in version 2, version 1 read as it is | yes, a power cut and a disk of version 1 included | not tried |
-| Indexes on one column: `CREATE INDEX ON t (c)`, used by `SELECT`, by joins and by `UNIQUE`; the format of the database in version 3 | yes, power cuts included | not tried |
-| `ALTER TABLE`: a column added, dropped or renamed, a table renamed, what a column asks changed, checks added and dropped | yes, power cuts included | not tried |
-| `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | not tried |
+| `disk check`: every page of the tables read from the disk and checked (until 26 November 2026 a page already in memory was not read again) | yes | yes, on 27 November 2026: 64 pages of tables and indexes |
+| SQL: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; rows reached by their `id`; `JOIN` and `LEFT JOIN` of two tables | yes | yes, on 27 November 2026 |
+| What a column asks: `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`; `show table`; the format of the database in version 2, version 1 read as it is | yes, a power cut and a disk of version 1 included | yes, on 27 November 2026, on a volume made in version 3; no power cut |
+| Indexes on one column: `CREATE INDEX ON t (c)`, used by `SELECT`, by joins and by `UNIQUE`; the format of the database in version 3 | yes, power cuts included | yes, on 27 November 2026: the same pages read as in QEMU (30 for the table, 11 by the index); no power cut |
+| `ALTER TABLE`: a column added, dropped or renamed, a table renamed, what a column asks changed, checks added and dropped | yes, power cuts included | yes, on 27 November 2026; no power cut |
+| `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | yes, on 27 November 2026, but for the dead keys |
 | LISTEN / NOTIFY | yes | yes |
 | XilaScript: variables, blocks, stored programs, `on` and `every` programs | yes | yes |
 | Clock, `now` and `today`, `every day at` | yes | yes |
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
 | Ethernet (Intel e1000 family), ARP, IPv4, ICMP, UDP, DHCP | yes | yes, after five trials |
-| Names (DNS): `net name`, `net names`, `net get` by name | yes | not tried |
-| TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | not tried |
-| HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | not tried |
+| Names (DNS): `net name`, `net names`, `net get` by name | yes | yes, on 27 November 2026, asked of the name server the home router named; `net names` not tried |
+| TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | yes, on 27 November 2026: three servers of the Internet, with what its processor draws and the time its clock tells |
+| HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | `net get` only, on 27 November 2026; `net post` not tried |
 | Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | not tried |
 | What happens to the machine said as events: `start`, `network`, `disk`, `tasks`, `memory` | yes; `disk` and `memory` by unit tests only | not tried |
-| The companion asked by programs (`ask` in an `on` or `every` program), which is how it reacts to what happens | yes | not tried |
-| The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | not tried |
-| The companion acts (`run`: one line at the prompt, written in `acts`), remembers (`remember`, the table `remembered`) and is stopped (`companion off`, kept between starts); what is refused to it | yes, against a made-up model and a real one; the refusals against the made-up one | not tried |
+| The companion asked by programs (`ask` in an `on` or `every` program), which is how it reacts to what happens | yes | yes, on 27 November 2026: an `on notify` program |
+| The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | yes, on 27 November 2026, asked by a program and through a relay (see below); `ask` typed there, and the key, not tried |
+| The companion acts (`run`: one line at the prompt, written in `acts`), remembers (`remember`, the table `remembered`) and is stopped (`companion off`, kept between starts); what is refused to it | yes, against a made-up model and a real one; the refusals against the made-up one | yes, on 27 November 2026, through the relay; of the refusals only `web on`, which the real model tried; kept between starts not tried |
 | `install`, `disk erase`, `remote on`, `web on` refused to a program that runs by itself; `disk erase yes` refused to the network session | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
@@ -56,8 +56,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 36,000 lines, 321
-unit tests, 501 system checks.
+about 300 system checks. On 27 November 2026: about 36,000 lines, 322
+unit tests, 502 system checks.
 
 ## Known limits of what is done
 
@@ -242,19 +242,49 @@ it. Its steps are [below](#the-companion).
 | 5. The virtual machine | The choice of the machine, then a first program run in it | Starts with a design session |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
 
-**Waiting for the T430.** What these phases build is only verified in
-QEMU until it is tried there: the dead keys on the real keyboard,
-`install` showing its progress on a real disk, `disk check` on a
-real disk, names asked of the name server of a real network, TLS
-with the keys its processor draws and the time its clock tells, and
-the companion as a whole.
+**Tried on the T430, and what still waits.** On 27 November 2026 the
+T430 was started from its network cable with the kernel of that day.
+That kernel found the tables its disk held, written in version 1 of
+the format. Its system was replaced with the tables kept (`install
+from`, `install system`), then its whole disk was taken again
+(`install from`, `install n yes`, which showed how far it was), and
+the machine started from that disk: the volume it holds since was
+made in version 3.
 
-On 27 November 2026 the T430 was started from its network cable with
-the kernel of that day. Its system was replaced with the tables kept
-(`install from`, `install system`), then its whole disk was taken
-again (`install from`, `install n yes`): the volume it holds since was
-made in version 3 of the format. That is all that was done there that
-day: what the table above marks as not tried is still not tried.
+The same day a script on the development machine typed at its prompt
+over the network (`remote on`), with the statements and the answers
+of `tools/check.py`: what a column asks, indexes (two tables of 800
+rows, the pages read counted), `ALTER TABLE`, joins, programs,
+`disk check` on the real disk, a ping, names asked of the home
+router, and pages of three servers of the Internet through TLS. 48
+of its 49 checks passed. The one that failed was a fault of XilaOS,
+which no check had met: in a program that runs when something
+happens (`on insert`, `on notify`...), the names `now` and `today`
+were unknown. It was corrected that day; the system on the T430's
+disk is the one from before the correction until it is replaced.
+
+The companion was tried there too, the same day. `key set` is refused
+to the network prompt, since the key would cross the network as it
+is, and the author chose not to type the key at the machine: so the
+row of `companions` was pointed at a relay on the development machine,
+in plain HTTP, which added the key and passed the question on to the
+model through HTTPS. And `ask` is refused to the network prompt, so
+the questions were asked by a program (`on notify`). The real model
+read a table (three `select`, the sum right), made a table and filled
+it (`run`, written in `acts`), kept a fact and said it again at the
+next question, tried `web on` when told to and was refused, declined
+to empty `acts`, and was stopped and had back (`companion off`, `on`).
+Seventeen calls in all. What that leaves untried is the last step of
+the real way: the key kept on the T430 and sent by it through TLS
+(a page of the model's server was read through TLS there, without a
+key).
+
+What still waits for the T430, since it cannot be done over the
+network or was not tried: a key kept there (`key set`) and the
+companion asked with it, `ask` typed at the machine and on the
+companion's screen with an answer, what happens to the machine said
+as events, `net post`, the dead keys on the real keyboard, and a
+power cut while tables with indexes change.
 
 ### The companion
 

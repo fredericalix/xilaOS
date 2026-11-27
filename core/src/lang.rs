@@ -1047,7 +1047,6 @@ fn fire(sys: &mut System, program: &[u8], happened: Option<&Happened>, out: &mut
     // who asks, if this program asks the companion something
     sys.firing = crate::sql::Name::from_bytes(program);
     sys.vars[BACKGROUND] = Vars::new();
-    sys.vars[BACKGROUND].clock = sys.now();
     // what this program causes is one step further down the chain
     sys.events.depth = happened.map_or(0, |happened| happened.depth) + 1;
     let mut named = Named { out, name: program };
@@ -1055,6 +1054,8 @@ fn fire(sys: &mut System, program: &[u8], happened: Option<&Happened>, out: &mut
         Some(happened) => describe(sys, happened),
         None => Ok(true),
     };
+    // after the names of what happened, which are set as a whole
+    sys.vars[BACKGROUND].clock = sys.now();
     match ready {
         Ok(true) => {
             let mut machine = Machine { sys, out: &mut named, steps: 0, level: 0, failed_at: 0 };
@@ -1545,6 +1546,20 @@ mod tests {
         // run by who is at the machine, a program may
         type_lines(&mut sys, &["program doors", "    web on", "end"]);
         assert!(type_lines(&mut sys, &["run doors"]).0 && sys.web.code().is_some());
+    }
+
+    #[test]
+    fn a_program_that_hears_something_knows_the_time() {
+        use crate::clock::Moment;
+        let mut sys = books();
+        sys.clock = Some((Moment { year: 2026, month: 11, day: 27, hour: 15, minute: 4, second: 5 }.seconds(), sys.ticks));
+        type_lines(&mut sys, &["create table heard (label text, at text, day text)"]);
+        // what happened has names of its own: the time is known beside them
+        type_lines(&mut sys, &["on insert into expenses", "insert into heard values (new.label, now, today)", "end"]);
+        type_lines(&mut sys, &["on notify alerts", "say today + ': ' + text", "end"]);
+        type_lines(&mut sys, &["insert into expenses values ('tea', 2)", "notify alerts 'look'"]);
+        assert_eq!(in_background(&mut sys), ["on_notify_alerts: 2026-11-27: look"]);
+        assert_eq!(said(&mut sys, &["select label, at, day from heard"]), ["   label  at                   day", "   tea    2026-11-27 15:04:05  2026-11-27"]);
     }
 
     #[test]

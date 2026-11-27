@@ -414,5 +414,12 @@ asks for what a real one declines to try.
 - The other companions: more rows of `companions`.
 
 What it costs is the model's price for each call; nothing here caps
-it. None of this was tried on a real machine: the companion has only
-run in QEMU.
+it.
+
+On a real machine it was tried once, on 27 November 2026, on the
+T430: asked by a program, it read a table, made one, kept a fact, was
+refused `web on`, and was stopped and had back. Its questions went
+through a relay on the development machine, which held the key: a key
+kept on the T430 itself, and `ask` typed there with an answer, are
+not tried yet. [Status and roadmap](13-status-and-roadmap.md) says
+how.

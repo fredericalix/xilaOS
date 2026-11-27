@@ -278,7 +278,7 @@ Around them:
 
 - **Unit tests** (`cargo test -p xila-core`): identifiers stored as tools store them, a damaged table not trusted, the partition of XilaOS found among others; and for `install`, a disk that refuses a write, one that refuses to read back, and one that forgets what it was given are each found out, while a disk that cannot take the system is left alone.
 - **In QEMU** (`tools/check.py`): until `yes` is typed the disk is exactly as it was; after `install 1 yes` the machine starts from its disk without the stick and finds its tables; the disk the system runs from can be taken again; `install system` leaves the partition of the tables and the partition table exactly as they were; a 100 MB disk is refused and nothing is written on it.
-- **On a real machine**: on 2026-11-18 a Lenovo T430 was started from the stick, installed with `install`, and started from its disk. The same day its system was replaced without a stick, by `install from` and `install system`. On 2026-11-27 it was started from its network cable with the kernel of that day, its system replaced the same way, then its whole disk taken again by `install from` and `install n yes`.
+- **On a real machine**: on 2026-11-18 a Lenovo T430 was started from the stick, installed with `install`, and started from its disk. The same day its system was replaced without a stick, by `install from` and `install system`. On 2026-11-27 it was started from its network cable with the kernel of that day, its system replaced the same way, then its whole disk taken again by `install from` and `install n yes`, and it started from that disk.
 
 ## Limits
 
