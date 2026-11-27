@@ -1184,6 +1184,9 @@ mod tests {
             "drop program hello",
             "update companions set place = 'https://elsewhere.example/v1'",
             "drop table companions",
+            "alter table acts rename to mine",
+            "alter table programs add hidden int",
+            "create index on companions (name)",
         ];
         for lines in refused.chunks(CALLS) {
             let wanted: Vec<String> = lines.iter().map(|line| format!("run:{line}")).collect();
@@ -1199,7 +1202,7 @@ mod tests {
         assert_eq!(run_line(&mut sys, "select count(*) from programs").1.lines[1].trim(), "1");
         // it reads them, and what is its own it may change
         heard(&mut sys, Ok((200, &answer(None, &["select count(*) from acts", "run:delete from remembered", "run:run hello"]))));
-        assert_eq!(results(&sys), ["count\n8", "0 rows removed from remembered.", "hello"]);
+        assert_eq!(results(&sys), ["count\n11", "0 rows removed from remembered.", "hello"]);
         // the user changes them as before
         sys.companion.stage = Stage::Idle;
         assert!(run_line(&mut sys, "delete from acts").0 && run_line(&mut sys, "drop program hello").0 && run_line(&mut sys, "update companions set character = 'Wary.'").0);

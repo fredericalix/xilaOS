@@ -1789,6 +1789,57 @@ with Xila(disk=index_disk) as x:
     back = pages_for(x, queries[0])
     check("drop index: the pages are given back, and the query reads the table again", dropped == (True, ["Index removed from visits (year)."]) and used() < before and back[1] >= whole[0][1] and back[0][0] == {"id": "5"} and x.cmd("disk check")[0], (dropped, before, used(), back))
 
+# A table changed after it was made: columns come and go, take other
+# names, ask more or less; all of it on the disk.
+alter_disk = blank_disk(os.path.join(ROOT, "build", "alter.img"))
+with Xila(disk=alter_disk) as x:
+    x.cmd("create table spent (day text, label text, amount decimal, tag text)")
+    x.cmd("insert into spent values ('2026-11-18', 'coffee', 3.5, 'food'), ('2026-11-18', 'train', 42, 'travel'), (null, 'refund', -0.05, null)")
+    x.cmd("listen spent")
+    x.events.clear()
+    said = [x.cmd(line) for line in (
+        "alter table spent add column paid text default 'no'",
+        "alter table spent add rate decimal(6,3) not null default 1.5",
+        "alter table spent drop column day",
+        "alter table spent rename column tag to kind",
+        "alter table spent alter column kind set default 'misc'",
+        "alter table spent add check (amount > -1)",
+        "alter table spent add unique (label)")]
+    wanted = ["Column paid added to spent.", "Column rate added to spent.", "Column day removed from spent.", "Column tag of spent is now kind.", "Column kind of spent takes 'misc' by default.",
+              "Check added to spent: every row holds it.", "Column label of spent takes no value twice from now on."]
+    check("alter table: columns come and go, take other names, ask more", said == [(True, [line]) for line in wanted], said)
+    x.cmd("")
+    check("alter table: who listens hears that the table changed, not each of its rows", x.events == [("spent", "alter")] * 7, x.events)
+    rows = x.table("select * from spent")
+    check("alter table: the rows that were there have the value by default, and lose what goes",
+          rows == [{"id": "1", "label": "coffee", "amount": "3.50", "kind": "food", "paid": "no", "rate": "1.500"}, {"id": "2", "label": "train", "amount": "42.00", "kind": "travel", "paid": "no", "rate": "1.500"},
+                   {"id": "3", "label": "refund", "amount": "-0.05", "kind": "", "paid": "no", "rate": "1.500"}], rows)
+    refused = [x.cmd(line) for line in (
+        "alter table spent add must int not null",
+        "alter table spent alter kind set not null",
+        "alter table spent add check (amount > 0)",
+        "alter table spent drop amount",
+        "insert into spent (label) values ('train')",
+        "alter table spent add ninth int unique default 1",
+        "alter table tasks add n int")]
+    wanted = ["The table has rows: a column that must have a value needs a default.", "A row has no value in kind: nothing was changed.", "Row 3 breaks that check: nothing was changed.",
+              "A check names amount: drop the check first.", "Column label takes no value twice: row 2 has that one.", "The rows would all have the same value: a unique column takes none twice.",
+              "tasks is a view of the system and cannot be changed."]
+    check("alter table: what the rows do not allow is refused, and says why", refused == [(False, [line]) for line in wanted], refused)
+    check("alter table: and nothing of it was done", x.table("select * from spent") == rows and x.cmd("disk check")[0])
+    renamed = (x.cmd("alter table spent rename to costs"), x.cmd("select count(*) from spent")[0], x.table("select count(*) from costs"))
+    check("alter table: a table takes another name", renamed == ((True, ["Table spent is now costs."]), False, [{"count": "3"}]), renamed)
+    shown = x.cmd("show table costs")
+    check("show table: says the table as it is now", shown == (True, ["create table costs (", "    label text unique,", "    amount decimal(18,2),", "    kind text default 'misc',", "    paid text default 'no',", "    rate decimal(18,3) not null default 1.500,", "    check (amount > -1)", ")"]), shown)
+    time.sleep(0.2)
+    x.cut()
+with Xila(disk=alter_disk) as x:
+    added = x.cmd("insert into costs (label, amount) values ('tea', 2.25)")
+    again = (x.cmd("show table costs"), x.table("select * from costs where id < 4"), x.table("select kind, paid, rate from costs where id = 4"))
+    check("alter table: after a power cut the table is as it was changed", added[0] and again == (shown, rows, [{"kind": "misc", "paid": "no", "rate": "1.500"}]) and x.cmd("disk check")[0], (added, again))
+    undone = [x.cmd(line)[0] for line in ("alter table costs drop check (amount > -1)", "alter table costs drop unique (label)", "drop index on costs (label)", "alter table costs alter rate drop not null", "alter table costs alter kind drop default", "alter table costs drop rate", "alter table costs drop paid")]
+    check("alter table: and what was asked can be taken back", all(undone) and x.cmd("show table costs") == (True, ["create table costs (", "    label text,", "    amount decimal(18,2),", "    kind text", ")"]) and x.cmd("disk check")[0], (undone, x.cmd("show table costs")))
+
 # What the user chose is kept from one start to the next, in a table.
 kept_disk = blank_disk(os.path.join(ROOT, "build", "settings.img"))
 with Xila(disk=kept_disk) as x:

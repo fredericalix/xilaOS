@@ -1073,6 +1073,249 @@ impl Database {
         Ok(())
     }
 
+    /// What every change to a table itself starts with: nothing may be
+    /// waiting, as when a table is made.
+    fn alone(&self) -> Result<(), Error> {
+        if self.log.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Busy)
+        }
+    }
+
+    /// What every change to a table itself ends with: the table must still
+    /// fit in the catalog.
+    fn altered(&mut self, table: usize) -> Result<(), Error> {
+        self.tables[table].changed = true;
+        if self.tables[table].describe().len() > tree::MAX_VALUE {
+            return Err(Error::TooLong);
+        }
+        Ok(())
+    }
+
+    /// Gives a table another name.
+    pub fn rename(&mut self, table: usize, name: &[u8]) -> Result<(), Error> {
+        self.alone()?;
+        if !good_name(name) {
+            return Err(Error::BadName);
+        }
+        if self.find(name).is_some_and(|other| other != table) {
+            return Err(Error::Exists);
+        }
+        self.begin();
+        self.tables[table].name = name.to_ascii_lowercase();
+        self.altered(table)
+    }
+
+    /// Gives a column another name. `id` keeps its own.
+    pub fn rename_column(&mut self, table: usize, column: usize, name: &[u8]) -> Result<(), Error> {
+        self.alone()?;
+        if column == 0 || column >= self.tables[table].columns.len() {
+            return Err(Error::Key);
+        }
+        if !good_name(name) {
+            return Err(Error::BadName);
+        }
+        if self.tables[table].column(name).is_some_and(|other| other != column) {
+            return Err(Error::DuplicateColumn);
+        }
+        self.begin();
+        self.tables[table].columns[column].name = name.to_ascii_lowercase();
+        self.altered(table)
+    }
+
+    /// Adds a column after the others. The rows the table has take its
+    /// value by default, or none: they are written again only when there
+    /// is one, since a row is read with nothing where it has no field.
+    /// A column that must have a value needs one by default when the
+    /// table has rows, and one that takes no value twice cannot give the
+    /// same to two rows. Returns the place of the column.
+    pub fn add_column(&mut self, table: usize, name: &[u8], kind: Kind, rule: Rule) -> Result<usize, Error> {
+        self.alone()?;
+        let found = &self.tables[table];
+        let at = found.columns.len();
+        if at >= MAX_COLUMNS {
+            return Err(Error::ColumnCount);
+        }
+        if !good_name(name) {
+            return Err(Error::BadName);
+        }
+        if found.column(name).is_some() {
+            return Err(Error::DuplicateColumn);
+        }
+        let default = rule.default.filter(|default| *default != Field::Null);
+        if let Some(default) = &rule.default {
+            if !fits(kind, default) {
+                return Err(Error::WrongKind(at));
+            }
+            encode(&[*default])?;
+        }
+        if rule.not_null && default.is_none() && found.rows > 0 {
+            return Err(Error::Missing(at));
+        }
+        self.begin();
+        self.tables[table].columns.push(Column { name: name.to_ascii_lowercase(), kind, not_null: rule.not_null, unique: rule.unique, default: rule.default.as_ref().map(Kept::of), index: rule.unique.then_some(0) });
+        self.altered(table)?;
+        if let Some(default) = default {
+            // every row as it was, with the value in its new field; what
+            // the column asks is asked of them as of any change
+            let reported = self.log.len();
+            self.update_each(table, &mut |fields, put| {
+                let mut new = [Field::Null; MAX_COLUMNS];
+                new[..fields.len()].copy_from_slice(fields);
+                new[at] = default;
+                put(&new[..fields.len()]);
+            })?;
+            // the rows did not change for those who listen: the table did
+            self.log.truncate(reported);
+        }
+        Ok(at)
+    }
+
+    /// Removes a column, with its index, from the table and from every
+    /// row: all the rows are written again. A table keeps one column
+    /// besides `id`.
+    pub fn drop_column(&mut self, table: usize, column: usize) -> Result<(), Error> {
+        self.alone()?;
+        let count = self.tables[table].columns.len();
+        if column == 0 || column >= count {
+            return Err(Error::Key);
+        }
+        if count <= 2 {
+            return Err(Error::ColumnCount);
+        }
+        let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut failed = None;
+        self.scan(table, &mut |fields| {
+            let mut left = [Field::Null; MAX_COLUMNS];
+            let mut kept = 0;
+            for (at, field) in fields.iter().enumerate().skip(1) {
+                if at != column {
+                    left[kept] = *field;
+                    kept += 1;
+                }
+            }
+            match (encode(&left[..kept]), fields[0]) {
+                (Ok(record), Field::Int(id)) => records.push((id as u64, record)),
+                (Err(error), _) => failed = Some(error),
+                _ => {}
+            }
+        })?;
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        self.begin();
+        let store = ready(self.store.get_mut(), self.limit)?;
+        let found = &mut self.tables[table];
+        // what goes is given back before the rows are written again
+        store.spare = true;
+        let mut result = match found.columns[column].index {
+            Some(root) => index::release(store, root),
+            None => Ok(()),
+        };
+        for (id, record) in &records {
+            if result.is_err() {
+                break;
+            }
+            match tree::set(store, found.root, *id, Some(record)) {
+                Ok((root, _)) => found.root = root,
+                Err(error) => result = Err(error),
+            }
+        }
+        store.spare = false;
+        result?;
+        found.columns.remove(column);
+        self.altered(table)
+    }
+
+    /// Says whether a column must have a value. To say that it must, every
+    /// row has to have one.
+    pub fn set_not_null(&mut self, table: usize, column: usize, not_null: bool) -> Result<(), Error> {
+        self.alone()?;
+        if column == 0 || column >= self.tables[table].columns.len() {
+            return Err(Error::Key);
+        }
+        if not_null {
+            let mut empty = false;
+            self.scan(table, &mut |fields| empty |= fields[column] == Field::Null)?;
+            if empty {
+                return Err(Error::Missing(column));
+            }
+        }
+        self.begin();
+        self.tables[table].columns[column].not_null = not_null;
+        self.altered(table)
+    }
+
+    /// Gives a column a value by default, or takes it away. The rows the
+    /// table has stay as they are.
+    pub fn set_default(&mut self, table: usize, column: usize, default: Option<Field>) -> Result<(), Error> {
+        self.alone()?;
+        if column == 0 || column >= self.tables[table].columns.len() {
+            return Err(Error::Key);
+        }
+        if let Some(default) = &default {
+            if !fits(self.tables[table].columns[column].kind, default) {
+                return Err(Error::WrongKind(column));
+            }
+            encode(&[*default])?;
+        }
+        self.begin();
+        self.tables[table].columns[column].default = default.as_ref().map(Kept::of);
+        self.altered(table)
+    }
+
+    /// Says whether a column takes no value twice. To say that it does,
+    /// no two rows may have the same value; the column gets an index if
+    /// it has none, and keeps it when this is said no longer.
+    pub fn set_unique(&mut self, table: usize, column: usize, unique: bool) -> Result<(), Error> {
+        self.alone()?;
+        if column == 0 || column >= self.tables[table].columns.len() {
+            return Err(Error::Key);
+        }
+        if unique {
+            let mut values: Vec<(Kept, u64)> = Vec::new();
+            self.scan(table, &mut |fields| {
+                if let (true, Field::Int(id)) = (fields[column] != Field::Null, fields[0]) {
+                    values.push((Kept::of(&fields[column]), id as u64));
+                }
+            })?;
+            values.sort();
+            if let Some(pair) = values.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+                return Err(Error::Twice(column, pair[0].1));
+            }
+            if self.tables[table].columns[column].index.is_none() {
+                self.index(table, column)?;
+            }
+        }
+        self.begin();
+        self.tables[table].columns[column].unique = unique;
+        self.altered(table)
+    }
+
+    /// Adds a condition to those a table keeps. The engine does not read
+    /// it: whoever adds it has looked at the rows.
+    pub fn add_check(&mut self, table: usize, check: &[u8]) -> Result<(), Error> {
+        self.alone()?;
+        if self.tables[table].checks.len() >= MAX_CHECKS || check.is_empty() || check.len() > MAX_CHECK {
+            return Err(Error::Checks);
+        }
+        self.begin();
+        self.tables[table].checks.push(check.to_vec());
+        self.altered(table)
+    }
+
+    /// Removes one of the conditions a table keeps, by its place.
+    pub fn drop_check(&mut self, table: usize, at: usize) -> Result<(), Error> {
+        self.alone()?;
+        if at >= self.tables[table].checks.len() {
+            return Err(Error::Checks);
+        }
+        self.begin();
+        self.tables[table].checks.remove(at);
+        self.altered(table)
+    }
+
     /// Gives a column an index, made from the rows the table has. A change
     /// of its own, as making a table is: nothing may be waiting.
     pub fn index(&mut self, table: usize, column: usize) -> Result<(), Error> {
@@ -1908,6 +2151,108 @@ mod tests {
         db.commit(&mut |_, _, _| {}).unwrap();
         assert_eq!(db.insert(parts, &[Field::Text(label(500).as_bytes()), Field::Null]), Err(Error::Twice(1, 506)));
         assert_eq!(db.update(parts, &mut |fields| fields[0] == Field::Int(7), &[(1, Field::Text(b"bolt"))]), Err(Error::Twice(1, 1)));
+    }
+
+    #[test]
+    fn a_table_is_changed_after_it_is_made() {
+        let (mut db, fruit) = shop();
+        let done = |db: &mut Database| db.commit(&mut |_, _, _| {}).unwrap();
+        // another name, for the table and for a column
+        assert_eq!(db.rename(fruit, b"Produce"), Ok(()));
+        assert_eq!(db.rename_column(fruit, 3, b"Left"), Ok(()));
+        done(&mut db);
+        assert_eq!((db.find(b"produce"), db.find(b"fruit"), db.tables()[fruit].column(b"left")), (Some(fruit), None, Some(3)));
+        assert_eq!(db.rename(fruit, b"2nd"), Err(Error::BadName));
+        assert_eq!(db.rename_column(fruit, 0, b"key"), Err(Error::Key));
+        assert_eq!(db.rename_column(fruit, 1, b"ID"), Err(Error::DuplicateColumn));
+        assert_eq!(db.rename_column(fruit, 1, b"price"), Err(Error::DuplicateColumn));
+        assert_eq!(db.rename_column(fruit, 1, b"Name"), Ok(()));
+        db.create(b"other", &[(b"x", Kind::Int)]).unwrap();
+        done(&mut db);
+        assert_eq!(db.rename(fruit, b"other"), Err(Error::Exists));
+        // a column more: nothing in the rows that were there, or its value by default
+        let plain = db.add_column(fruit, b"origin", Kind::Text, Rule::default()).unwrap();
+        done(&mut db);
+        let graded = db.add_column(fruit, b"grade", Kind::Int, Rule { not_null: true, default: Some(Field::Int(2)), unique: false }).unwrap();
+        done(&mut db);
+        assert_eq!((plain, graded), (4, 5));
+        assert_eq!(rows(&db, fruit), ["1 apple d30 12 - 2", "2 banana d125 0 - 2", "3 cherry - - - 2"]);
+        assert_eq!(db.insert(fruit, &[Field::Text(b"date"), Field::Dec(900), Field::Int(1), Field::Text(b"Tunis"), Field::Int(1)]), Ok(4));
+        done(&mut db);
+        // what cannot be: a value where there is none to give, the same to two rows, a ninth column
+        assert_eq!(db.add_column(fruit, b"must", Kind::Int, Rule { not_null: true, ..Rule::default() }), Err(Error::Missing(6)));
+        assert_eq!(db.add_column(fruit, b"one", Kind::Int, Rule { unique: true, default: Some(Field::Int(7)), not_null: false }), Err(Error::Twice(6, 1)));
+        db.rollback();
+        assert_eq!(db.add_column(fruit, b"wrong", Kind::Int, Rule { default: Some(Field::Text(b"x")), ..Rule::default() }), Err(Error::WrongKind(6)));
+        assert_eq!(db.add_column(fruit, b"grade", Kind::Int, Rule::default()), Err(Error::DuplicateColumn));
+        let code = db.add_column(fruit, b"code", Kind::Int, Rule { unique: true, ..Rule::default() }).unwrap();
+        done(&mut db);
+        assert!(db.tables()[fruit].columns[code].indexed());
+        db.add_column(fruit, b"last", Kind::Int, Rule::default()).unwrap();
+        done(&mut db);
+        assert_eq!(db.add_column(fruit, b"ninth", Kind::Int, Rule::default()), Err(Error::ColumnCount));
+        assert_eq!(db.verify(), Ok(()));
+        // a column less: the rows are written again without it, and its index goes
+        let with = db.used();
+        db.update(fruit, &mut |_| true, &[(code, Field::Null)]).unwrap();
+        db.update_each(fruit, &mut |fields, put| {
+            let mut new = [Field::Null; MAX_COLUMNS];
+            new.copy_from_slice(fields);
+            new[code] = fields[0];
+            put(&new);
+        })
+        .unwrap();
+        done(&mut db);
+        assert!(db.used() > with, "the index of code holds the rows now");
+        assert_eq!(db.drop_column(fruit, code), Ok(()));
+        assert_eq!(db.drop_column(fruit, 2), Ok(()));
+        assert_eq!(db.drop_column(fruit, 0), Err(Error::Key));
+        done(&mut db);
+        assert_eq!(db.used(), with);
+        assert_eq!(rows(&db, fruit), ["1 apple 12 - 2 -", "2 banana 0 - 2 -", "3 cherry - - 2 -", "4 date 1 Tunis 1 -"]);
+        let names: Vec<&[u8]> = db.tables()[fruit].columns.iter().map(|column| &column.name[..]).collect();
+        assert_eq!(names, [&b"id"[..], b"name", b"left", b"origin", b"grade", b"last"]);
+        // the last column besides id stays
+        let small = db.find(b"other").unwrap();
+        assert_eq!(db.drop_column(small, 1), Err(Error::ColumnCount));
+        // what a column asks, said afterwards: the rows are looked at first
+        assert_eq!(db.set_not_null(fruit, 3, true), Err(Error::Missing(3)));
+        assert_eq!(db.set_not_null(fruit, 1, true), Ok(()));
+        done(&mut db);
+        assert_eq!(db.insert(fruit, &[Field::Null]), Err(Error::Missing(1)));
+        assert_eq!(db.set_not_null(fruit, 1, false), Ok(()));
+        assert_eq!(db.set_unique(fruit, 4, true), Err(Error::Twice(4, 1)));
+        assert_eq!(db.set_unique(fruit, 1, true), Ok(()));
+        done(&mut db);
+        assert!(db.tables()[fruit].columns[1].indexed());
+        assert_eq!(db.insert(fruit, &[Field::Text(b"apple")]), Err(Error::Twice(1, 1)));
+        assert_eq!(db.set_unique(fruit, 1, false), Ok(()));
+        done(&mut db);
+        // the index it was given stays: it is the user's to remove
+        assert!(db.tables()[fruit].columns[1].indexed());
+        assert_eq!(db.insert(fruit, &[Field::Text(b"apple"), Field::Null, Field::Null, Field::Int(3)]), Ok(5));
+        done(&mut db);
+        assert_eq!(db.set_default(fruit, 2, Some(Field::Text(b"many"))), Err(Error::WrongKind(2)));
+        assert_eq!(db.set_default(fruit, 2, Some(Field::Int(10))), Ok(()));
+        assert_eq!(db.tables()[fruit].columns[2].default, Some(Kept::Int(10)));
+        assert_eq!(db.set_default(fruit, 2, None), Ok(()));
+        // conditions come and go; the engine keeps them and no more
+        assert_eq!(db.add_check(fruit, b"left >= 0"), Ok(()));
+        assert_eq!(db.add_check(fruit, b"grade < 5"), Ok(()));
+        assert_eq!(db.add_check(fruit, b""), Err(Error::Checks));
+        assert_eq!(db.drop_check(fruit, 0), Ok(()));
+        assert_eq!(db.drop_check(fruit, 1), Err(Error::Checks));
+        done(&mut db);
+        assert_eq!(db.tables()[fruit].checks, [b"grade < 5".to_vec()]);
+        // none of this while rows wait to be committed
+        db.insert(fruit, &[Field::Text(b"fig"), Field::Null, Field::Null, Field::Int(1)]).unwrap();
+        assert_eq!((db.rename(fruit, b"x"), db.add_column(fruit, b"x", Kind::Int, Rule::default()), db.drop_column(fruit, 1), db.set_not_null(fruit, 1, true), db.add_check(fruit, b"x")), (Err(Error::Busy), Err(Error::Busy), Err(Error::Busy), Err(Error::Busy), Err(Error::Busy)));
+        done(&mut db);
+        assert_eq!(db.verify(), Ok(()));
+        // and the catalog says all of it
+        let table = &db.tables()[fruit];
+        let back = Table::described(table.key, &table.describe()).unwrap();
+        assert_eq!((back.name, back.columns.len(), back.checks.len(), back.rows), (b"produce".to_vec(), 6, 1, 6));
     }
 
     #[test]

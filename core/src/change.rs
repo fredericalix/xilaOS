@@ -5,6 +5,11 @@
 //!     type: int, decimal, decimal(p,s), text
 //!     rule: NOT NULL, UNIQUE, DEFAULT value, CHECK (condition)
 //! DROP TABLE name
+//! ALTER TABLE name ADD [COLUMN] column type [rule ...]
+//! ALTER TABLE name DROP [COLUMN] column
+//! ALTER TABLE name RENAME TO name | RENAME [COLUMN] column TO name
+//! ALTER TABLE name ALTER [COLUMN] column SET NOT NULL | DROP NOT NULL | SET DEFAULT value | DROP DEFAULT
+//! ALTER TABLE name ADD UNIQUE (column) | DROP UNIQUE (column) | ADD CHECK (condition) | DROP CHECK (condition)
 //! CREATE INDEX ON name (column)
 //! DROP INDEX ON name (column)
 //! INSERT INTO name [(column, ...)] VALUES (value, ...) [, (value, ...)]
@@ -237,6 +242,75 @@ fn condition_of(text: &[u8], schema: &Schema) -> Result<Expr, Message> {
     Ok(condition)
 }
 
+/// A column as CREATE TABLE and ALTER TABLE ... ADD write it: its name,
+/// its type, and what it asks of its values, in any order. The value by
+/// default is given apart: it becomes a field once the table is known.
+/// A check written after the column is kept in `checks`, when the
+/// statement takes checks there.
+#[allow(clippy::type_complexity)]
+fn definition<'a>(lexer: &mut Lexer<'a>, mut checks: Option<(&mut [&'a [u8]; MAX_CHECKS], &mut usize)>) -> Result<(&'a [u8], Kind, Rule<'static>, Option<Value>), Message> {
+    let column = lexer.word(b"a column name")?;
+    let kind = lexer.word(b"a type: int, decimal or text")?;
+    let mut lower = FixedStr::<12>::new();
+    for c in kind {
+        lower.push(c.to_ascii_lowercase());
+    }
+    let mut kind = match lower.bytes() {
+        b"int" | b"integer" | b"bigint" => Kind::Int,
+        b"decimal" | b"numeric" => Kind::Dec(2),
+        b"text" | b"varchar" | b"char" => Kind::Text,
+        _ => return Err(error(b"Unknown type: ", kind).also(b". Types are int, decimal and text.")),
+    };
+    // (precision) or (precision, scale); only the scale matters here
+    if lexer.symbol(b"(") {
+        let mut numbers = [0i64; 2];
+        let mut given = 0;
+        loop {
+            match lexer.next() {
+                Token::Number(n) if given < 2 => numbers[given] = n,
+                other => return Err(unexpected(b"a number", other)),
+            }
+            given += 1;
+            if !lexer.symbol(b",") {
+                break;
+            }
+        }
+        lexer.expect(b")")?;
+        if let Kind::Dec(_) = kind {
+            let scale = if given == 2 { numbers[1] } else { 0 };
+            if !(0..=MAX_SCALE as i64).contains(&scale) {
+                return Err(Message::from_bytes(b"A decimal keeps 0 to 9 digits after the point."));
+            }
+            kind = Kind::Dec(scale as u8);
+        }
+    }
+    // what the column asks of its values, in any order
+    let mut rule = Rule { not_null: false, unique: false, default: None };
+    let mut default = None;
+    loop {
+        if lexer.keyword(b"not") {
+            if !lexer.keyword(b"null") {
+                return Err(unexpected(b"NULL", lexer.peek()));
+            }
+            rule.not_null = true;
+        } else if lexer.keyword(b"unique") {
+            rule.unique = true;
+        } else if lexer.keyword(b"default") {
+            default = Some(constant(lexer)?);
+        } else if lexer.keyword(b"check") {
+            match checks.as_mut() {
+                Some((checks, count)) => check(lexer, checks, count)?,
+                None => return Err(Message::from_bytes(b"A check is added on its own: alter table t add check (...).")),
+            }
+        } else if lexer.keyword(b"primary") {
+            return Err(Message::from_bytes(b"Every table has id for its key, given by the system: no other is declared."));
+        } else if !lexer.keyword(b"null") {
+            break;
+        }
+    }
+    Ok((column, kind, rule, default))
+}
+
 /// Takes `(condition)` after the word CHECK, and keeps the condition.
 fn check<'a>(lexer: &mut Lexer<'a>, checks: &mut [&'a [u8]; MAX_CHECKS], count: &mut usize) -> Result<(), Message> {
     lexer.expect(b"(")?;
@@ -275,65 +349,12 @@ fn create<'a>(db: &mut Database, lexer: &mut Lexer<'a>) -> Result<Done, Message>
             continue;
         }
         lexer.at = before;
-        let column = lexer.word(b"a column name")?;
-        let kind = lexer.word(b"a type: int, decimal or text")?;
-        let mut lower = FixedStr::<12>::new();
-        for c in kind {
-            lower.push(c.to_ascii_lowercase());
-        }
-        let mut kind = match lower.bytes() {
-            b"int" | b"integer" | b"bigint" => Kind::Int,
-            b"decimal" | b"numeric" => Kind::Dec(2),
-            b"text" | b"varchar" | b"char" => Kind::Text,
-            _ => return Err(error(b"Unknown type: ", kind).also(b". Types are int, decimal and text.")),
-        };
-        // (precision) or (precision, scale); only the scale matters here
-        if lexer.symbol(b"(") {
-            let mut numbers = [0i64; 2];
-            let mut given = 0;
-            loop {
-                match lexer.next() {
-                    Token::Number(n) if given < 2 => numbers[given] = n,
-                    other => return Err(unexpected(b"a number", other)),
-                }
-                given += 1;
-                if !lexer.symbol(b",") {
-                    break;
-                }
-            }
-            lexer.expect(b")")?;
-            if let Kind::Dec(_) = kind {
-                let scale = if given == 2 { numbers[1] } else { 0 };
-                if !(0..=MAX_SCALE as i64).contains(&scale) {
-                    return Err(Message::from_bytes(b"A decimal keeps 0 to 9 digits after the point."));
-                }
-                kind = Kind::Dec(scale as u8);
-            }
-        }
+        let (column, kind, rule, default) = definition(lexer, Some((&mut checks, &mut check_count)))?;
         if count == MAX_COLUMNS - 1 {
             return Err(engine_error(Error::ColumnCount, None));
         }
         schema.add(column, kind);
-        // what the column asks of its values, in any order
-        let mut rule = Rule { not_null: false, unique: false, default: None };
-        loop {
-            if lexer.keyword(b"not") {
-                if !lexer.keyword(b"null") {
-                    return Err(unexpected(b"NULL", lexer.peek()));
-                }
-                rule.not_null = true;
-            } else if lexer.keyword(b"unique") {
-                rule.unique = true;
-            } else if lexer.keyword(b"default") {
-                defaults[count] = Some(constant(lexer)?);
-            } else if lexer.keyword(b"check") {
-                check(lexer, &mut checks, &mut check_count)?;
-            } else if lexer.keyword(b"primary") {
-                return Err(Message::from_bytes(b"Every table has id for its key, given by the system: no other is declared."));
-            } else if !lexer.keyword(b"null") {
-                break;
-            }
-        }
+        defaults[count] = default;
         columns[count] = (column, kind, rule);
         count += 1;
         if !lexer.symbol(b",") {
@@ -413,6 +434,204 @@ pub fn written(db: &Database, name: &[u8], out: &mut dyn crate::shell::Out) -> b
         out.line(crate::shell::Style::Out, line.bytes());
     }
     true
+}
+
+/// `ALTER TABLE name ...`: what a table is, changed after it was made.
+/// Whatever is added is asked of the rows the table has first, and the
+/// statement refused if one of them breaks it. Like every statement it
+/// is one transaction: a column is added to every row or to none.
+fn alter(db: &mut Database, lexer: &mut Lexer) -> Result<Done, Message> {
+    let schema = stored(db, lexer.word(b"a table")?)?;
+    let table = schema.table - catalog::TABLES.len();
+    let wrong = |e: Error| engine_error(e, Some(&schema));
+    // a column of the table that is not its id
+    let named = |lexer: &mut Lexer| -> Result<usize, Message> {
+        match schema.column(lexer.word(b"a column")?)? {
+            0 => Err(engine_error(Error::Key, None)),
+            column => Ok(column),
+        }
+    };
+    // `(column)` after UNIQUE, `(condition)` after CHECK: a column may be called either
+    let ahead = |lexer: &mut Lexer, word: &[u8]| {
+        let before = lexer.at;
+        let found = lexer.keyword(word) && lexer.peek() == Token::Symbol(b"(");
+        if !found {
+            lexer.at = before;
+        }
+        found
+    };
+    // a check names its columns: such a column stays as it is while the check does
+    let checked = |db: &Database, column: usize| -> Result<(), Message> {
+        for text in &db.tables()[table].checks {
+            if condition_of(text, &schema)?.names(column) {
+                return Err(error(b"A check names ", schema.columns[column].bytes()).also(b": drop the check first."));
+            }
+        }
+        Ok(())
+    };
+    let mut message = Message::new();
+    let about = |message: &mut Message, column: usize| {
+        let _ = write!(message, "Column {} of {} ", schema.columns[column], schema.name);
+    };
+    let verb = lexer.word(b"ADD, DROP, RENAME or ALTER")?;
+    let mut lower = FixedStr::<8>::new();
+    for c in verb {
+        lower.push(c.to_ascii_lowercase());
+    }
+    match lower.bytes() {
+        b"add" if ahead(lexer, b"check") => {
+            lexer.expect(b"(")?;
+            let text = enclosed(lexer)?;
+            lexer.end()?;
+            let condition = condition_of(text, &schema)?;
+            if condition.names(0) {
+                return Err(Message::from_bytes(b"A check cannot name id: a row has it only once it is in the table."));
+            }
+            // every row the table has must hold it
+            let mut broken: Option<Message> = None;
+            db.scan(table, &mut |fields| {
+                if broken.is_some() {
+                    return;
+                }
+                match (condition.fails(&row_from(fields, &schema.kinds)), fields[0]) {
+                    (Ok(true), Field::Int(id)) => {
+                        let mut said = Message::new();
+                        let _ = write!(said, "Row {id} breaks that check: nothing was changed.");
+                        broken = Some(said);
+                    }
+                    (Err(said), _) => broken = Some(said),
+                    _ => {}
+                }
+            })
+            .map_err(wrong)?;
+            if let Some(said) = broken {
+                return Err(said);
+            }
+            db.add_check(table, text).map_err(wrong)?;
+            let _ = write!(message, "Check added to {}: every row holds it.", schema.name);
+        }
+        b"drop" if ahead(lexer, b"check") => {
+            lexer.expect(b"(")?;
+            let text = enclosed(lexer)?;
+            lexer.end()?;
+            let Some(at) = db.tables()[table].checks.iter().position(|check| check == text) else {
+                return Err(error(b"No such check. As they are written: show table ", schema.name.bytes()));
+            };
+            db.drop_check(table, at).map_err(wrong)?;
+            let _ = write!(message, "Check removed from {}.", schema.name);
+        }
+        b"add" | b"drop" if ahead(lexer, b"unique") => {
+            lexer.expect(b"(")?;
+            let column = named(lexer)?;
+            lexer.expect(b")")?;
+            lexer.end()?;
+            let unique = lower.bytes() == b"add";
+            if db.tables()[table].columns[column].unique == unique {
+                about(&mut message, column);
+                message.push_bytes(if unique { b"takes no value twice already." } else { b"is not unique." });
+                return Err(message);
+            }
+            db.set_unique(table, column, unique).map_err(wrong)?;
+            about(&mut message, column);
+            message.push_bytes(if unique { b"takes no value twice from now on." } else { b"may have a value twice. Its index stays." });
+        }
+        b"add" => {
+            lexer.keyword(b"column");
+            let (name, kind, mut rule, default) = definition(lexer, None)?;
+            lexer.end()?;
+            // the table as it will be, to make a field of the value by default
+            let mut with = schema;
+            if with.count == MAX_COLUMNS {
+                return Err(engine_error(Error::ColumnCount, None));
+            }
+            with.add(name, kind);
+            if let Some(default) = &default {
+                rule.default = Some(field(&with, with.count - 1, default)?);
+            }
+            db.add_column(table, name, kind, rule).map_err(|e| match e {
+                Error::Missing(_) => Message::from_bytes(b"The table has rows: a column that must have a value needs a default."),
+                Error::Twice(..) => Message::from_bytes(b"The rows would all have the same value: a unique column takes none twice."),
+                other => engine_error(other, Some(&with)),
+            })?;
+            // its name as the table keeps it
+            let added = db.tables()[table].columns.last().map_or(Name::new(), |column| Name::from_bytes(&column.name));
+            let _ = write!(message, "Column {added} added to {}.", schema.name);
+        }
+        b"drop" => {
+            lexer.keyword(b"column");
+            let column = named(lexer)?;
+            lexer.end()?;
+            checked(db, column)?;
+            db.drop_column(table, column).map_err(|e| match e {
+                Error::ColumnCount => Message::from_bytes(b"A table keeps one column besides id: drop the table instead."),
+                other => wrong(other),
+            })?;
+            let _ = write!(message, "Column {} removed from {}.", schema.columns[column], schema.name);
+        }
+        b"rename" if lexer.keyword(b"to") => {
+            let name = lexer.word(b"a name for the table")?;
+            lexer.end()?;
+            if catalog::find(name).is_some() || catalog::kept_apart(name) {
+                return Err(error(name, b" is a table of the system. Pick another name."));
+            }
+            db.rename(table, name).map_err(wrong)?;
+            let _ = write!(message, "Table {} is now {}.", schema.name, Name::from_bytes(&db.tables()[table].name));
+        }
+        b"rename" => {
+            lexer.keyword(b"column");
+            let column = named(lexer)?;
+            if !lexer.keyword(b"to") {
+                return Err(unexpected(b"TO", lexer.peek()));
+            }
+            let name = lexer.word(b"a name for the column")?;
+            lexer.end()?;
+            checked(db, column)?;
+            db.rename_column(table, column, name).map_err(wrong)?;
+            about(&mut message, column);
+            let _ = write!(message, "is now {}.", Name::from_bytes(&db.tables()[table].columns[column].name));
+        }
+        b"alter" => {
+            lexer.keyword(b"column");
+            let column = named(lexer)?;
+            let sets = lexer.keyword(b"set");
+            if !sets && !lexer.keyword(b"drop") {
+                return Err(unexpected(b"SET or DROP", lexer.peek()));
+            }
+            if lexer.keyword(b"not") {
+                if !lexer.keyword(b"null") {
+                    return Err(unexpected(b"NULL", lexer.peek()));
+                }
+                lexer.end()?;
+                db.set_not_null(table, column, sets).map_err(|e| match e {
+                    Error::Missing(_) => error(b"A row has no value in ", schema.columns[column].bytes()).also(b": nothing was changed."),
+                    other => wrong(other),
+                })?;
+                about(&mut message, column);
+                message.push_bytes(if sets { b"must have a value from now on." } else { b"may have no value." });
+            } else if lexer.keyword(b"default") {
+                let value = if sets { Some(constant(lexer)?) } else { None };
+                lexer.end()?;
+                let default = match &value {
+                    Some(value) => Some(field(&schema, column, value)?).filter(|default| *default != Field::Null),
+                    None => None,
+                };
+                db.set_default(table, column, default).map_err(wrong)?;
+                about(&mut message, column);
+                match default {
+                    Some(default) => {
+                        message.push_bytes(b"takes ");
+                        catalog::literal(default, schema.kinds[column], &mut message);
+                        message.push_bytes(b" by default.");
+                    }
+                    None => message.push_bytes(b"takes nothing by default."),
+                }
+            } else {
+                return Err(unexpected(b"NOT NULL or DEFAULT", lexer.peek()));
+            }
+        }
+        _ => return Err(error(b"After the table: ADD, DROP, RENAME or ALTER, not ", verb)),
+    }
+    Ok(Done { message, table: schema.name, event: Some(b"alter") })
 }
 
 /// `CREATE INDEX ON table (column)` and `DROP INDEX ON table (column)`.
@@ -705,6 +924,7 @@ pub fn target(statement: &[u8]) -> Option<&[u8]> {
         // an index is a change to its table
         _ if makes && lexer.keyword(b"index") => b"on",
         6 if verb.eq_ignore_ascii_case(b"create") => b"table",
+        5 if verb.eq_ignore_ascii_case(b"alter") => b"table",
         4 if verb.eq_ignore_ascii_case(b"drop") => b"table",
         6 if verb.eq_ignore_ascii_case(b"insert") => b"into",
         6 if verb.eq_ignore_ascii_case(b"delete") => b"from",
@@ -734,6 +954,7 @@ pub fn change_with(db: &mut Database, vars: &Vars, statement: &[u8], changed: &m
     }
     let table = |lexer: &mut Lexer| if lexer.keyword(b"table") { Ok(()) } else { Err(unexpected(b"TABLE", lexer.peek())) };
     let done = match lower.bytes() {
+        b"alter" => table(&mut lexer).and_then(|_| alter(db, &mut lexer)),
         b"create" if lexer.keyword(b"index") => index(db, &mut lexer, true),
         b"drop" if lexer.keyword(b"index") => index(db, &mut lexer, false),
         b"create" => table(&mut lexer).and_then(|_| create(db, &mut lexer)),
@@ -1032,6 +1253,83 @@ mod tests {
     }
 
     #[test]
+    fn a_table_is_altered_after_it_is_made() {
+        let mut sys = books();
+        // (books: expenses with day, label, amount, tag, and three rows)
+        assert_eq!(run(&mut sys, &["alter table expenses add column paid text default 'no'"]), "Column paid added to expenses.");
+        assert_eq!(run(&mut sys, &["alter table expenses add Who text"]), "Column who added to expenses.");
+        // what cannot be added
+        assert_eq!(run(&mut sys, &["alter table expenses add must int not null"]), "error: The table has rows: a column that must have a value needs a default.");
+        assert_eq!(run(&mut sys, &["alter table expenses add label int"]), "error: Two columns have the same name. Every table already has id.");
+        assert_eq!(run(&mut sys, &["alter table expenses add n int default 'x'"]), "error: Column n takes a whole number.");
+        assert_eq!(run(&mut sys, &["alter table expenses add n int check (n > 0)"]), "error: A check is added on its own: alter table t add check (...).");
+        assert_eq!(run(&mut sys, &["alter table expenses add n blob"]), "error: Unknown type: blob. Types are int, decimal and text.");
+        assert_eq!(run(&mut sys, &["alter table expenses add rate decimal(6,3) not null default 1.5 unique"]), "error: The rows would all have the same value: a unique column takes none twice.");
+        assert_eq!(run(&mut sys, &["alter table expenses add rate decimal(6,3) not null default 1.5"]), "Column rate added to expenses.");
+        assert_eq!(run(&mut sys, &["alter table expenses add ninth int"]), "error: A table has one to seven columns, besides id.");
+        // the rows that were there have the value by default, or nothing
+        assert_eq!(rows(&sys, "select id, label, paid, who, rate from expenses"), ["1|coffee|no||1.500", "2|train|no||1.500", "3|refund|no||1.500"]);
+        assert_eq!(run(&mut sys, &["insert into expenses (label) values ('tea')"]), "1 row added to expenses, with id 4.");
+        assert_eq!(rows(&sys, "select paid, rate from expenses where id = 4"), ["no|1.500"]);
+        // a column less: its values go from every row
+        assert_eq!(run(&mut sys, &["alter table expenses drop column who", "alter table expenses drop DAY"]), "Column day removed from expenses.");
+        assert_eq!(rows(&sys, "select * from expenses where id < 3"), ["1|coffee|3.50|food|no|1.500", "2|train|42.00|travel|no|1.500"]);
+        assert_eq!(run(&mut sys, &["alter table expenses drop id"]), "error: id is given by the system and cannot be changed.");
+        assert_eq!(run(&mut sys, &["alter table expenses drop nothing"]), "error: Unknown column: nothing");
+        // other names
+        assert_eq!(run(&mut sys, &["alter table expenses rename column tag to Kind"]), "Column tag of expenses is now kind.");
+        assert_eq!(run(&mut sys, &["alter table expenses rename label to what"]), "Column label of expenses is now what.");
+        assert_eq!(run(&mut sys, &["alter table expenses rename what to amount"]), "error: Two columns have the same name. Every table already has id.");
+        assert_eq!(run(&mut sys, &["alter table expenses rename to Spent"]), "Table expenses is now spent.");
+        assert_eq!(run(&mut sys, &["alter table spent rename to tasks"]), "error: tasks is a table of the system. Pick another name.");
+        assert_eq!(run(&mut sys, &["alter table spent rename to kept_keys"]), "error: kept_keys is a table of the system. Pick another name.");
+        assert_eq!(run(&mut sys, &["create table other (n int)", "alter table spent rename to other"]), "error: A table of that name exists.");
+        assert!(sys.db.find(b"expenses").is_none() && crate::sql::select(&sys, b"select 1 from expenses").is_err());
+        assert_eq!(rows(&sys, "select what, kind from spent where id = 2"), ["train|travel"]);
+        // what a column asks, said afterwards: the rows are looked at first
+        assert_eq!(run(&mut sys, &["alter table spent alter column kind set not null"]), "error: A row has no value in kind: nothing was changed.");
+        assert_eq!(run(&mut sys, &["update spent set kind = 'none' where kind is null", "alter table spent alter column kind set not null"]), "Column kind of spent must have a value from now on.");
+        assert_eq!(run(&mut sys, &["insert into spent (what) values ('x')"]), "error: Column kind must have a value.");
+        assert_eq!(run(&mut sys, &["alter table spent alter kind set default 'misc'"]), "Column kind of spent takes 'misc' by default.");
+        assert_eq!(run(&mut sys, &["insert into spent (what) values ('x')"]), "1 row added to spent, with id 5.");
+        assert_eq!(run(&mut sys, &["alter table spent alter kind drop default", "alter table spent alter kind drop not null"]), "Column kind of spent may have no value.");
+        assert_eq!(run(&mut sys, &["alter table spent alter amount set default 2.5"]), "Column amount of spent takes 2.50 by default.");
+        assert_eq!(run(&mut sys, &["alter table spent alter amount set default null"]), "Column amount of spent takes nothing by default.");
+        assert_eq!(run(&mut sys, &["alter table spent alter amount set default 'x'"]), "error: Column amount takes a number.");
+        assert_eq!(run(&mut sys, &["alter table spent add unique (kind)"]), "error: Column kind takes no value twice: row 3 has that one.");
+        assert_eq!(run(&mut sys, &["alter table spent add unique (what)"]), "Column what of spent takes no value twice from now on.");
+        assert_eq!(run(&mut sys, &["alter table spent add unique (what)"]), "error: Column what of spent takes no value twice already.");
+        assert_eq!(run(&mut sys, &["insert into spent (what) values ('train')"]), "error: Column what takes no value twice: row 2 has that one.");
+        assert_eq!(run(&mut sys, &["alter table spent drop unique (what)"]), "Column what of spent may have a value twice. Its index stays.");
+        assert_eq!(run(&mut sys, &["insert into spent (what) values ('train')", "drop index on spent (what)"]), "Index removed from spent (what).");
+        // checks: added when every row holds them, removed as they are written
+        assert_eq!(run(&mut sys, &["alter table spent add check (amount > 0)"]), "error: Row 3 breaks that check: nothing was changed.");
+        assert_eq!(run(&mut sys, &["alter table spent add check (amount > -1)"]), "Check added to spent: every row holds it.");
+        assert_eq!(run(&mut sys, &["update spent set amount = -5 where id = 1"]), "error: Refused by a check: amount > -1");
+        assert_eq!(run(&mut sys, &["alter table spent add check (nothing > 0)"]), "error: Unknown column: nothing");
+        assert_eq!(run(&mut sys, &["alter table spent add check (id > 0)"]), "error: A check cannot name id: a row has it only once it is in the table.");
+        // a column a check names stays as it is while the check does
+        assert_eq!(run(&mut sys, &["alter table spent drop amount"]), "error: A check names amount: drop the check first.");
+        assert_eq!(run(&mut sys, &["alter table spent rename amount to cost"]), "error: A check names amount: drop the check first.");
+        assert_eq!(run(&mut sys, &["alter table spent drop check (amount > 0)"]), "error: No such check. As they are written: show table spent");
+        assert_eq!(run(&mut sys, &["alter table spent drop check ( amount > -1 )"]), "Check removed from spent.");
+        assert_eq!(run(&mut sys, &["alter table spent rename amount to cost"]), "Column amount of spent is now cost.");
+        // what is wrong in the statement itself
+        assert_eq!(run(&mut sys, &["alter table spent"]), "error: Expected ADD, DROP, RENAME or ALTER, but the query ends.");
+        assert_eq!(run(&mut sys, &["alter table spent empty"]), "error: After the table: ADD, DROP, RENAME or ALTER, not empty");
+        assert_eq!(run(&mut sys, &["alter table spent alter cost set"]), "error: Expected NOT NULL or DEFAULT, but the query ends.");
+        assert_eq!(run(&mut sys, &["alter table spent alter cost unset default"]), "error: Expected SET or DROP, found: unset");
+        assert_eq!(run(&mut sys, &["alter table spent drop cost now"]), "error: Expected the end of the query, found: now");
+        assert_eq!(run(&mut sys, &["alter table tasks add n int"]), "error: tasks is a view of the system and cannot be changed.");
+        assert_eq!(run(&mut sys, &["alter spent add n int"]), "error: Expected TABLE, found: spent");
+        // the table as it is now
+        let mut out = crate::shell::tests::Lines::default();
+        assert!(written(&sys.db, b"spent", &mut out));
+        assert_eq!(out.lines, ["create table spent (", "    what text,", "    cost decimal(18,2),", "    kind text,", "    paid text default 'no',", "    rate decimal(18,3) not null default 1.500", ")"]);
+        assert_eq!(sys.db.verify(), Ok(()));
+    }
+
+    #[test]
     fn the_table_of_a_statement_is_known_before_it_is_run() {
         let of = |statement: &str| target(statement.as_bytes()).map(|name| String::from_utf8_lossy(name).into_owned());
         assert_eq!(of("insert into notes values (1)").as_deref(), Some("notes"));
@@ -1041,6 +1339,7 @@ mod tests {
         assert_eq!(of("drop table companions").as_deref(), Some("companions"));
         assert_eq!(of("create table acts (a int)").as_deref(), Some("acts"));
         assert_eq!(of("create index on acts (went)").as_deref(), Some("acts"));
+        assert_eq!(of("alter table companions rename to mine").as_deref(), Some("companions"));
         assert_eq!(of("DROP  INDEX ON Programs (name)").as_deref(), Some("Programs"));
         assert_eq!((of("create index acts"), of("drop index")), (None, None));
         assert_eq!((of("select * from acts"), of("drop acts"), of("insert notes"), of("")), (None, None, None, None));

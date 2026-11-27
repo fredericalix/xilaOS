@@ -1145,8 +1145,8 @@ impl System {
 }
 
 /// Names of the commands, for completion.
-pub const NAMES: [&[u8]; 53] = [
-    b"about", b"ask", b"cancel", b"city", b"clear", b"companion", b"create", b"delete", b"devices", b"disk", b"display", b"drop", b"else", b"end", b"every", b"for", b"help",
+pub const NAMES: [&[u8]; 54] = [
+    b"about", b"alter", b"ask", b"cancel", b"city", b"clear", b"companion", b"create", b"delete", b"devices", b"disk", b"display", b"drop", b"else", b"end", b"every", b"for", b"help",
     b"if", b"insert", b"install", b"key", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"peek", b"program", b"programs", b"qr", b"reboot",
     b"remote", b"return",
     b"run", b"say", b"screen", b"select", b"show", b"spin", b"stop", b"tables", b"tasks", b"theme", b"time", b"unlisten", b"update",
@@ -1176,13 +1176,14 @@ pub fn prompt(sys: &System, session: usize) -> &'static [u8] {
 /// The prompt while a block is open: as wide as the other.
 pub const CONTINUE: &[u8] = b"          ..>";
 
-const HELP_COMMANDS: [&[u8]; 37] = [
+const HELP_COMMANDS: [&[u8]; 38] = [
     b"XilaOS commands:",
     b"   tables                     - Lists the tables: the system's and yours.",
     b"   select ...                 - Reads a table: select name from tasks",
     b"   create table ...           - Makes a table: create table t (a int, b text)",
+    b"   alter table ...            - Changes a table: alter table t add c int",
     b"   insert into ...            - Adds rows: insert into t values (1, 'x')",
-    b"   update ... set ...         - Changes rows: update t set b = 'y' where a = 1",
+    b"   update ... set ...         - Changes rows: update t set b = 'y'",
     b"   delete from ...            - Removes rows: delete from t where a = 1",
     b"   drop table ...             - Removes a table and its rows.",
     b"   listen [channel]           - Tells you when a table changes, or on notify.",
@@ -1191,7 +1192,7 @@ const HELP_COMMANDS: [&[u8]; 37] = [
     b"   help [c|k|l]               - This help: commands, keys, or the language.",
     b"   about                      - What this system is and what it runs on.",
     b"   mem                        - Memory, as reported by the firmware.",
-    b"   devices                    - The parts of the machine, and which are driven.",
+    b"   devices                    - The parts of the machine.",
     b"   disk [check|erase]         - Where the tables are; reads all; takes a disk.",
     b"   install [n|system|from a]  - Puts XilaOS on a disk; from: fetches it first.",
     b"   net [ping|get|post|name]   - The network: card, cable, address. Pings; asks.",
@@ -1206,9 +1207,9 @@ const HELP_COMMANDS: [&[u8]; 37] = [
     b"   key [set n k|forget n]     - Keys to services, never shown.",
     b"   ask question               - Asks the companion.",
     b"   companion [off|on]         - Who the companion is. Stops it.",
-    b"   time                       - The date and the time, by the machine's clock.",
+    b"   time                       - The date and the time.",
     b"   uptime                     - Time since the system started.",
-    b"   city                       - Lists the blocks of the city and their heights.",
+    b"   city                       - The blocks of the city, as a table.",
     b"   tasks                      - Lists the tasks and the time each one ran.",
     b"   spin                       - Starts a task that never rests (a test).",
     b"   stop [n]                   - Stops task n.",
@@ -1322,7 +1323,7 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
             false
         }
         b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"program") => crate::lang::remove(sys, trim(split_word(arg).1), out),
-        b"create" | b"drop" | b"insert" | b"update" | b"delete" => change(sys, line, out),
+        b"alter" | b"create" | b"drop" | b"insert" | b"update" | b"delete" => change(sys, line, out),
         b"programs" => crate::lang::list(sys, out),
         // a table as the statement that would make it; `show table` alone is a program of that name
         b"show" if split_word(arg).0.eq_ignore_ascii_case(b"table") && !trim(split_word(arg).1).is_empty() => crate::change::written(&sys.db, trim(split_word(arg).1), out),

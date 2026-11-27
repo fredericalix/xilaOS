@@ -506,7 +506,7 @@ puts the code away and brings the terminal back.
 
 The code is as large as the screen allows while keeping dots that a camera can
 still tell apart: at least two screen points per dot. On a screen of 50 rows
-it holds 2,563 characters (`qr help c`, 2,547 characters, fits), on one of 40
+it holds 2,563 characters (`qr help c`, 2,550 characters, fits), on one of 40
 rows 1,465; a QR code cannot hold more than 2,953. When a command says more,
 the end is dropped and the answer tells how much (`The last N did not fit.`).
 A command that says nothing gives no code.
@@ -539,7 +539,7 @@ sensitive to case. `?` is another name for `help`, and `cls` for `clear`.
 |---|---|
 | `about` | What the system is and what it runs on. |
 | `mem` | Memory: usable, kept by the firmware, managed by the kernel, free. |
-| `devices` | The parts of the machine, and which are driven. |
+| `devices` | The parts of the machine, and which are driven by XilaOS. |
 | `time` | The date and the time, by the machine's clock. |
 | `uptime` | Time since the system started. |
 | `tasks` | The tasks, their state and the time each one ran. |
@@ -585,6 +585,7 @@ See [SQL](04-sql.md).
 | `tables` | Lists the tables: the views of the system and the stored ones. |
 | `select` | Reads a table. |
 | `create`, `drop` | Makes a table (`create table`), with what its columns ask (`not null`, `unique`, `default`, `check`); removes one (`drop table`). |
+| `alter table` | Changes a table after it was made: adds, drops or renames a column, renames the table, changes what a column asks. |
 | `show table name` | Writes the statements that would make a table as it is, its indexes after it. |
 | `create index on t (c)`, `drop index on t (c)` | Gives a column an index, by which a query finds its rows without reading the table; takes it away. |
 | `insert`, `update`, `delete` | Adds, changes and removes rows. |

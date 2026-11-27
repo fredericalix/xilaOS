@@ -379,6 +379,31 @@ writes: the leaf, the branches above it, the leaf of the catalog that
 holds the table's record (its root changed), the branches above that,
 and one header.
 
+### A table that changes
+
+What a table is can change after it was made (`rename`, `rename_column`,
+`add_column`, `drop_column`, `set_not_null`, `set_default`,
+`set_unique`, `add_check`, `drop_check`). Each is a change of its own,
+as making a table is: nothing may be waiting for `commit`. Most write
+the record of the table in the catalog and nothing else. Two write the
+rows:
+
+- **A column more** costs nothing when it has no value by default: a
+  record that has no field for a column is read with nothing there, so
+  the rows the table has are left as they are, and get the field the
+  next time they are written. With a value by default, every row is
+  written again with it, through the same path as any change of rows,
+  so that what the column asks, and its index, are held as for any
+  other.
+- **A column less** writes every row again without its field, since the
+  fields of a record are known by their place. Its index is given back
+  first.
+
+Whatever is added is asked of the rows first: a column that must have a
+value finds none without one, a column that takes no value twice finds
+no two rows alike. The engine does not read the checks, so whoever adds
+one looks at the rows.
+
 ### Indexes
 
 An index (`index.rs`) is one more tree of the store, named by the

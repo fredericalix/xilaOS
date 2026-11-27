@@ -1,6 +1,6 @@
 # Architecture
 
-XilaOS is about 35,000 lines of Rust in four crates, plus 3,200 lines
+XilaOS is about 36,000 lines of Rust in four crates, plus 3,200 lines
 of Python and shell for building and testing. No boot loader and no C
 are linked in. One crate, `xila-tls`, rests on libraries from the
 registry, for the arithmetic of TLS and the checking of certificates;
@@ -22,7 +22,7 @@ nothing else does.
                  │ tables, rows, transactions       │
                  ▼                                  ▼
  ┌──────────────────────────────────────────────────────────────────┐
- │ db/   xila-db   4,000 lines                                      │
+ │ db/   xila-db   4,300 lines                                      │
  │ the storage engine: copy-on-write B-trees on pages of a volume   │
  └──────────────────────────────────────────────────────────────────┘
 ```
@@ -34,7 +34,7 @@ it, as `tcp.rs` is. It is described with the network, in
 
 | Crate | Builds for | Allocates | Tested by |
 |---|---|---|---|
-| `xila-db` | host and UEFI, `no_std` + `alloc` | yes | 35 unit tests, power cuts included |
+| `xila-db` | host and UEFI, `no_std` + `alloc` | yes | 36 unit tests, power cuts included |
 | `xila-tls` | host and UEFI, `no_std` | not itself; the `rsa` library it uses does, while it checks a signature | 14 unit tests against a server played by the tests, then OpenSSL in `tools/check.py` |
 | `xila-core` | host and UEFI, `no_std` outside tests | no: fixed-size buffers only (`System::db` aside) | more than 200 unit tests |
 | `xila-kernel` | UEFI only | yes, through its own allocator | `tools/check.py`: more than 300 checks on the whole system in QEMU |
@@ -124,7 +124,7 @@ storage engine allocates.
 | `ui.rs` | 855 | The interface: header, title bar, screens, menu, terminal view. |
 | `expr.rs` | 755 | Expressions: parsing into a small tree, evaluation per row. |
 | `qr.rs` | 673 | QR codes: encoding, error correction, painting. |
-| `change.rs` | 1,035 | `CREATE TABLE` and what its columns ask, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`. |
+| `change.rs` | 1,550 | `CREATE TABLE` and what its columns ask, `ALTER TABLE`, `DROP TABLE`, indexes, `INSERT`, `UPDATE`, `DELETE`. |
 | `city.rs` | 529 | The city: the scene from the system state, the isometric drawing. |
 | `gpt.rs` | 529 | GPT partition tables: reading, describing, the layout `install` writes. |
 | `companion.rs` | 900 | The companion: what is sent to its model, what is made of the answer, what it runs and what is refused to it, what is kept. (Its tests are 450 lines more.) |

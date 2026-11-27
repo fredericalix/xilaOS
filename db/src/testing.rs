@@ -368,6 +368,24 @@ fn a_power_cut_while_indexed_rows_change_leaves_the_old_state_or_the_new() {
                 commit(db)
             },
             |db| {
+                // a column more, whose value by default every row is written with
+                db.add_column(0, b"copies", Kind::Int, Rule { not_null: true, unique: false, default: Some(Field::Int(1)) })?;
+                commit(db)
+            },
+            |db| {
+                // a column less, and its index with it: every row is written again
+                db.drop_column(0, 1)?;
+                commit(db)
+            },
+            |db| {
+                db.rename(0, b"shelves")?;
+                commit(db)
+            },
+            |db| {
+                db.rename_column(0, 1, b"place")?;
+                commit(db)
+            },
+            |db| {
                 db.remove(0)?;
                 commit(db)
             },

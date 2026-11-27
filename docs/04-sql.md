@@ -204,6 +204,14 @@ XilaOS|all:/>select day, sum(amount) as total from expenses group by day order b
 CREATE TABLE name (column type [rule ...], ... [, CHECK (condition)])
     rule: NOT NULL | UNIQUE | DEFAULT value | CHECK (condition)
 DROP TABLE name
+ALTER TABLE name ADD [COLUMN] column type [rule ...]
+ALTER TABLE name DROP [COLUMN] column
+ALTER TABLE name RENAME TO name
+ALTER TABLE name RENAME [COLUMN] column TO name
+ALTER TABLE name ALTER [COLUMN] column SET NOT NULL | DROP NOT NULL
+ALTER TABLE name ALTER [COLUMN] column SET DEFAULT value | DROP DEFAULT
+ALTER TABLE name ADD UNIQUE (column) | DROP UNIQUE (column)
+ALTER TABLE name ADD CHECK (condition) | DROP CHECK (condition)
 CREATE INDEX ON name (column)
 DROP INDEX ON name (column)
 INSERT INTO name [(column, ...)] VALUES (value, ...) [, (value, ...)] ...
@@ -302,9 +310,8 @@ Refused by a check: code is null or code > 99
   one table to another yet.
 - A table keeps four checks at most, each of 60 characters at most (the
   answer that refuses a row quotes it whole).
-- What a table asks is said when it is made and cannot be changed
-  afterwards: there is no `alter table`. To change it, make another
-  table and copy the rows.
+- What a table asks can be said, and taken back, after it is made:
+  see [changing a table](#changing-a-table).
 
 `show table` writes the statement that would make a table as it is, and
 the `rules` column of the view `columns` says the same for each column:
@@ -329,6 +336,75 @@ XilaOS|all:/>select name, type, rules from columns where table_name = 'parts'
 `not null` and `unique` are held by the storage engine itself, for
 whoever writes rows; the value by default and the checks are held by the
 SQL statements, which are the only way to a table that has them.
+
+### Changing a table
+
+`alter table` changes what a table is after it was made: its columns,
+their names, what they ask.
+
+```
+XilaOS|all:/>alter table spent add column paid text default 'no'
+Column paid added to spent.
+XilaOS|all:/>alter table spent drop column day
+Column day removed from spent.
+XilaOS|all:/>alter table spent rename column tag to kind
+Column tag of spent is now kind.
+XilaOS|all:/>alter table spent alter column kind set default 'misc'
+Column kind of spent takes 'misc' by default.
+XilaOS|all:/>alter table spent add check (amount > -1)
+Check added to spent: every row holds it.
+XilaOS|all:/>alter table spent add unique (label)
+Column label of spent takes no value twice from now on.
+XilaOS|all:/>alter table spent rename to costs
+Table spent is now costs.
+```
+
+| Form | What it does |
+|---|---|
+| `add [column] c type [rules]` | A column more, after the others, written as in `create table`. The rows the table has take its value by default, or nothing. Eight columns at most, `id` included. |
+| `drop [column] c` | A column less. Its values go from every row, and its index with it. A table keeps one column besides `id`. |
+| `rename to name` | Another name for the table. |
+| `rename [column] c to d` | Another name for a column. |
+| `alter [column] c set not null`, `drop not null` | The column must have a value from now on; or may have none. |
+| `alter [column] c set default v`, `drop default` | What the column takes when an `insert` leaves it out. The rows the table has stay as they are. |
+| `add unique (c)`, `drop unique (c)` | The column takes no value twice from now on, and gets an index if it had none; or may again. The index stays: `drop index` removes it. |
+| `add check (condition)`, `drop check (condition)` | One more condition on every row; or one less, written as `show table` writes it. |
+
+**Whatever is added is asked of the rows the table has first**, and the
+statement is refused when one of them breaks it; nothing is changed
+then.
+
+```
+XilaOS|all:/>alter table spent add must int not null
+The table has rows: a column that must have a value needs a default.
+XilaOS|all:/>alter table spent alter kind set not null
+A row has no value in kind: nothing was changed.
+XilaOS|all:/>alter table spent add check (amount > 0)
+Row 3 breaks that check: nothing was changed.
+```
+
+`add unique` on a column where two rows have the same value answers as
+an `insert` would: `Column kind takes no value twice: row 3 has that
+one.`
+
+- **One change per statement.** `alter table t add a int, add b int` is
+  not read.
+- **The type of a column does not change.** Add another column, copy
+  the values with `update`, drop the first.
+- **A column a check names stays as it is**: it is neither dropped nor
+  given another name while the check is there (`A check names amount:
+  drop the check first.`), since the check is kept as it was typed.
+- **A check is added on its own**, not with its column: `add n int
+  check (n > 0)` is refused; `add n int`, then `add check (n > 0)`.
+- **Other names are not followed.** A program that names the table or
+  the column as it was called fails when it runs, and says so; a
+  session that listens to the old name of a table hears nothing more.
+- **It costs what it writes.** `add` with a value by default and `drop`
+  write every row again, in one transaction: the table must fit twice
+  in what is free while it happens. `add` without a value by default,
+  the names and what a column asks write the catalog only.
+- **Who listens to the table hears `alter`**, once, not a change for
+  each row.
 
 ### Indexes
 
@@ -591,6 +667,9 @@ visits (year) has an index already.
 An index has no name: create index on t (c), drop index on t (c).
 id needs no index: the rows are kept in its order.
 Column name takes no value twice: its index stays with it.
+The table has rows: a column that must have a value needs a default.
+Row 3 breaks that check: nothing was changed.
+A check names amount: drop the check first.
 One INSERT adds eight rows at most.
 A text takes 48 characters at most, for now.
 This calculation is too long.
@@ -630,9 +709,9 @@ What SQL has and this one does not:
 - `case`, and `in` with a query in place of a list;
 - more than one column in `GROUP BY`, more than one key in `ORDER BY`;
 - `insert into ... select`;
-- `alter table`, keys of one's own, references from a table to another,
-  indexes and `unique` over several columns, indexes with a name, a
-  calculation as a value by default;
+- keys of one's own, references from a table to another, a change of
+  the type of a column, indexes and `unique` over several columns,
+  indexes with a name, a calculation as a value by default;
 - `begin`, `commit`, `rollback`;
 - dates and times as a type, and objects larger than a text.
 
