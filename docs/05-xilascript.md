@@ -357,7 +357,7 @@ model that can change the tables ([what holds it](14-the-companion.md#what-holds
 | Calculations in one program | About ten values and operations a line for 48 lines (512 in all); beyond, the program is refused when it is kept: `Too many calculations for one program: split it in two.` |
 | Rounds of a `while` | 10 000, then it is stopped, for a program that runs by itself and for what runs at once; none for a job a person started |
 | Jobs running or held | 8, the programs that run by themselves apart |
-| Statements run by a program that runs by itself, or by what runs at once | 100 000, then it is stopped: that is also how far its loop over a large table goes, one statement for each line of its body at each row, each round of a `while` counting for one more. None for a job a person started |
+| Statements run by a program that runs by itself, or by what runs at once | 100 000, then it is stopped: that is also how far its loop over a large table goes, one statement for each line of its body at each row. None for a job a person started |
 | Programs that run programs | 3 deep. A program run through a command that types a line (`qr name`) counts for two |
 | `on` programs | 16 |
 | `every` programs, `every day at` included | 8 |
@@ -398,11 +398,16 @@ Counting shelves...
 Running inventory. [Esc] stops it, [Alt]+[B] sends it to the background.
 ```
 
+A line that a command of the program types (`qr about`) runs at once,
+inside it, and its code is shown then. (To a job nobody waits for, `qr`
+is refused: its code would take the screen of nobody.)
+
 `Esc` stops it and says where it was (`Stopped at line 12 of inventory.`).
 `Alt`+`B` lets it go on with nobody waiting: `Job 7 goes on in the
 background: job 7 shows it, job 7 end stops it.` At the serial port the
 status line comes when the job has ended, which is what a program that
-drives the machine wants; a Ctrl+C byte stops the job. A single line
+drives the machine wants; a Ctrl+C byte stops the job, and what is typed
+ahead meanwhile, a line of it, is run once the job has ended. A single line
 that is no program is not a job: it has run when the prompt comes back,
 so `jobs` and `job 3 end` can always be typed.
 
@@ -434,8 +439,16 @@ Counting shelves...
 - **Eight jobs** may run or be held at one time, beside the programs that
   run by themselves. A ninth is refused: `Eight jobs are running or held:
   end one, or wait.` A job that ended stays listed until its place is
-  needed, the oldest leaving first. Numbers count up from the start of
-  the machine and are never given twice.
+  needed. Those a prompt waited for leave first, the oldest of them
+  first: what they said was seen there. Those nobody waited for, whose
+  last lines are only kept with them, leave last. Numbers count up from
+  the start of the machine and are never given twice; the programs that
+  run by themselves take numbers from the same count.
+- **A job is not stopped or held by one of its own lines**: `job 7 end`
+  in job 7 is refused (`Job 7 is the one that asks: it ends with return,
+  or from a prompt.`).
+- **`statements`** counts the statements a job ran and the rounds of its
+  loops, so that a loop that does nothing else is seen to run.
 - **`job 7 hold`** keeps a job from running, **`job 7 release`** lets it
   go on, **`job 7 end`** stops it for good.
 - **When it ends, it is written in the stored table `job_log`**: `job`,
@@ -448,9 +461,14 @@ Counting shelves...
   `state`, `by`, `began`, `statements`.
 
 **The programs that run by themselves are jobs too**, one after the
-other, in the order of what happened. They show in `jobs` while they
-run, started `by` `program`. What they say still goes to the log, and
-they are not written in `job_log`.
+other. Those that run by the clock and those that hear something take
+turns, so that one that takes longer than its rhythm keeps no other
+from running. The one that runs, or the last that ran, shows in `jobs`,
+started `by` `program`. It can be ended (`job 7 end`) but not held:
+held, it would keep all the others waiting. What they say still goes to
+the log, and they are not written in `job_log`. A job submitted by such
+a program is one step further down the chain of programs that start
+each other, which is cut as it always was.
 
 **The limits that stop a program nobody watches are not a job's.** A
 loop typed at the screen or submitted goes on until it ends or is
@@ -566,6 +584,6 @@ the table of programs, the programs that run by themselves), `code.rs`
   event of depth four starts nothing.
 - **Room.** A running program keeps nothing on the stack of its task but
   what one instruction needs: its lines, its instructions and its rows are
-  in `System::vm`, about 250 KB (four units of 46 KB, four cursors of
-  20 KB), which makes a `System` about 380 KB. The lines of a program are
+  in `System::vm`, about 270 KB (four units of 46 KB, four cursors of
+  20 KB), which makes a `System` about 440 KB with the list of the jobs. The lines of a program are
   on the stack, 12 KB, only while it is loaded and compiled.

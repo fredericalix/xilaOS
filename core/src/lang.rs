@@ -175,11 +175,11 @@ pub fn line(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
 /// Who would wait for a job started now: the prompt of the screen or of
 /// the serial port, on a system that has rooms for jobs, when it waits
 /// for none already. Not the companion's lines, nor those a command of a
-/// program types (`qr`), nor what comes from the network or from a
-/// program that runs by itself: those run at once.
+/// program or of a job types (`qr`), nor what comes from the network or
+/// from a program that runs by itself: those run at once.
 fn waits(sys: &System) -> Option<crate::jobs::Watch> {
     let watch = crate::jobs::watch_of(sys.session)?;
-    (crate::jobs::places(sys) > 0 && !sys.acting && !sys.vm.busy() && crate::jobs::watched(sys, watch).is_none()).then_some(watch)
+    (crate::jobs::places(sys) > 0 && !sys.acting && !sys.vm.busy() && crate::jobs::in_turn(sys).is_none() && crate::jobs::watched(sys, watch).is_none()).then_some(watch)
 }
 
 /// Starts a job the prompt waits for. True when it started: how it went
@@ -672,9 +672,10 @@ pub struct Triggers {
     /// machine, since the year 2000.
     every: [(shell::Text, u64, u64, bool); MAX_EVERY],
     every_count: usize,
-    /// As jobs: what happened whose `on` programs are being run one after
-    /// the other, and the next of them to look at.
-    pending: Option<(Happened, usize)>,
+    /// As jobs: the first program by the clock to look at, and whether
+    /// what happened is looked at before them, so that all take turns.
+    every_from: usize,
+    heard_next: bool,
 }
 
 impl Triggers {
@@ -685,7 +686,8 @@ impl Triggers {
             on_count: 0,
             every: [(FixedStr::new(), 0, 0, false); MAX_EVERY],
             every_count: 0,
-            pending: None,
+            every_from: 0,
+            heard_next: false,
         }
     }
 
@@ -707,8 +709,7 @@ fn refresh(sys: &mut System) {
     let clock = sys.now();
     let (triggers, now) = (&mut sys.triggers, sys.ticks);
     triggers.stale = false;
-    // the event whose programs are being run stays the one
-    triggers.pending = before.pending;
+    triggers.heard_next = before.heard_next;
     if let Ok(Some(table)) = programs(&sys.db) {
         let _ = sys.db.scan(table, &mut |fields| {
             let (Field::Text(name), Field::Int(0), Field::Text(text)) = (fields[1], fields[2], fields[3]) else {
@@ -893,12 +894,27 @@ fn at_once(sys: &mut System, out: &mut dyn Out) {
 }
 
 /// The next program to run by itself, with what happened if something
-/// did: an `every` whose time has come, else the next `on` program of
-/// the event being gone through, else those of the next event. `looked`
-/// counts the events taken in this call, which are so many at most.
+/// did. The programs that run by the clock and those that hear something
+/// take turns, and among the first each has its turn: one that takes
+/// longer than its rhythm keeps no other from running. `looked` counts
+/// the events taken in this call, which are so many at most.
 fn due(sys: &mut System, out: &mut dyn Out, looked: &mut usize) -> Option<(shell::Text, Option<Happened>)> {
+    let found = if sys.triggers.heard_next {
+        due_event(sys, out, looked).or_else(|| due_every(sys))
+    } else {
+        due_every(sys).or_else(|| due_event(sys, out, looked))
+    };
+    sys.triggers.heard_next = matches!(found, Some((_, None)));
+    found
+}
+
+/// A program whose time by the clock has come: the one after the last
+/// that ran, round and round.
+fn due_every(sys: &mut System) -> Option<(shell::Text, Option<Happened>)> {
     let clock = sys.now();
-    for at in 0..sys.triggers.every_count.min(MAX_EVERY) {
+    let count = sys.triggers.every_count.min(MAX_EVERY);
+    for step in 0..count {
+        let at = (sys.triggers.every_from + step) % count;
         let (program, period, next, daily) = sys.triggers.every[at];
         match (daily, clock) {
             (false, _) if sys.ticks >= next => sys.triggers.every[at].2 = sys.ticks + period,
@@ -906,40 +922,43 @@ fn due(sys: &mut System, out: &mut dyn Out, looked: &mut usize) -> Option<(shell
             (true, Some(clock)) if clock >= next => sys.triggers.every[at].2 = crate::clock::next_at(clock, period as u32),
             _ => continue,
         }
+        sys.triggers.every_from = (at + 1) % count;
         return Some((program, None));
     }
-    loop {
-        let (happened, from) = match sys.triggers.pending.take() {
-            Some(pending) => pending,
-            None if *looked == PER_CALL => return None,
-            None => {
-                *looked += 1;
-                (sys.events.take_happened()?, 0)
-            }
-        };
+    // none is late: the next time some are, they run in the order they were made
+    sys.triggers.every_from = 0;
+    None
+}
+
+/// The program that waits for the next thing that happened, if one does.
+/// One at most: a program is named after what it waits for, so a second
+/// one for the same thing replaces the first.
+fn due_event(sys: &mut System, out: &mut dyn Out, looked: &mut usize) -> Option<(shell::Text, Option<Happened>)> {
+    while *looked < PER_CALL {
+        *looked += 1;
+        let happened = sys.events.take_happened()?;
         // a program may have changed the programs
         if sys.triggers.stale {
             refresh(sys);
         }
-        for at in from..sys.triggers.on_count {
-            let (when, target, program) = sys.triggers.on[at];
+        let waits = sys.triggers.on[..sys.triggers.on_count].iter().find(|(when, target, _)| {
             let is = matches!(
                 (when, happened.what),
                 (When::Insert, What::Insert(_)) | (When::Update, What::Update(_)) | (When::Delete, What::Delete(_)) | (When::Notify, What::Said)
             );
-            if !is || target.bytes() != happened.channel.bytes() {
-                continue;
-            }
-            if happened.depth >= MAX_CHAIN {
-                let line = FixedStr::<LINE_MAX>::from_bytes(program.bytes()).also(b": not run, programs kept starting each other.");
-                out.line(Style::Error, line.bytes());
-                continue;
-            }
-            // the programs after this one are for when it has ended
-            sys.triggers.pending = Some((happened, at + 1));
-            return Some((program, Some(happened)));
+            is && target.bytes() == happened.channel.bytes()
+        });
+        let Some((_, _, program)) = waits.copied() else {
+            continue;
+        };
+        if happened.depth >= MAX_CHAIN {
+            let line = FixedStr::<LINE_MAX>::from_bytes(program.bytes()).also(b": not run, programs kept starting each other.");
+            out.line(Style::Error, line.bytes());
+            continue;
         }
+        return Some((program, Some(happened)));
     }
+    None
 }
 
 /// Starts a program for the system as a job: what `fire` does before it
@@ -1826,5 +1845,39 @@ mod tests {
         let mut sys = made();
         assert_eq!(exec(&mut sys, "run nowhere"), (false, vec!["Unknown program: nowhere. Type programs to list them.".to_string()]));
         assert!(!waited(&sys));
+    }
+
+    #[test]
+    fn programs_that_start_each_other_through_jobs_are_cut_too() {
+        AS_JOBS.set(true);
+        let mut sys = books();
+        crate::machine::tests::rooms(&mut sys, crate::jobs::PLACES + 1);
+        type_lines(&mut sys, &["create table a (n int)", "program adder", "insert into a values (1)", "end"]);
+        type_lines(&mut sys, &["on insert into a", "submit adder", "end", "insert into a values (0)"]);
+        let mut said = Vec::new();
+        for _ in 0..400 {
+            said.extend(in_background(&mut sys));
+            crate::jobs::work(&mut sys, &mut Lines::default(), &mut || false);
+        }
+        assert_eq!(said, ["on_insert_a: not run, programs kept starting each other."]);
+        // as many rows as when the programs start each other without a job between them
+        assert_eq!(type_lines(&mut sys, &["say select count(*) from a"]).1, ["5"]);
+    }
+
+    #[test]
+    fn a_program_that_takes_longer_than_its_rhythm_starves_no_other() {
+        let mut sys = books();
+        crate::machine::tests::rooms(&mut sys, 2);
+        type_lines(&mut sys, &["every 1 seconds", "let n = 0", "while n < 300", "let n = n + 1", "end", "end"]);
+        type_lines(&mut sys, &["every 2 seconds", "say 'two'", "end", "on notify alerts", "say 'heard'", "end", "notify alerts"]);
+        let mut log = Lines::default();
+        // a tenth of a second for each instruction: the first program is always late
+        for _ in 0..4000 {
+            sys.ticks += 10;
+            background(&mut sys, &mut log);
+            crate::jobs::work(&mut sys, &mut log, &mut || true);
+        }
+        assert!(log.lines.contains(&"on_notify_alerts: heard".to_string()), "{:?}", log.lines);
+        assert!(log.lines.iter().filter(|line| line.as_str() == "every_2_seconds: two").count() >= 2);
     }
 }

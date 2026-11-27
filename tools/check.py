@@ -521,7 +521,7 @@ with Xila(disk=disk) as x:
     ok, lines = x.cmd("job " + quick)
     logged = x.table("select went from job_log where job = " + quick)
     check("job n shows what a job said, and how it went",
-          ok and lines[0] == "Job %s is failed: quick" % quick and lines[2:] == ["one", "Division by zero.", "Stopped at line 2 of quick."] and logged == [{"went": "failed at line 2 of quick"}], (lines, logged))
+          ok and lines[0] == "Job %s has failed: quick" % quick and lines[2:] == ["one", "Division by zero.", "Stopped at line 2 of quick."] and logged == [{"went": "failed at line 2 of quick"}], (lines, logged))
     many = [x.cmd("submit slow") for _ in range(9)]
     check("a ninth job is refused", all(ok for ok, _ in many[:8]) and many[8] == (False, ["Eight jobs are running or held: end one, or wait."]), many[7:])
     for row in x.table("jobs"):
@@ -563,7 +563,35 @@ with Xila(disk=disk) as x:
           "goes on in the background" in body(x)[-2] and body(x)[-1].strip() == "XilaOS|all:/>" and len(aside) == 1 and aside[0]["by"] == "screen", (body(x)[-2:], aside))
     for row in aside:
         x.cmd("job %s end" % row["job"])
-    for name in ("slow", "quick", "adds", "doubles"):
+    # a program the prompt waits for shows a code as a command does: with its own answer, not the next one's
+    for line in ("program coded", "qr about", "say 'after the code'", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("coded")
+    x.key("esc")
+    after = x.cmd("time")[1]
+    check("qr in a program the prompt waits for shows its code then",
+          ok and lines[0] == "after the code" and lines[-1].startswith("A code of ") and not any("A code of" in line for line in after), (lines, after))
+    # a job cannot stop itself from one of its own instructions, and a typed program that tries stops nothing else
+    for line in ("program suicide", "job 99 end", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("submit suicide")
+    own = lines[0].split()[1] if ok else "?"
+    for line in ("program suicide", "job %s end" % (int(own) + 1), "say 1 / 0", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("submit suicide")
+    time.sleep(0.5)
+    ok, lines = x.cmd("job %d" % (int(own) + 1))
+    check("a job does not stop itself from inside, and the system goes on",
+          ok and "is the one that asks: it ends with return, or from a prompt." in " ".join(lines) and x.cmd("say 'alive'") == (True, ["alive"]), lines)
+    # what is typed ahead while a program runs is not lost: it is run when the program has ended
+    for line in ("program brief", "let n = 0", "while n < 200000", "let n = n + 1", "end", "say 'brief is over'", "end"):
+        x.cmd(line)
+    x.serial.sendall(b"brief\rsay 'typed ahead'\r")
+    first = x.cmd(None, timeout=60)
+    second = x.cmd(None, timeout=20)
+    check("what is typed ahead of a program at the serial port is run after it",
+          first == (True, ["brief is over"]) and second == (True, ["typed ahead"]), (first, second))
+    for name in ("slow", "quick", "adds", "doubles", "coded", "suicide", "brief"):
         x.cmd("drop program " + name)
     x.cmd("drop table shared")
     x.cmd("drop table job_log")
@@ -1051,7 +1079,7 @@ with Xila(net="e1000e", forward=forwarded) as x:
     ok, shown = x.cmd("job " + number)
     web_is = {row["item"]: row["value"] for row in x.table("web")}.get("the tables")
     check("remote: a job submitted there runs as that prompt, and opens nothing",
-          all(ok for ok, _ in planted) and web_is == "closed to the network" and shown[:1] == ["Job %s is failed: opens" % number] and "web on is typed at the machine itself." in shown, (planted, shown, web_is))
+          all(ok for ok, _ in planted) and web_is == "closed to the network" and shown[:1] == ["Job %s has failed: opens" % number] and "web on is typed at the machine itself." in shown, (planted, shown, web_is))
     far.cmd("drop program opens")
     x.cmd("drop table job_log")
     # who the companion is says where its key is sent: that table is not made, named or changed from here

@@ -440,7 +440,7 @@ extern "C" fn interface(boot: usize) -> ! {
             // what a command typed here asks.
             let began = arch::micros();
             ui.work(sys, &mut || arch::micros().wrapping_sub(began) >= SLICE_WAITED);
-            if sys.request.is_some() {
+            if xila_core::jobs::asks(sys) {
                 serve(sys, ui, Some(stage), disks, system, nic.as_mut());
                 ui.served(sys);
             }
@@ -1076,9 +1076,24 @@ extern "C" fn serial_shell(_: usize) -> ! {
     let serial = serial();
     let mut line = FixedStr::<240>::new();
     let mut after_return = false;
+    // What came while a program was waited for, to be read once it has
+    // ended: who types ahead, or pastes several lines, loses nothing.
+    let mut ahead = FixedStr::<240>::new();
+    let mut taken = 0;
     serial.write(PROMPT);
     loop {
-        while let Some(byte) = serial.read() {
+        while let Some(byte) = {
+            let kept = ahead.bytes().get(taken).copied();
+            match kept {
+                Some(_) => taken += 1,
+                None if taken > 0 => {
+                    ahead.clear();
+                    taken = 0;
+                }
+                None => {}
+            }
+            kept.or_else(|| serial.read())
+        } {
             match byte {
                 b'\r' | b'\n' => {
                     // a line feed right after a carriage return ends the same line
@@ -1144,12 +1159,15 @@ extern "C" fn serial_shell(_: usize) -> ! {
                                         serial.write(message.bytes());
                                         serial.write(b"\n");
                                     }
+                                } else {
+                                    // (a line ahead at most: what is beyond is lost, as it would be in the card)
+                                    ahead.push(byte);
                                 }
                             }
                             observe(sys);
                             let began = arch::micros();
                             xila_core::jobs::turn(sys, at, &mut SerialOut { serial: &serial }, &mut || arch::micros().wrapping_sub(began) >= SLICE_WAITED);
-                            if sys.request.is_some() {
+                            if xila_core::jobs::asks(sys) {
                                 serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut());
                                 let answered = shell::served(sys, &mut SerialOut { serial: &serial });
                                 xila_core::jobs::answered(sys, at, answered);
@@ -1157,6 +1175,14 @@ extern "C" fn serial_shell(_: usize) -> ! {
                             ui.dirty = true;
                             if let Some(went) = xila_core::jobs::outcome(sys, watch) {
                                 ok &= went;
+                                // what the program made this prompt hear comes with its own status line
+                                while let Some(event) = sys.events.take(events::SERIAL) {
+                                    serial.write(b"#event ");
+                                    serial.write(event.channel.bytes());
+                                    serial.write(b"\t");
+                                    serial.write(event.text.bytes());
+                                    serial.write(b"\n");
+                                }
                                 break;
                             }
                         }

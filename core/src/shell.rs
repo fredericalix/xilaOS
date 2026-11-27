@@ -1258,7 +1258,7 @@ const HELP_LANGUAGE: [&[u8]; 26] = [
     b"   command is a statement, SQL too. A line that starts with # is a note.",
 ];
 
-const HELP_KEYS: [&[u8]; 8] = [
+const HELP_KEYS: [&[u8]; 10] = [
     b"XilaOS keys:",
     b"   [Alt]+[E]             - Opens the menu of screens.",
     b"   [Alt]+[0] [Alt]+[1]   - Shows a screen.",
@@ -1267,6 +1267,8 @@ const HELP_KEYS: [&[u8]; 8] = [
     b"   [Up] [Down]           - Recalls the commands already typed.",
     b"   [PgUp] [PgDn]         - Scrolls the terminal.",
     b"   [Esc]                 - Closes the menu, or goes back to the overview.",
+    b"                           At the prompt, stops the program it waits for.",
+    b"   [Alt]+[B]             - Sends that program to the background, as a job.",
 ];
 
 /// Runs a line typed at a prompt. Returns false if it failed.
@@ -1388,7 +1390,10 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
 
 /// Shows a table and remembers where its numbered rows lead.
 pub(crate) fn show(sys: &mut System, out: &mut dyn Out, table: &Table) {
-    if table.numbered && sys.session < crate::events::SESSIONS {
+    // (a job nobody waits for shows its lists to nobody: the numbers typed
+    // at its session's prompt still follow the list that prompt was shown)
+    let aside = crate::jobs::in_turn(sys).is_some_and(|job| job.watch == crate::jobs::Watch::Nobody);
+    if table.numbered && sys.session < crate::events::SESSIONS && !aside {
         sys.last[sys.session] = table.follow;
         sys.last_len[sys.session] = table.rows;
     }
@@ -2058,9 +2063,10 @@ fn qr(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         return false;
     }
     // A code takes the screen until a key is pressed: that is for who typed
-    // the command. A program that runs by itself and the companion are
-    // nobody at a prompt.
-    if sys.session >= crate::events::SESSIONS {
+    // the command. A program that runs by itself, the companion and a job
+    // nobody waits for are nobody at a prompt.
+    let aside = crate::jobs::in_turn(sys).is_some_and(|job| job.watch == crate::jobs::Watch::Nobody);
+    if sys.session >= crate::events::SESSIONS || aside {
         out.line(Style::Error, b"qr is typed at a prompt: its code takes the screen of who asked for it.");
         return false;
     }
@@ -2152,7 +2158,7 @@ fn job(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
                 Ok(at) => {
                     let job = &sys.jobs.list()[at];
                     let mut line = FixedStr::<COLS>::new();
-                    let _ = write!(line, "Job {number} is {}: {}", Text::from_bytes(crate::jobs::word(job.state)), job.program);
+                    let _ = write!(line, "Job {number} {}: {}", crate::jobs::told(job.state), job.program);
                     out.line(Style::Out, line.bytes());
                     line.clear();
                     let from: &str = match job.by {
@@ -2165,7 +2171,7 @@ fn job(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
                     if job.began.is_some() {
                         let _ = write!(line, " at {}", began(job));
                     }
-                    let _ = write!(line, ". {} statements run.", job.statements);
+                    let _ = write!(line, ". {} statement{} run.", job.statements, if job.statements == 1 { "" } else { "s" });
                     out.line(Style::Out, line.bytes());
                     if job.said.dropped() > 0 {
                         line.clear();
@@ -2173,7 +2179,13 @@ fn job(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
                         out.line(Style::Out, line.bytes());
                     }
                     for said in job.said.lines() {
-                        out.line(Style::Out, said);
+                        // the cells of a table it showed were kept apart by tabs
+                        line.clear();
+                        for (at, cell) in said.split(|byte| *byte == b'\t').enumerate() {
+                            line.push_bytes(if at > 0 { b"  " } else { b"" });
+                            line.push_bytes(cell);
+                        }
+                        out.line(Style::Out, line.bytes());
                     }
                     true
                 }
@@ -4368,8 +4380,54 @@ pub mod tests {
             crate::jobs::work(&mut sys, &mut Lines::default(), &mut || true);
         }
         let shown = said(&mut sys, "job 3");
-        assert_eq!(shown[0], "Job 3 is failed: opens");
-        assert_eq!(shown[1..], ["Started at the network prompt. 1 statements run.", "web on is typed at the machine itself.", "Stopped at line 1 of opens."]);
+        assert_eq!(shown[0], "Job 3 has failed: opens");
+        assert_eq!(shown[1..], ["Started at the network prompt. 1 statement run.", "web on is typed at the machine itself.", "Stopped at line 1 of opens."]);
         assert!(sys.web.code().is_none());
+    }
+
+    #[test]
+    fn a_job_is_told_of_in_plain_words_and_leaves_the_prompt_its_list() {
+        let mut sys = Box::new(System::new());
+        crate::machine::tests::rooms(&mut sys, 3);
+        let said = |sys: &mut System, line: &str| run_line(sys, line).1.lines;
+        for line in ["program lists", "programs", "select 1 as a, 'two' as b", "say 1 / 0", "end", "tables", "submit lists"] {
+            run_line(&mut sys, line);
+        }
+        for _ in 0..20 {
+            crate::jobs::work(&mut sys, &mut Lines::default(), &mut || true);
+        }
+        // the list the prompt was shown is still the one its numbers follow
+        assert_eq!(said(&mut sys, "3")[0].trim(), "id  name  state  ran_ms  share");
+        let shown = said(&mut sys, "job 1");
+        assert_eq!(shown[0], "Job 1 has failed: lists");
+        assert_eq!(shown[1], "Started at the screen. 3 statements run.");
+        // a table it showed is in columns, not in tabs
+        assert!(shown.iter().any(|line| line == "a  b") && shown.iter().any(|line| line == "1  two"), "{shown:?}");
+        assert!(!shown.iter().any(|line| line.contains('\t')));
+        for (line, wanted) in [("say 1", "Job 2 is done: say 1"), ("while 1 = 1", "Job 3 is running: while 1 = 1")] {
+            use crate::lang::Line;
+            let lines: Vec<Line> = if line == "say 1" { vec![Line::from_bytes(line.as_bytes())] } else { vec![Line::from_bytes(line.as_bytes()), Line::from_bytes(b"end")] };
+            crate::jobs::begin(&mut sys, crate::jobs::What::Lines(&lines), crate::jobs::Watch::Nobody, &mut Lines::default()).unwrap();
+            for _ in 0..2 {
+                crate::jobs::work(&mut sys, &mut Lines::default(), &mut || true);
+            }
+            let number = wanted.split_whitespace().nth(1).unwrap().to_string();
+            assert_eq!(said(&mut sys, &format!("job {number}"))[0], wanted);
+        }
+        assert_eq!(said(&mut sys, "job 2")[1], "Started at the screen. 1 statement run.");
+        assert_eq!(said(&mut sys, "job 3 hold"), ["Job 3 is held."]);
+        assert_eq!(said(&mut sys, "job 3")[0], "Job 3 is held: while 1 = 1");
+        assert_eq!(said(&mut sys, "job 3 end"), ["Job 3 is stopped."]);
+        assert_eq!(said(&mut sys, "job 3")[0], "Job 3 was stopped: while 1 = 1");
+        // a program that runs by itself is ended, not held: held, it would keep all the others from running
+        for line in ["on notify alerts", "while 1 = 1", "end", "end", "notify alerts"] {
+            run_line(&mut sys, line);
+        }
+        crate::lang::background(&mut sys, &mut Lines::default());
+        assert_eq!(said(&mut sys, "job 4 hold"), ["Job 4 is a program that runs by itself: it is ended, not held."]);
+        assert_eq!(said(&mut sys, "job 4 end"), ["Job 4 is stopped."]);
+        // the keys that stop a program and send it aside are in the help of the keys
+        let keys = said(&mut sys, "help k").join("\n");
+        assert!(keys.contains("[Esc]") && keys.contains("[Alt]+[B]"), "{keys}");
     }
 }

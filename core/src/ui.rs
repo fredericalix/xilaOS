@@ -177,6 +177,31 @@ impl Out for TermOut<'_> {
     }
 }
 
+/// What is said on a terminal, with whether anything was: a terminal
+/// that is full keeps its length when a row is added, so its length
+/// does not tell that it must be drawn again.
+struct Told<'a> {
+    out: TermOut<'a>,
+    any: bool,
+}
+
+impl Out for Told<'_> {
+    fn line(&mut self, style: Style, text: &[u8]) {
+        self.any = true;
+        self.out.line(style, text);
+    }
+
+    fn table(&mut self, table: &Table) {
+        self.any = true;
+        self.out.table(table);
+    }
+
+    fn clear(&mut self) {
+        self.any = true;
+        self.out.clear();
+    }
+}
+
 impl Ui {
     pub const fn new() -> Ui {
         Ui {
@@ -384,10 +409,9 @@ impl Ui {
         let Some(at) = crate::jobs::watched(sys, crate::jobs::Watch::Screen) else {
             return;
         };
-        let term = &mut self.terms[0];
-        let rows = term.len();
-        crate::jobs::turn(sys, at, &mut TermOut { term }, spent);
-        if crate::jobs::outcome(sys, crate::jobs::Watch::Screen).is_some() || term.len() != rows {
+        let mut told = Told { out: TermOut { term: &mut self.terms[0] }, any: false };
+        crate::jobs::turn(sys, at, &mut told, spent);
+        if crate::jobs::outcome(sys, crate::jobs::Watch::Screen).is_some() || told.any {
             self.dirty = true;
         }
     }
@@ -397,24 +421,27 @@ impl Ui {
     /// of a job that asked the kernel something: once that is served,
     /// `carried` tells it.
     pub fn carry(&mut self, sys: &mut System, spent: &mut dyn FnMut() -> bool) -> Option<usize> {
-        let rows = self.terms[LOG].len();
-        let asked = crate::jobs::work(sys, &mut TermOut { term: &mut self.terms[LOG] }, spent);
-        self.logged(sys, rows);
+        let mut told = Told { out: TermOut { term: &mut self.terms[LOG] }, any: false };
+        let asked = crate::jobs::work(sys, &mut told, spent);
+        let any = told.any;
+        self.logged(sys, any);
         asked
     }
 
     /// The kernel served what the job at a place asked: its answer is
     /// said where that job says, and the job goes on.
     pub fn carried(&mut self, sys: &mut System, at: usize) {
-        let rows = self.terms[LOG].len();
-        crate::jobs::served(sys, at, &mut TermOut { term: &mut self.terms[LOG] });
-        self.logged(sys, rows);
+        let mut told = Told { out: TermOut { term: &mut self.terms[LOG] }, any: false };
+        crate::jobs::served(sys, at, &mut told);
+        let any = told.any;
+        self.logged(sys, any);
     }
 
-    /// The log may have grown: the system knows how long it is, and the
-    /// screen that shows it is drawn again.
-    fn logged(&mut self, sys: &mut System, rows: usize) {
-        if self.terms[LOG].len() != rows {
+    /// Something was said in the log: the system knows how long it is, and
+    /// the screen that shows it is drawn again. (Its length alone does not
+    /// tell: a terminal that is full no longer grows.)
+    fn logged(&mut self, sys: &mut System, any: bool) {
+        if any {
             sys.log_rows = self.terms[LOG].len();
             self.dirty = true;
         }
@@ -1393,5 +1420,31 @@ mod tests {
         // what the submitted job said is with it, not in the log
         assert!(!shown.iter().any(|text| text.contains("counted")));
         assert_eq!(sys.jobs.list()[0].said.lines().last().unwrap(), b"counted");
+    }
+
+    #[test]
+    fn what_a_program_says_is_drawn_even_when_the_terminal_is_full() {
+        let (mut ui, mut sys) = with_jobs();
+        // more rows than a terminal keeps: its length no longer tells that something was said
+        for n in 0..crate::term::TERM_ROWS + 50 {
+            ui.terms[0].line(format!("old {n}").as_bytes(), role::TERM_OUT);
+            ui.terms[LOG].line(format!("old {n}").as_bytes(), role::TERM_OUT);
+        }
+        for line in ["program talks", "say 'now'", "end", "on notify alerts", "say 'heard'", "end", "notify alerts"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        type_text(&mut ui, &mut sys, "talks");
+        ui.key(&mut sys, key(Key::Enter));
+        ui.render(&mut sys);
+        assert!(!ui.dirty);
+        ui.work(&mut sys, &mut || false);
+        assert!(ui.dirty, "the screen is drawn again when the program said something");
+        assert!(rows(&mut ui, &mut sys).iter().any(|text| text.trim() == "now"));
+        // the same for the log
+        ui.tick(&mut sys, 1);
+        ui.render(&mut sys);
+        ui.dirty = false;
+        ui.carry(&mut sys, &mut || false);
+        assert!(ui.dirty);
     }
 }

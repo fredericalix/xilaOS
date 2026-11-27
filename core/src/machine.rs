@@ -6,11 +6,12 @@
 //! unit above the one that runs it. Everything the machine knows of what
 //! it is doing is in `Machine`, the field `vm` of `System`: which units are in
 //! use, where each is, how many rounds its loops went. Nothing of a run
-//! is on the stack of the task, so a run could be left between two
-//! instructions and taken up again; for now `lines` and `program` run
-//! to the end. One case is not so: a command that types a line (`qr`)
-//! runs it to its end from inside its own instruction, and that inner
-//! run is on the stack until it ends. Jobs will have to deal with it.
+//! is on the stack of the task, so a run is left between two
+//! instructions and taken up again: `turn` runs some of them, and that
+//! is how a job runs (`jobs.rs`). `lines` and `program` are a start and
+//! turns to the end, for what still runs at once. One case is not left
+//! in the middle: a command that types a line (`qr`) runs it to its end
+//! from inside its own instruction, at once, in the system's own room.
 //!
 //! The room is fixed: four units (lines typed, then programs three
 //! deep) and four cursors for loops over rows. A command that types at
@@ -68,8 +69,12 @@ pub struct Machine {
     depth: usize,
     /// Programs running, one inside the other.
     programs: usize,
-    /// Statements run since the first unit was taken.
+    /// Statements run since the first unit was taken: what the limit of
+    /// a program nobody watches counts.
     steps: u64,
+    /// Those, and the rounds of the loops: what is shown of a job, so
+    /// that a loop that does nothing else is seen to run.
+    ran: u64,
     /// Whether the limits of a program nobody watches are lifted: the
     /// rounds of a `while`, the statements in all. They hold unless a
     /// job that can be stopped says otherwise.
@@ -80,7 +85,7 @@ pub struct Machine {
 
 impl Machine {
     pub const fn new() -> Machine {
-        Machine { units: [const { Code::new() }; UNITS], calls: [Call::NONE; UNITS], depth: 0, programs: 0, steps: 0, unbound: false, cursors: [const { Cursor::new() }; LOOPS] }
+        Machine { units: [const { Code::new() }; UNITS], calls: [Call::NONE; UNITS], depth: 0, programs: 0, steps: 0, ran: 0, unbound: false, cursors: [const { Cursor::new() }; LOOPS] }
     }
 }
 
@@ -92,7 +97,7 @@ impl Machine {
 
     /// Statements run since what runs here was started.
     pub fn statements(&self) -> u64 {
-        self.steps
+        self.ran
     }
 
     /// Whether something runs here.
@@ -284,7 +289,7 @@ fn call(sys: &mut System, room: Room, name: &[u8], out: &mut dyn Out) -> Result<
 fn enter(sys: &mut System, room: Room, program: Text, lines: usize) {
     let machine = vm_mut(sys, room);
     if machine.depth == 0 {
-        machine.steps = 0;
+        (machine.steps, machine.ran) = (0, 0);
     }
     // its cursors come after those of who called it
     let cursors = machine.depth.checked_sub(1).map_or(0, |caller| machine.calls[caller].cursors + machine.calls[caller].open);
@@ -342,7 +347,13 @@ pub fn turn(sys: &mut System, room: Room, base: usize, out: &mut dyn Out, spent:
         // to the one this run was for. A unit above may have been entered
         // by the instruction and have said its own.
         loop {
-            let top = vm(sys, room).depth - 1;
+            // (nothing is left when the instruction emptied its own room)
+            let Some(top) = vm(sys, room).depth.checked_sub(1) else {
+                if !message.is_empty() {
+                    out.line(Style::Error, message.bytes());
+                }
+                return Turn::Ended(false);
+            };
             let call = vm(sys, room).calls[top];
             let line = vm(sys, room).units[top].at(call.next.saturating_sub(1)).line as usize + 1;
             if !message.is_empty() {
@@ -409,9 +420,10 @@ fn read(sys: &mut System, room: Room, at: usize, query: &[u8]) -> Result<Option<
 
 /// Runs one instruction of the unit `unit`, which is at the top.
 fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn Out) -> Result<(), Message> {
-    // a statement begins, or a `while` is looked at once more: a loop that
-    // does nothing else is still seen to run
     if instr.begins || matches!(instr.op, Op::Round(_)) {
+        vm_mut(sys, room).ran += 1;
+    }
+    if instr.begins {
         let machine = vm_mut(sys, room);
         machine.steps += 1;
         if machine.steps > MAX_STEPS && !machine.unbound {
@@ -917,5 +929,22 @@ pub(crate) mod tests {
         let mut out = Lines::default();
         let base = start_lines(&mut sys, Room::Given(0), &given, &mut out).unwrap();
         assert_eq!(turn(&mut sys, Room::Given(0), base, &mut out, &mut || false), Turn::Ended(true));
+    }
+
+    #[test]
+    fn the_rounds_of_a_loop_are_seen_but_do_not_count_against_the_limit() {
+        let mut sys = Box::new(System::new());
+        // ten times nine thousand rounds of one statement: under 100 000 statements, as it always was
+        let nested = ["let n = 0", "while n < 10", "let m = 0", "while m < 9000", "let m = m + 1", "end", "let n = n + 1", "end", "say n"];
+        assert_eq!(block(&mut sys, &nested), (true, texts(&["10"])));
+        // and a loop that does nothing else is still seen to run
+        rooms(&mut sys, 1);
+        let given: Vec<Line> = ["while 1 = 1", "end"].iter().map(|line| Line::from_bytes(line.as_bytes())).collect();
+        sys.rooms.as_mut().unwrap()[0].unbound(true);
+        let base = start_lines(&mut sys, Room::Given(0), &given, &mut Lines::default()).unwrap();
+        for _ in 0..3000 {
+            turn(&mut sys, Room::Given(0), base, &mut Lines::default(), &mut || true);
+        }
+        assert!(sys.rooms.as_ref().unwrap()[0].statements() > 500);
     }
 }

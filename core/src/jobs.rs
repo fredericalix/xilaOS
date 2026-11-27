@@ -182,11 +182,13 @@ pub struct Jobs {
     last: u32,
     /// The place to look at first when a turn is to be given: they come round.
     next: usize,
+    /// The place of the job that is in its turn, while it is.
+    turn: Option<usize>,
 }
 
 impl Jobs {
     pub const fn new() -> Jobs {
-        Jobs { list: [const { Job::new() }; PLACES + 1], last: 0, next: 0 }
+        Jobs { list: [const { Job::new() }; PLACES + 1], last: 0, next: 0, turn: None }
     }
 
     /// The places, used or not: one that nothing took has the number 0.
@@ -235,6 +237,30 @@ pub(crate) fn begin_system(sys: &mut System, place: usize, program: &[u8], depth
     *job = Job::new();
     (job.number, job.program, job.state, job.by, job.watch) = (sys.jobs.last, Text::from_bytes(program), State::Ready, sys.session, Watch::Nobody);
     (job.began, job.own, job.system, job.depth, job.vars) = (names.clock, true, true, depth, names);
+}
+
+/// The job that is in its turn, when what runs now is an instruction of one.
+pub fn in_turn(sys: &System) -> Option<&Job> {
+    sys.jobs.turn.map(|at| &sys.jobs.list[at])
+}
+
+/// Whether the kernel has something to do for what just ran: a request
+/// to serve, or a code to make of what a command said (`qr`). Who gives
+/// a job its turns asks this after each one, as after a command.
+pub fn asks(sys: &System) -> bool {
+    sys.request.is_some() || sys.noting
+}
+
+/// What is said of a job in a state: `Job 3 has failed`.
+pub fn told(state: State) -> &'static str {
+    match state {
+        State::Ready => "is running",
+        State::Waiting => "is waiting",
+        State::Held => "is held",
+        State::Done => "is done",
+        State::Failed => "has failed",
+        State::Stopped => "was stopped",
+    }
 }
 
 /// A state as it is shown.
@@ -286,10 +312,12 @@ pub fn begin(sys: &mut System, what: What<'_>, watch: Watch, out: &mut dyn Out) 
     }
     // a place nothing took, or that of the job that ended longest ago and
     // that no prompt still has to hear of
+    // (what a prompt waited for was seen there; what nobody waited for is
+    // only kept with its job, so those leave last)
     let list = &sys.jobs.list[..places];
     let free = list.iter().position(|job| job.number == 0);
-    let oldest = list.iter().enumerate().filter(|(_, job)| job.ended() && job.taken).min_by_key(|(_, job)| job.number).map(|(at, _)| at);
-    let Some(at) = free.or(oldest) else {
+    let oldest = |seen: bool| list.iter().enumerate().filter(|(_, job)| job.ended() && job.taken && (job.watch != Watch::Nobody) == seen).min_by_key(|(_, job)| job.number).map(|(at, _)| at);
+    let Some(at) = free.or_else(|| oldest(true)).or_else(|| oldest(false)) else {
         return Err(Message::from_bytes(b"Eight jobs are running or held: end one, or wait."));
     };
     // the job that was there stays listed if this one cannot start
@@ -311,6 +339,8 @@ pub fn begin(sys: &mut System, what: What<'_>, watch: Watch, out: &mut dyn Out) 
     *job = Job::new();
     (job.number, job.program, job.state, job.by, job.acting, job.watch) = (sys.jobs.last, program, State::Ready, sys.session, sys.acting, watch);
     (job.began, job.own, job.taken) = (sys.clock.map(|(seconds, at)| seconds + sys.ticks.saturating_sub(at) / 100), own, own);
+    // started by a program that runs by itself, it is one step down the chain of those that start each other
+    job.depth = sys.events.depth;
     job.vars.clock = job.began;
     Ok(job.number)
 }
@@ -328,17 +358,20 @@ pub fn turn(sys: &mut System, at: usize, out: &mut dyn Out, spent: &mut dyn FnMu
     if own {
         core::mem::swap(&mut sys.vars[by], &mut sys.jobs.list[at].vars);
     }
-    // a program that runs by itself is known by its name to what it asks
-    // of the companion, and what it causes is one step down its chain
+    // what it causes is as far down a chain of programs that start each
+    // other as it is; a program that runs by itself is known by its name
+    // to what it asks of the companion
+    let depth = core::mem::replace(&mut sys.events.depth, sys.jobs.list[at].depth);
     if sys.jobs.list[at].system {
         sys.firing = crate::sql::Name::from_bytes(sys.jobs.list[at].program.bytes());
-        sys.events.depth = sys.jobs.list[at].depth;
     }
+    sys.jobs.turn = Some(at);
     let came = machine::turn(sys, Room::Given(at), 0, out, spent);
+    sys.jobs.turn = None;
     if sys.jobs.list[at].system {
         sys.firing.clear();
-        sys.events.depth = 0;
     }
+    sys.events.depth = depth;
     if own {
         core::mem::swap(&mut sys.vars[by], &mut sys.jobs.list[at].vars);
     }
@@ -418,9 +451,19 @@ pub fn watch_of(session: usize) -> Option<Watch> {
     }
 }
 
+/// A job is not stopped or held by one of its own instructions: its room
+/// would be given back under the instruction that runs.
+fn itself(sys: &System, at: usize) -> Result<(), Message> {
+    match sys.jobs.turn {
+        Some(turn) if turn == at => Err(about(sys.jobs.list[at].number, "is the one that asks: it ends with return, or from a prompt.")),
+        _ => Ok(()),
+    }
+}
+
 /// Stops a job for good: its room is free.
 pub fn end(sys: &mut System, number: u32) -> Result<(), Message> {
     let at = find(sys, number)?;
+    itself(sys, at)?;
     if sys.jobs.list[at].ended() {
         return Err(about(number, "has ended."));
     }
@@ -543,7 +586,13 @@ fn record(sys: &mut System, at: usize) -> bool {
 
 /// Keeps a job from running until it is released.
 pub fn hold(sys: &mut System, number: u32) -> Result<(), Message> {
-    let job = &mut sys.jobs.list[find(sys, number)?];
+    let at = find(sys, number)?;
+    itself(sys, at)?;
+    let job = &mut sys.jobs.list[at];
+    if job.system && !job.ended() {
+        // held, it would keep every other program that runs by itself from running
+        return Err(about(number, "is a program that runs by itself: it is ended, not held."));
+    }
     match job.state {
         State::Ready => {
             job.state = State::Held;
@@ -893,5 +942,86 @@ mod tests {
         let mut out = Lines::default();
         crate::shell::exec(&mut sys, b"select count(*) from job_log", &mut out);
         assert_eq!(out.lines[1].trim(), "0");
+    }
+
+    #[test]
+    fn a_job_does_not_stop_or_hold_itself_from_inside() {
+        let mut sys = ready();
+        // the job that asks is in the middle of an instruction: its room is not given back under it
+        typed(&mut sys, &["program inner", "job 1 end", "say 1 / 0", "end", "program outer", "qr inner", "end"]);
+        let number = begin(&mut sys, What::Program(b"outer"), Watch::Screen, &mut Lines::default()).unwrap();
+        assert_eq!(number, 1);
+        let said = finish(&mut sys, 0);
+        assert_eq!(said, ["Stopped at line 1 of outer."], "what inner said is in the note of qr");
+        assert_eq!(String::from_utf8_lossy(sys.note.bytes()), "Job 1 is the one that asks: it ends with return, or from a prompt.\nStopped at line 1 of inner.\n");
+        assert_eq!(sys.jobs.list()[0].state, State::Failed);
+        assert_eq!(outcome(&mut sys, Watch::Screen), Some(false));
+        // one that is submitted and ends itself is refused the same, fails once, and is recorded once
+        typed(&mut sys, &["program selfish", "job 2 hold", "end", "program ends", "job 3 end", "end"]);
+        let mut log = Lines::default();
+        for name in [&b"selfish"[..], b"ends"] {
+            let number = begin(&mut sys, What::Program(name), Watch::Nobody, &mut Lines::default()).unwrap();
+            for _ in 0..20 {
+                work(&mut sys, &mut log, &mut || true);
+            }
+            let job = &sys.jobs.list()[place_of(&sys, number)];
+            assert_eq!(job.state, State::Failed);
+            assert_eq!(job.said.lines().next().unwrap(), format!("Job {number} is the one that asks: it ends with return, or from a prompt.").as_bytes());
+        }
+        let mut out = Lines::default();
+        crate::shell::exec(&mut sys, b"select count(*) from job_log", &mut out);
+        assert_eq!(out.lines[1].trim(), "2");
+        // the machine is whole: another job runs in the same rooms
+        let number = begin(&mut sys, What::Lines(&lines(&["say 'still here'"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        work(&mut sys, &mut log, &mut || false);
+        assert_eq!(sys.jobs.list()[place_of(&sys, number)].state, State::Done);
+    }
+
+    #[test]
+    fn a_line_typed_by_a_job_nobody_waits_for_is_nobodys_at_a_prompt() {
+        let mut sys = ready();
+        typed(&mut sys, &["program inner", "say 'in'", "end", "program outer", "say 'before'", "qr inner", "say 'not here'", "end"]);
+        // qr shows a code to who asked: a job nobody waits for is nobody there, and it starts no job a prompt would wait for
+        let number = begin(&mut sys, What::Program(b"outer"), Watch::Nobody, &mut Lines::default()).unwrap();
+        let mut log = Lines::default();
+        for _ in 0..20 {
+            work(&mut sys, &mut log, &mut || true);
+        }
+        assert_eq!(watched(&sys, Watch::Screen), None);
+        let job = &sys.jobs.list()[place_of(&sys, number)];
+        assert_eq!(job.said.lines().collect::<Vec<_>>(), [&b"before"[..], b"qr is typed at a prompt: its code takes the screen of who asked for it.", b"Stopped at line 2 of outer."]);
+        assert!(!sys.noting);
+        // in a job the prompt waits for, the line runs at once, inside it: no second job, and the code is to be shown
+        let number = begin(&mut sys, What::Program(b"outer"), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        let mut out = Lines::default();
+        turn(&mut sys, place, &mut out, &mut || false);
+        assert_eq!(out.lines, ["before", "not here"]);
+        assert_eq!(sys.jobs.list().iter().filter(|job| job.number != 0 && !job.ended()).count(), 0);
+        assert!(asks(&sys), "the kernel is to serve: the code is made then");
+        assert!(crate::shell::served(&mut sys, &mut out) && sys.code.is_some() && !asks(&sys));
+    }
+
+    #[test]
+    fn the_job_that_ended_longest_ago_at_a_prompt_leaves_first() {
+        let mut sys = ready();
+        // one that was submitted and said something, then a day of programs run at the prompt
+        let kept = begin(&mut sys, What::Lines(&lines(&["say 'worth keeping'"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        work(&mut sys, &mut Lines::default(), &mut || false);
+        for _ in 0..3 * PLACES {
+            let number = begin(&mut sys, What::Lines(&lines(&["say 'small'"])), Watch::Screen, &mut Lines::default()).unwrap();
+            let place = place_of(&sys, number);
+            finish(&mut sys, place);
+            assert_eq!(outcome(&mut sys, Watch::Screen), Some(true));
+        }
+        let place = find(&sys, kept).expect("what nobody waited for is still listed");
+        assert_eq!(sys.jobs.list()[place].said.lines().next().unwrap(), b"worth keeping");
+        // when only such jobs are left to make room, the oldest of them leaves
+        let mut submitted = vec![kept];
+        for _ in 0..PLACES {
+            submitted.push(begin(&mut sys, What::Lines(&lines(&["say 'more'"])), Watch::Nobody, &mut Lines::default()).unwrap());
+            work(&mut sys, &mut Lines::default(), &mut || false);
+        }
+        assert!(find(&sys, kept).is_err() && find(&sys, submitted[1]).is_ok());
     }
 }

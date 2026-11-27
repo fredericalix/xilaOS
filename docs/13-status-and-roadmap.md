@@ -60,8 +60,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 39,000 lines, 369
-unit tests, 533 system checks.
+about 300 system checks. On 27 November 2026: about 40,000 lines, 377
+unit tests, 536 system checks.
 
 ## Known limits of what is done
 
@@ -633,8 +633,13 @@ pass.
    what comes next: a submitted program has names of its own and no
    way to be given any, so parameters (step 3) are what makes
    `submit` useful for more than programs that read everything from
-   tables; a job started through a command that types a line (`qr`)
-   still runs to its end inside that instruction.
+   tables; a line that a command of a job types (`qr`) still runs to
+   its end inside that instruction. A review of the whole found, and
+   it was closed, that a job could stop itself from one of its own
+   lines and stop the kernel with it, that the chain of programs that
+   start each other was not cut through `submit`, and that a program
+   by the clock that took longer than its rhythm kept the others from
+   running.
 3. What the machine makes possible in the language: parameters, and
    names that belong to one program. How they are written, and how a
    program gives a value back, is chosen with the author before this
