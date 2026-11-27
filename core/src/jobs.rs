@@ -17,11 +17,89 @@
 
 use core::fmt::Write;
 
+use xila_db::{Field, Kind};
+
 use crate::expr::Vars;
 use crate::lang::Line;
 use crate::machine::{self, Room, Turn};
-use crate::shell::{Out, System, Text};
+use crate::shell::{self, Out, Style, System, Table, Text};
 use crate::sql::Message;
+
+/// The stored table that keeps the jobs nobody waited for, once they ended.
+pub const LOG: &[u8] = b"job_log";
+/// Its columns, after the `id` every table has.
+const LOGGED: [(&[u8], Kind); 7] =
+    [(b"job", Kind::Int), (b"program", Kind::Text), (b"by", Kind::Text), (b"began", Kind::Text), (b"ended", Kind::Text), (b"went", Kind::Text), (b"statements", Kind::Int)];
+/// What a job said that is kept: its last lines, as far as they fit.
+const SAID: usize = 2048;
+
+/// The last lines a job said, for whoever asks later: a job nobody
+/// waits for says them to nobody. A table is kept as a note keeps one,
+/// its cells apart by tabs.
+pub struct Said {
+    bytes: [u8; SAID],
+    len: usize,
+    dropped: usize,
+}
+
+impl Said {
+    pub const fn new() -> Said {
+        Said { bytes: [0; SAID], len: 0, dropped: 0 }
+    }
+
+    /// The lines that are kept, the oldest first.
+    pub fn lines(&self) -> impl Iterator<Item = &[u8]> {
+        self.bytes[..self.len].split(|byte| *byte == b'\n').take(self.bytes[..self.len].iter().filter(|byte| **byte == b'\n').count())
+    }
+
+    /// How many lines were said and are no longer there.
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    fn push(&mut self, line: &[u8]) {
+        if line.len() + 1 > SAID {
+            self.dropped += 1;
+            return;
+        }
+        // the oldest lines leave until this one fits
+        while self.len + line.len() + 1 > SAID {
+            let first = self.bytes[..self.len].iter().position(|byte| *byte == b'\n').map_or(self.len, |end| end + 1);
+            self.bytes.copy_within(first..self.len, 0);
+            self.len -= first;
+            self.dropped += 1;
+        }
+        self.bytes[self.len..self.len + line.len()].copy_from_slice(line);
+        self.bytes[self.len + line.len()] = b'\n';
+        self.len += line.len() + 1;
+    }
+}
+
+impl Default for Said {
+    fn default() -> Said {
+        Said::new()
+    }
+}
+
+impl Out for Said {
+    fn line(&mut self, _style: Style, text: &[u8]) {
+        self.push(text);
+    }
+
+    fn table(&mut self, table: &Table) {
+        let mut row = crate::text::FixedStr::<{ crate::lang::LINE_MAX }>::new();
+        for at in 0..=table.rows {
+            row.clear();
+            for column in 0..table.cols {
+                if column > 0 {
+                    row.push(b'\t');
+                }
+                row.push_bytes(if at == 0 { table.header[column].bytes() } else { table.cells[at - 1][column].bytes() });
+            }
+            self.push(row.bytes());
+        }
+    }
+}
 
 /// Jobs that people start, running or held, at one time. The system has
 /// one more place, for the programs that run by themselves.
@@ -78,11 +156,13 @@ pub struct Job {
     taken: bool,
     /// Whether something the kernel answered it was a failure.
     refused: bool,
+    /// What it said, when nobody waits for it.
+    pub said: Said,
 }
 
 impl Job {
     const fn new() -> Job {
-        Job { number: 0, program: Text::new(), state: State::Done, by: 0, acting: false, watch: Watch::Nobody, began: None, statements: 0, vars: Vars::new(), own: false, taken: true, refused: false }
+        Job { number: 0, program: Text::new(), state: State::Done, by: 0, acting: false, watch: Watch::Nobody, began: None, statements: 0, vars: Vars::new(), own: false, taken: true, refused: false, said: Said::new() }
     }
 
     /// Whether it will run no more.
@@ -96,11 +176,13 @@ pub struct Jobs {
     list: [Job; PLACES + 1],
     /// The number of the last job that began.
     last: u32,
+    /// The place to look at first when a turn is to be given: they come round.
+    next: usize,
 }
 
 impl Jobs {
     pub const fn new() -> Jobs {
-        Jobs { list: [const { Job::new() }; PLACES + 1], last: 0 }
+        Jobs { list: [const { Job::new() }; PLACES + 1], last: 0, next: 0 }
     }
 
     /// The places, used or not: one that nothing took has the number 0.
@@ -253,7 +335,112 @@ pub fn end(sys: &mut System, number: u32) -> Result<(), Message> {
     }
     machine::stop(sys, Room::Given(at));
     sys.jobs.list[at].state = State::Stopped;
+    if sys.jobs.list[at].watch == Watch::Nobody {
+        record(sys, at);
+    }
     Ok(())
+}
+
+/// Whether no job that nobody waits for is ready to run.
+pub fn idle(sys: &System) -> bool {
+    !sys.jobs.list.iter().any(|job| job.number != 0 && job.watch == Watch::Nobody && job.state == State::Ready)
+}
+
+/// Gives a turn to one of the jobs nobody waits for, each in its turn:
+/// instructions until `spent`. What it says is kept with it. Returns the
+/// place of a job that asked the kernel something and waits for it: the
+/// caller serves it, then calls `served`. `log` is where the system says
+/// what concerns nobody in particular.
+pub fn work(sys: &mut System, log: &mut dyn Out, spent: &mut dyn FnMut() -> bool) -> Option<usize> {
+    if sys.request.is_some() {
+        return None;
+    }
+    let count = sys.jobs.list.len();
+    let at = (0..count).map(|step| (sys.jobs.next + step) % count).find(|at| {
+        let job = &sys.jobs.list[*at];
+        job.number != 0 && job.watch == Watch::Nobody && job.state == State::Ready
+    })?;
+    sys.jobs.next = (at + 1) % count;
+    // what it says is kept with it: taken out while the system is its own to change
+    let mut said = core::mem::take(&mut sys.jobs.list[at].said);
+    turn(sys, at, &mut said, spent);
+    sys.jobs.list[at].said = said;
+    if sys.jobs.list[at].state == State::Waiting {
+        return Some(at);
+    }
+    if sys.jobs.list[at].ended() && !record(sys, at) {
+        log.line(Style::Error, b"The table job_log is not the one jobs are recorded in.");
+    }
+    None
+}
+
+/// The kernel served what the job at a place asked: what it answered is
+/// said where the job says, and the job goes on.
+pub fn served(sys: &mut System, at: usize, _log: &mut dyn Out) -> bool {
+    let mut said = core::mem::take(&mut sys.jobs.list[at].said);
+    let ok = shell::served(sys, &mut said);
+    sys.jobs.list[at].said = said;
+    answered(sys, at, ok);
+    ok
+}
+
+/// Writes a job that ended in the table of those nobody waited for.
+/// False when a table of that name is there with other columns: it is
+/// left alone. The row is written as the companion's record is: not
+/// through SQL, and nobody is told of it, so that no program starts on
+/// the record of programs.
+fn record(sys: &mut System, at: usize) -> bool {
+    let table = match sys.db.find(LOG) {
+        Some(table) => {
+            let columns = &sys.db.tables()[table].columns;
+            if columns.len() != LOGGED.len() + 1 || !columns[1..].iter().zip(LOGGED).all(|(column, (name, kind))| column.name == name && column.kind == kind) {
+                return false;
+            }
+            table
+        }
+        None => match sys.db.create(LOG, &LOGGED) {
+            Ok(table) => table,
+            Err(_) => {
+                sys.db.rollback();
+                return true;
+            }
+        },
+    };
+    let job = &sys.jobs.list[at];
+    let by: &[u8] = match job.by {
+        crate::events::SCREEN => b"screen",
+        crate::events::SERIAL => b"serial",
+        crate::events::NETWORK => b"network",
+        _ => b"program",
+    };
+    // how it went: where it stopped is the last thing it said
+    let mut went = Text::new();
+    match job.state {
+        State::Stopped => went.push_bytes(b"stopped"),
+        State::Failed => {
+            went.push_bytes(b"failed");
+            if let Some(place) = job.said.lines().filter_map(|line| line.strip_prefix(b"Stopped ")).last() {
+                went.push(b' ');
+                went.push_bytes(place.strip_suffix(b".").unwrap_or(place));
+            }
+        }
+        _ => went.push_bytes(b"done"),
+    }
+    let moment = |seconds: Option<u64>| seconds.map(|seconds| crate::clock::Moment::at(seconds).text());
+    let now = sys.clock.map(|(seconds, at)| seconds + sys.ticks.saturating_sub(at) / 100);
+    let (began, ended) = (moment(job.began), moment(now));
+    fn text(text: &Option<Text>) -> Field<'_> {
+        text.as_ref().map_or(Field::Null, |text| Field::Text(text.bytes()))
+    }
+    let row = [Field::Int(job.number as i64), Field::Text(job.program.bytes()), Field::Text(by), text(&began), text(&ended), Field::Text(went.bytes()), Field::Int(job.statements as i64)];
+    match sys.db.insert(table, &row) {
+        Ok(_) => {
+            let _ = sys.db.commit(&mut |_, _, _| {});
+            sys.stored_at = sys.ticks.max(1);
+        }
+        Err(_) => sys.db.rollback(),
+    }
+    true
 }
 
 /// Keeps a job from running until it is released.
@@ -487,5 +674,126 @@ mod tests {
         assert!(out.lines.is_empty());
         sys.request = None;
         assert_eq!(finish(&mut sys, place), ["now"]);
+    }
+
+    #[test]
+    fn what_a_job_says_is_kept_its_last_lines() {
+        let mut said = Said::new();
+        assert_eq!((said.lines().count(), said.dropped()), (0, 0));
+        for n in 0..300 {
+            said.line(crate::shell::Style::Out, format!("line number {n}").as_bytes());
+        }
+        let kept: Vec<String> = said.lines().map(|line| String::from_utf8_lossy(line).into_owned()).collect();
+        assert_eq!(kept.last().unwrap(), "line number 299");
+        assert!(kept.len() > 100 && kept.len() < 300);
+        assert_eq!(kept[0], format!("line number {}", 300 - kept.len()));
+        assert_eq!(said.dropped(), 300 - kept.len());
+        // a table is written as a note writes one: its cells apart by tabs
+        let mut sys = ready();
+        let mut said = Said::new();
+        assert!(crate::shell::exec(&mut sys, b"select 1 as a, 'two' as b", &mut said));
+        assert_eq!(said.lines().collect::<Vec<_>>(), [&b"a\tb"[..], b"1\ttwo"]);
+        // a line longer than all the room there is does not stay, and breaks nothing
+        said.line(crate::shell::Style::Out, &[b'x'; 5000]);
+        said.line(crate::shell::Style::Out, b"after");
+        assert_eq!(said.lines().last().unwrap(), b"after");
+    }
+
+    /// Gives the jobs nobody waits for their turns, one instruction each, until none is ready.
+    fn work_all(sys: &mut System, log: &mut Lines) {
+        for _ in 0..200_000 {
+            if idle(sys) {
+                return;
+            }
+            if let Some(place) = work(sys, log, &mut || true) {
+                // what the kernel would do: serve, then say so
+                sys.request = None;
+                served(sys, place, log);
+            }
+        }
+        panic!("the jobs never end");
+    }
+
+    #[test]
+    fn jobs_nobody_waits_for_take_turns() {
+        let mut sys = ready();
+        let mut numbers = Vec::new();
+        for to in [30, 60, 90] {
+            let counts = lines(&["let n = 0", &format!("while n < {to}"), "let n = n + 1", "end", "say n"]);
+            numbers.push(begin(&mut sys, What::Lines(&counts), Watch::Nobody, &mut Lines::default()).unwrap());
+        }
+        // one the screen waits for is not theirs to run
+        let waited = begin(&mut sys, What::Lines(&lines(&["say 'mine'", "say 'still mine'"])), Watch::Screen, &mut Lines::default()).unwrap();
+        // each turn is one job's, and they come round
+        let mut log = Lines::default();
+        let mut order = Vec::new();
+        for _ in 0..6 {
+            let before: Vec<u64> = sys.jobs.list().iter().map(|job| job.statements).collect();
+            assert_eq!(work(&mut sys, &mut log, &mut || true), None);
+            let moved: Vec<usize> = (0..before.len()).filter(|at| sys.jobs.list()[*at].statements != before[*at]).collect();
+            assert_eq!(moved.len(), 1);
+            order.push(moved[0]);
+        }
+        assert_eq!(order, [0, 1, 2, 0, 1, 2]);
+        work_all(&mut sys, &mut log);
+        for (number, to) in numbers.iter().zip(["30", "60", "90"]) {
+            let job = &sys.jobs.list()[place_of(&sys, *number)];
+            assert_eq!(job.state, State::Done);
+            assert_eq!(job.said.lines().collect::<Vec<_>>(), [to.as_bytes()]);
+        }
+        assert!(log.lines.is_empty(), "{:?}", log.lines);
+        assert_eq!(sys.jobs.list()[place_of(&sys, waited)].state, State::Ready);
+        // one that asks the kernel something waits for it, and goes on when it is served
+        let asks = begin(&mut sys, What::Lines(&lines(&["say 'before'", "spin", "say 'after'"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, asks);
+        assert_eq!(work(&mut sys, &mut log, &mut || false), Some(place));
+        assert_eq!(sys.jobs.list()[place].state, State::Waiting);
+        assert_eq!(sys.request, Some(crate::shell::Request::Spin));
+        assert_eq!(work(&mut sys, &mut log, &mut || false), None, "nothing runs until the kernel has served");
+        sys.request = None;
+        served(&mut sys, place, &mut log);
+        work_all(&mut sys, &mut log);
+        assert_eq!(sys.jobs.list()[place].state, State::Done);
+        assert_eq!(sys.jobs.list()[place].said.lines().last().unwrap(), b"after");
+    }
+
+    #[test]
+    fn a_job_that_ends_is_written_in_job_log() {
+        let mut sys = ready();
+        let mut log = Lines::default();
+        // a program that hears the log would start at each row: it must not
+        typed(&mut sys, &["program fails", "say 'one'", "say 1 / 0", "end"]);
+        begin(&mut sys, What::Lines(&lines(&["say 'done'"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        sys.session = NETWORK;
+        begin(&mut sys, What::Program(b"fails"), Watch::Nobody, &mut Lines::default()).unwrap();
+        sys.session = SCREEN;
+        let stopped = begin(&mut sys, What::Lines(&lines(&["while 1 = 1", "end"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        // one the screen waits for is not recorded
+        let waited = begin(&mut sys, What::Lines(&lines(&["say 'seen'"])), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, waited);
+        finish(&mut sys, place);
+        for _ in 0..50 {
+            work(&mut sys, &mut log, &mut || true);
+        }
+        end(&mut sys, stopped).unwrap();
+        typed(&mut sys, &["on insert into job_log", "say 'a row'", "end"]);
+        let mut out = Lines::default();
+        assert!(crate::shell::exec(&mut sys, b"select job, program, by, went, statements from job_log", &mut out));
+        let rows: Vec<Vec<&str>> = out.lines[1..].iter().map(|row| row.split_whitespace().collect()).collect();
+        assert_eq!(rows[0], ["1", "say", "'done'", "screen", "done", "1"], "{:?}", out.lines);
+        assert_eq!(rows[1], ["2", "fails", "network", "failed", "at", "line", "2", "of", "fails", "2"]);
+        assert_eq!(rows[2][rows[2].len() - 2], "stopped");
+        assert_eq!(rows.len(), 3);
+        // nobody is told of those rows
+        crate::lang::background(&mut sys, &mut log);
+        assert!(log.lines.is_empty(), "{:?}", log.lines);
+        // a table of that name made by hand with other columns is left alone, and the log says so
+        typed(&mut sys, &["drop program on_insert_job_log", "drop table job_log", "create table job_log (n int)"]);
+        begin(&mut sys, What::Lines(&lines(&["say 'done'"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        work_all(&mut sys, &mut log);
+        assert_eq!(log.lines, ["The table job_log is not the one jobs are recorded in."]);
+        let mut out = Lines::default();
+        crate::shell::exec(&mut sys, b"select count(*) from job_log", &mut out);
+        assert_eq!(out.lines[1].trim(), "0");
     }
 }
