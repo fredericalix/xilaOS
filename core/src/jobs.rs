@@ -393,6 +393,31 @@ pub fn aside(sys: &mut System, watch: Watch) -> Option<u32> {
     Some(job.number)
 }
 
+/// Stops the job a prompt waits for, which a key asked for. Returns what
+/// to say of where it was. The prompt then takes how it went, as for a
+/// job that ended by itself.
+pub fn stop_watched(sys: &mut System, watch: Watch) -> Option<Message> {
+    let at = watched(sys, watch).filter(|at| !sys.jobs.list[*at].ended())?;
+    let mut message = Message::from_bytes(b"Stopped.");
+    if let Some((program, line)) = machine::at(sys, Room::Given(at)).filter(|(program, _)| !program.is_empty()) {
+        message.clear();
+        let _ = write!(message, "Stopped at line {line} of {program}.");
+    }
+    machine::stop(sys, Room::Given(at));
+    sys.jobs.list[at].state = State::Stopped;
+    Some(message)
+}
+
+/// What the prompt of a session waits for, if it is one that waits: the
+/// screen and the serial port do.
+pub fn watch_of(session: usize) -> Option<Watch> {
+    match session {
+        crate::events::SCREEN => Some(Watch::Screen),
+        crate::events::SERIAL => Some(Watch::Serial),
+        _ => None,
+    }
+}
+
 /// Stops a job for good: its room is free.
 pub fn end(sys: &mut System, number: u32) -> Result<(), Message> {
     let at = find(sys, number)?;

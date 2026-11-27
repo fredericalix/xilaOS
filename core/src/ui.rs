@@ -233,6 +233,14 @@ impl Ui {
                 match c.to_ascii_lowercase() {
                     b'e' => self.menu = if self.menu.is_some() { None } else { Some(sys.screen) },
                     b'x' => sys.mood = sys.mood.next(),
+                    // the program the prompt waits for goes on without it
+                    b'b' => {
+                        if let Some(number) = crate::jobs::aside(sys, crate::jobs::Watch::Screen) {
+                            let mut line = FixedStr::<COLS>::new();
+                            let _ = write!(line, "Job {number} goes on in the background: job {number} shows it, job {number} end stops it.");
+                            self.terms[0].line(line.bytes(), role::TERM_OUT);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -255,6 +263,8 @@ impl Ui {
         }
 
         let page = self.term_rows(sys.screen).saturating_sub(1);
+        // whether the prompt waits for a program, which then has the keyboard's Esc
+        let waits = sys.screen == 0 && self.waits(sys);
         let term = &mut self.terms[sys.screen];
         let hidden = (term.len() + (sys.screen != LOG) as usize).saturating_sub(page + 1);
         match ev.key {
@@ -266,13 +276,21 @@ impl Ui {
                 term.scroll = term.scroll.saturating_sub(page);
                 return;
             }
+            // at the prompt, Esc stops the program it waits for
+            Key::Esc if waits => {
+                if let Some(message) = crate::jobs::stop_watched(sys, crate::jobs::Watch::Screen) {
+                    term.line(message.bytes(), role::ERROR);
+                }
+                return;
+            }
             Key::Esc => {
                 sys.screen = 0;
                 return;
             }
             _ => {}
         }
-        if sys.screen == LOG {
+        // nothing is typed at a prompt that waits, nor on the log
+        if sys.screen == LOG || waits {
             return;
         }
 
@@ -354,6 +372,26 @@ impl Ui {
         self.dirty = true;
     }
 
+    /// Whether the prompt of the screen waits for a job that has not ended.
+    fn waits(&self, sys: &System) -> bool {
+        crate::jobs::watched(sys, crate::jobs::Watch::Screen).is_some_and(|at| !sys.jobs.list()[at].ended())
+    }
+
+    /// Gives a turn to the job the prompt of the screen waits for: what
+    /// it says goes where its command was typed. When it has ended the
+    /// prompt is back.
+    pub fn work(&mut self, sys: &mut System, spent: &mut dyn FnMut() -> bool) {
+        let Some(at) = crate::jobs::watched(sys, crate::jobs::Watch::Screen) else {
+            return;
+        };
+        let term = &mut self.terms[0];
+        let rows = term.len();
+        crate::jobs::turn(sys, at, &mut TermOut { term }, spent);
+        if crate::jobs::outcome(sys, crate::jobs::Watch::Screen).is_some() || term.len() != rows {
+            self.dirty = true;
+        }
+    }
+
     /// Shows on the last row how far a long piece of work is, written
     /// then read back, for the kernel to put on the screen while it works:
     /// the next `render` takes the row back. Returns how much of the bar
@@ -377,8 +415,12 @@ impl Ui {
     pub fn served(&mut self, sys: &mut System) {
         let term = &mut self.terms[0];
         let rows = term.len();
-        shell::served(sys, &mut TermOut { term });
+        let ok = shell::served(sys, &mut TermOut { term });
         self.dirty |= term.len() != rows;
+        // the program the prompt waits for may have asked: it goes on
+        if let Some(at) = crate::jobs::watched(sys, crate::jobs::Watch::Screen) {
+            crate::jobs::answered(sys, at, ok);
+        }
     }
 
     fn complete(&mut self) {
@@ -591,9 +633,19 @@ impl Ui {
                 }
             } else if prompt && i == term.len() {
                 // at the prompt, a command; on the companion's screen, something to ask it
+                // the prompt that waits for a program says so, and how to have it back
+                let mut running = FixedStr::<COLS>::new();
+                if let Some(job) = crate::jobs::watched(sys, crate::jobs::Watch::Screen).map(|at| &sys.jobs.list()[at]).filter(|job| !job.ended()) {
+                    const HOW: &[u8] = b". [Esc] stops it, [Alt]+[B] sends it to the background.";
+                    let name = job.program.bytes();
+                    running.push_bytes(b"Running ");
+                    running.push_bytes(&name[..name.len().min(COLS - 1 - 8 - HOW.len())]);
+                    running.push_bytes(HOW);
+                }
                 let (mark, editor): (&[u8], &LineEditor) = match sys.screen {
                     COMPANION if sys.companion.stage == crate::companion::Stage::Calling && sys.companion.asker == crate::companion::HERE => (b"(thinking) ", &self.chat),
                     COMPANION => (b"<you> ", &self.chat),
+                    _ if !running.is_empty() => (running.bytes(), &self.editor),
                     _ => (shell::prompt(sys, events::SCREEN), &self.editor),
                 };
                 let mut col = self.grid.text(0, row, mark, role::TERM_PROMPT, term.bg);
@@ -1141,5 +1193,141 @@ mod tests {
         assert_eq!(sys.peek_rows, ui.grid.rows);
         assert_eq!(&sys.peek[TOP][..11], b"X I L A O S");
         assert_eq!((sys.term_rows, sys.log_rows), (3, 0));
+    }
+
+    /// An interface and a system with rooms for jobs, and a program that counts to `to`.
+    fn with_jobs() -> (Box<Ui>, Box<System>) {
+        let (mut ui, mut sys) = (Box::new(Ui::new()), Box::new(System::new()));
+        crate::machine::tests::rooms(&mut sys, 3);
+        for line in ["program count", "let n = 0", "while n < to", "let n = n + 1", "if n % 100 = 0", "say n", "end", "end", "say 'counted'", "end", "let to = 300"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        (ui, sys)
+    }
+
+    /// The rows of the screen that hold something, as text.
+    fn rows(ui: &mut Ui, sys: &mut System) -> Vec<String> {
+        ui.render(sys);
+        (0..ui.grid.rows).map(|at| row(ui, at)).filter(|text| !text.trim().is_empty()).collect()
+    }
+
+    #[test]
+    fn the_screen_waits_for_a_program_and_lives() {
+        let (mut ui, mut sys) = with_jobs();
+        type_text(&mut ui, &mut sys, "count");
+        ui.key(&mut sys, key(Key::Enter));
+        // it has not run: it is the job the screen waits for
+        assert!(crate::jobs::watched(&sys, crate::jobs::Watch::Screen).is_some());
+        let shown = rows(&mut ui, &mut sys);
+        assert_eq!(shown.last().unwrap().trim_end(), "Running count. [Esc] stops it, [Alt]+[B] sends it to the background.");
+        assert!(!shown.iter().any(|text| text.trim() == "100"));
+        // what is typed meanwhile is not taken, and nothing is run twice
+        type_text(&mut ui, &mut sys, "say 'typed too soon'");
+        ui.key(&mut sys, key(Key::Enter));
+        assert!(ui.editor.bytes().is_empty());
+        // it runs by turns while the ticks pass, and what it says is shown as it comes
+        let level = ui.grid.pulse;
+        let mut seen = Vec::new();
+        for _ in 0..5000 {
+            ui.tick(&mut sys, 1);
+            ui.work(&mut sys, &mut || true);
+            let now = rows(&mut ui, &mut sys);
+            if now.iter().any(|text| text.trim() == "100") && !now.iter().any(|text| text.trim() == "300") && seen.is_empty() {
+                seen = now;
+            }
+            if crate::jobs::watched(&sys, crate::jobs::Watch::Screen).is_none() {
+                break;
+            }
+        }
+        assert!(!seen.is_empty(), "a line it said was on the screen before it ended");
+        assert!(seen.last().unwrap().starts_with("Running count."));
+        assert_ne!(ui.grid.pulse, level, "the cursor still moved");
+        // ended: the prompt is back, and the keyboard is the prompt's again
+        let shown = rows(&mut ui, &mut sys);
+        assert_eq!(shown[shown.len() - 2].trim(), "counted");
+        assert!(shown.last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
+        assert!(!shown.iter().any(|text| text.contains("typed too soon")));
+        type_text(&mut ui, &mut sys, "say n");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(rows(&mut ui, &mut sys).iter().rev().nth(1).unwrap().trim(), "300");
+        // a single line that is no program is not a job: it has run when Enter comes back
+        assert!(crate::jobs::watched(&sys, crate::jobs::Watch::Screen).is_none());
+        // a block typed at the prompt is one
+        for line in ["while n < 400", "let n = n + 1", "end"] {
+            type_text(&mut ui, &mut sys, line);
+            ui.key(&mut sys, key(Key::Enter));
+        }
+        assert!(rows(&mut ui, &mut sys).last().unwrap().starts_with("Running while n < 400."));
+        for _ in 0..5000 {
+            ui.work(&mut sys, &mut || true);
+        }
+        type_text(&mut ui, &mut sys, "say n");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(rows(&mut ui, &mut sys).iter().rev().nth(1).unwrap().trim(), "400");
+    }
+
+    #[test]
+    fn esc_stops_it_and_alt_b_sends_it_aside() {
+        let (mut ui, mut sys) = with_jobs();
+        ui.run(&mut sys, b"let to = 1000000");
+        type_text(&mut ui, &mut sys, "count");
+        ui.key(&mut sys, key(Key::Enter));
+        for _ in 0..50 {
+            ui.work(&mut sys, &mut || true);
+        }
+        // Esc stops it, and says where it was
+        ui.key(&mut sys, key(Key::Esc));
+        ui.work(&mut sys, &mut || true);
+        let shown = rows(&mut ui, &mut sys);
+        let said = shown[shown.len() - 2].trim();
+        assert!(said.starts_with("Stopped at line ") && said.ends_with(" of count."), "{said}");
+        assert!(shown.last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
+        assert_eq!(sys.jobs.list()[0].state, crate::jobs::State::Stopped);
+        assert_eq!(sys.screen, 0);
+        // Alt+B sends it to the background: the prompt is back and the job goes on
+        type_text(&mut ui, &mut sys, "count");
+        ui.key(&mut sys, key(Key::Enter));
+        ui.work(&mut sys, &mut || true);
+        ui.key(&mut sys, alt(b'b', None));
+        let shown = rows(&mut ui, &mut sys);
+        assert_eq!(shown[shown.len() - 2].trim(), "Job 2 goes on in the background: job 2 shows it, job 2 end stops it.");
+        assert!(shown.last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
+        assert!(crate::jobs::watched(&sys, crate::jobs::Watch::Screen).is_none());
+        let before = sys.jobs.list()[1].statements;
+        for _ in 0..50 {
+            crate::jobs::work(&mut sys, &mut shell::tests::Lines::default(), &mut || true);
+        }
+        assert!(sys.jobs.list()[1].statements > before && sys.jobs.list()[1].state == crate::jobs::State::Ready);
+        // the prompt is the user's meanwhile, and its names are its own again
+        type_text(&mut ui, &mut sys, "say to");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(rows(&mut ui, &mut sys).iter().rev().nth(1).unwrap().trim(), "1000000");
+        // with nothing to wait for, Alt+B does nothing and Esc goes to the first screen as before
+        ui.key(&mut sys, alt(b'b', None));
+        sys.screen = LOG;
+        ui.key(&mut sys, key(Key::Esc));
+        assert_eq!(sys.screen, 0);
+        assert_eq!(sys.jobs.list()[1].state, crate::jobs::State::Ready);
+    }
+
+    #[test]
+    fn a_program_the_screen_waits_for_asks_the_kernel_and_goes_on() {
+        let (mut ui, mut sys) = with_jobs();
+        for line in ["program asks", "say 'before'", "spin", "say 'after'", "end"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        type_text(&mut ui, &mut sys, "asks");
+        ui.key(&mut sys, key(Key::Enter));
+        // it stops where it asked: the kernel serves, as after any command typed here
+        ui.work(&mut sys, &mut || false);
+        assert_eq!(sys.request, Some(shell::Request::Spin));
+        ui.work(&mut sys, &mut || false);
+        assert!(!rows(&mut ui, &mut sys).iter().any(|text| text.trim() == "after"), "it waits for the kernel");
+        sys.request = None;
+        ui.served(&mut sys);
+        ui.work(&mut sys, &mut || false);
+        let shown = rows(&mut ui, &mut sys);
+        assert_eq!(shown[shown.len() - 2].trim(), "after");
+        assert!(shown.last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
     }
 }

@@ -156,7 +156,45 @@ pub fn line(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
         out.line(Style::Error, b"A line takes 240 characters at most.");
         return false;
     }
+    // the name of a program, alone or after `run`, is a job where the prompt can wait for one
+    let (word, rest) = word_of(line);
+    let (name, more) = split_word(trim(line));
+    let program = if word.bytes() == b"run" {
+        Some(rest)
+    } else {
+        let mut lower = shell::Text::from_bytes(name);
+        lower.lower();
+        (!shell::knows(lower.bytes()) && more.is_empty() && !name.is_empty() && exists(&sys.db, name)).then_some(name)
+    };
+    if let (Some(program), Some(watch)) = (program, waits(sys)) {
+        return begin(sys, crate::jobs::What::Program(program), watch, out);
+    }
     crate::machine::lines(sys, &[Line::from_bytes(line)], out)
+}
+
+/// Who would wait for a job started now: the prompt of the screen or of
+/// the serial port, on a system that has rooms for jobs, when it waits
+/// for none already. Not the companion's lines, nor those a command of a
+/// program types (`qr`), nor what comes from the network or from a
+/// program that runs by itself: those run at once.
+fn waits(sys: &System) -> Option<crate::jobs::Watch> {
+    let watch = crate::jobs::watch_of(sys.session)?;
+    (crate::jobs::places(sys) > 0 && !sys.acting && !sys.vm.busy() && crate::jobs::watched(sys, watch).is_none()).then_some(watch)
+}
+
+/// Starts a job the prompt waits for. True when it started: how it went
+/// comes when it has ended (`jobs::outcome`).
+fn begin(sys: &mut System, what: crate::jobs::What<'_>, watch: crate::jobs::Watch, out: &mut dyn Out) -> bool {
+    match crate::jobs::begin(sys, what, watch, out) {
+        Ok(_) => true,
+        Err(message) => {
+            // why it could not start may have been said already
+            if !message.is_empty() {
+                out.line(Style::Error, message.bytes());
+            }
+            false
+        }
+    }
 }
 
 /// Takes a line that opens a block, or that comes while one is open. The
@@ -190,7 +228,10 @@ pub fn typed(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     match first.bytes() {
         b"program" => define(sys, rest, &lines[1..lines.len() - 1], out),
         b"on" | b"every" => define_runs(sys, lines[0].bytes(), &lines[1..lines.len() - 1], out),
-        _ => crate::machine::lines(sys, lines, out),
+        _ => match waits(sys) {
+            Some(watch) => begin(sys, crate::jobs::What::Lines(lines), watch, out),
+            None => crate::machine::lines(sys, lines, out),
+        },
     }
 }
 
@@ -933,12 +974,22 @@ mod tests {
     use super::*;
     use crate::shell::tests::Lines;
 
-    /// Types lines at the prompt and returns what the last one showed.
+    /// Types lines at the prompt and returns what the last one showed. On a
+    /// system with rooms the prompt waits for what became a job, as the
+    /// screen does: one instruction a turn, until it has ended.
     fn type_lines(sys: &mut System, lines: &[&str]) -> (bool, Vec<String>) {
         let mut last = (true, Vec::new());
         for line in lines {
             let mut out = Lines::default();
-            let ok = shell::exec(sys, line.as_bytes(), &mut out);
+            let mut ok = shell::exec(sys, line.as_bytes(), &mut out);
+            if let Some(watch) = crate::jobs::watch_of(sys.session) {
+                while let Some(at) = crate::jobs::watched(sys, watch) {
+                    crate::jobs::turn(sys, at, &mut out, &mut || true);
+                    if let Some(went) = crate::jobs::outcome(sys, watch) {
+                        ok = went;
+                    }
+                }
+            }
             last = (ok, out.lines);
         }
         last
@@ -1714,5 +1765,66 @@ mod tests {
         assert!(shell::exec(&mut sys, b"say 'one line'", &mut out) && shell::exec(&mut sys, b"", &mut out));
         assert_eq!(out.lines, ["A block is typed at a prompt, not by a program that runs by itself.", "one line"]);
         assert!(sys.blocks.iter().all(|block| !block.open()));
+    }
+
+    #[test]
+    fn what_becomes_a_job_and_what_runs_at_once() {
+        let made = || {
+            let mut sys = Box::new(books());
+            type_lines(&mut sys, &["program report", "say 'reported'", "end"]);
+            crate::machine::tests::rooms(&mut sys, 3);
+            sys
+        };
+        let waited = |sys: &System| crate::jobs::watched(sys, crate::jobs::Watch::Screen).is_some() || crate::jobs::watched(sys, crate::jobs::Watch::Serial).is_some();
+        let exec = |sys: &mut System, line: &str| {
+            let mut out = Lines::default();
+            let ok = shell::exec(sys, line.as_bytes(), &mut out);
+            (ok, out.lines)
+        };
+        // at the screen and at the serial port: the name of a program, `run`, and a block
+        for session in [crate::events::SCREEN, crate::events::SERIAL] {
+            for lines in [&["report"][..], &["run report"], &["if 1 = 1", "say 'in a block'", "end"]] {
+                let mut sys = made();
+                sys.session = session;
+                let said: Vec<String> = lines.iter().flat_map(|line| exec(&mut sys, line).1).collect();
+                assert!(said.is_empty() && waited(&sys), "{lines:?}");
+                assert_eq!(sys.jobs.list()[0].by, session);
+            }
+        }
+        // a single line that is no program runs at once
+        let mut sys = made();
+        assert_eq!(exec(&mut sys, "say 'now'"), (true, vec!["now".to_string()]));
+        assert_eq!(exec(&mut sys, "select count(*) from expenses").1.len(), 2);
+        assert!(!waited(&sys));
+        // from the network prompt, from a program that runs by itself and for the companion: at once
+        for session in [crate::events::NETWORK, BACKGROUND] {
+            let mut sys = made();
+            sys.session = session;
+            assert_eq!(exec(&mut sys, "report"), (true, vec!["reported".to_string()]));
+            assert!(!waited(&sys));
+        }
+        let mut sys = made();
+        sys.acting = true;
+        assert_eq!(exec(&mut sys, "report"), (true, vec!["reported".to_string()]));
+        assert!(!waited(&sys));
+        // while the prompt waits for one, a second runs at once: what is typed there meanwhile is not lost
+        let mut sys = made();
+        exec(&mut sys, "report");
+        assert_eq!(exec(&mut sys, "report"), (true, vec!["reported".to_string()]));
+        // a line typed by a command of a program that runs at once is not a job either
+        let mut sys = made();
+        sys.session = crate::events::NETWORK;
+        type_lines(&mut sys, &["program outer", "qr report", "end"]);
+        sys.session = crate::events::SCREEN;
+        sys.acting = true;
+        assert!(exec(&mut sys, "outer").0 && !waited(&sys));
+        // with every place taken, the prompt says so
+        let mut sys = made();
+        type_lines(&mut sys, &["program forever", "while 1 = 1", "end", "end", "submit forever", "submit forever"]);
+        assert_eq!(exec(&mut sys, "report"), (false, vec!["Eight jobs are running or held: end one, or wait.".to_string()]));
+        // what cannot start says why, and nothing is waited for
+        let mut sys = made();
+        assert_eq!(exec(&mut sys, "run nowhere"), (false, vec!["Unknown program: nowhere. Type programs to list them.".to_string()]));
+        assert!(!waited(&sys));
     }
 }
