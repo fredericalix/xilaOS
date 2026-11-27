@@ -1396,9 +1396,9 @@ with Xila(net="e1000e") as x:
     x.cmd("create table companions (name text, place text, model text, key text, character text)")
     x.cmd("insert into companions values ('Xila', 'http://%s/v1/chat/completions', 'made-up/model', 'openrouter', 'You are brief.')" % there)
     x.cmd("key set openrouter sk-test-never-sent-in-clear")
-    model_says[:] = [{"said": "Hello. I am a made-up model \u2014 \u00e0 votre service."}]
+    model_says[:] = [{"said": "Hello. I am a made-up model \u2014 \u00e0 votre service, d\u00e9j\u00e0. \u00c8ve, c\u0153ur."}]
     ok, lines = x.cmd("ask are you there?", timeout=30)
-    check("ask: the companion says what the model says, in the characters XilaOS has", ok and lines == ["Hello. I am a made-up model - ? votre service."], lines)
+    check("ask: the companion says what the model says, in the characters XilaOS has", ok and lines == ["Hello. I am a made-up model - ? votre service, d?j?. Eve, coeur."], lines)
     headers, asked = model_asked[0] if model_asked else ({}, None)
     told = asked["messages"] if asked else []
     check("ask: the model was sent who it is, the question and its tool", asked and asked["model"] == "made-up/model" and [m["role"] for m in told] == ["system", "user"] and told[0]["content"].startswith("Your name is Xila. You live inside XilaOS") and told[0]["content"].endswith(" Your character: You are brief.") and told[1]["content"] == "are you there?" and asked["tools"][0]["function"]["name"] == "select", asked)
@@ -1410,7 +1410,7 @@ with Xila(net="e1000e") as x:
     check("ask: it was sent back what its queries gave, each under the number of its query",
           [m["role"] for m in again[-4:]] == ["user", "assistant", "tool", "tool"] and [m["content"] for m in again[-2:]] == ["count\n2", "label\nholidays"]
           and [c["id"] for c in again[-3]["tool_calls"]] == [m["tool_call_id"] for m in again[-2:]] and json.loads(again[-3]["tool_calls"][0]["function"]["arguments"]) == {"query": "select count(*) from notes"}, again[-4:])
-    check("ask: and what was said before", [m["content"] for m in again[1:3]] == ["are you there?", "Hello. I am a made-up model - ? votre service."], again[1:3])
+    check("ask: and what was said before", [m["content"] for m in again[1:3]] == ["are you there?", "Hello. I am a made-up model - \u00e0 votre service, d\u00e9j\u00e0. Eve, coeur."], again[1:3])
     talk = [(row["turn"], row["who"]) for row in x.table("select turn, who, text from talk order by id")]
     check("talk: everything that is said is kept, turn by turn", talk == [("1", "you"), ("1", "xila"), ("2", "you"), ("2", "xila"), ("2", "select"), ("2", "select"), ("2", "result"), ("2", "result"), ("2", "xila")], talk)
     model_says[:] = [{"queries": ["delete from notes", "select * from kept_keys", "drop table notes"]}, {"said": "I cannot."}]
@@ -1458,6 +1458,22 @@ with Xila(net="e1000e") as x:
     said = [row.rstrip() for row in x.peek() if row.strip()]
     check("companion screen: the answer is written under who says it", re.fullmatch(r"\d\d:\d\d <xila> Here I am\.", said[-3]) and said[-2] == " " * 13 + "On my own screen." and said[-1] == "<you>", said[-4:])
     check("companion screen: the model was asked what was typed there", model_asked[-1][1]["messages"][-1] == {"role": "user", "content": "are you here?"}, model_asked[-1][1]["messages"][-1])
+    # letters beyond ASCII: typed on the French keyboard they reach the model as the rest of the world writes them
+    model_says[:] = [{"said": "D\u00e9j\u00e0 l\u00e0, gar\u00e7on."}]
+    asked_before = len(model_asked)
+    x.cmd("keymap fr")
+    for name in ("2", "t", "2", "spc", "0", "spc", "9", "q"):
+        x.key(name)
+    x.key("ret", 0.3)
+    x.cmd("keymap us")
+    for _ in range(60):
+        if len(model_asked) > asked_before and any("gar?on." in row for row in x.peek()):
+            break
+        time.sleep(0.2)
+    typed = model_asked[-1][1]["messages"][-1] if len(model_asked) > asked_before else None
+    check("companion screen: accented letters typed there reach the model as it reads them", typed == {"role": "user", "content": "\u00e9t\u00e9 \u00e0 \u00e7a"}, typed)
+    said = [row.rstrip() for row in x.peek() if row.strip()]
+    check("companion screen: and its own come back as letters, one cell each", re.fullmatch(r"\d\d:\d\d <xila> D\?j\? l\?, gar\?on\.", said[-2]) is not None, said[-3:])
     x.key("esc", 0.4)
     back = x.peek()
     check("companion screen: [Esc] goes back, and the prompt's screen did not get the answer", "OVERVIEW" in back[4] and not any("On my own screen." in row for row in back), [row for row in back if row.strip()][-3:])

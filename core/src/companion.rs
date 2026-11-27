@@ -86,7 +86,7 @@ You can read the tables with the tool `select`, which runs one SQL SELECT and gi
 `select * from tables` lists every table (kind `system` for views of the live system, `stored` for the user's own). `select * from columns where table_name = 'x'` gives the columns of one. \
 Views of the system: tasks (what runs), memory, machine, settings, screens, commands, city. \
 The SQL is small: one statement, joins of two tables at most, no subqueries, 32 rows a result, texts cut at 48 characters; count(*), sum, min, max, avg, where, group by, order by, limit work.\n\
-Answer in plain text of plain ASCII: no markdown, no emphasis marks, no lists with stars, no emoji. Be brief: a few short lines, 400 characters at most. \
+Answer in plain text: no markdown, no emphasis marks, no lists with stars, no emoji. Write in the user's language with its accented letters, which the screen shows. Be brief: a few short lines, 400 characters at most. \
 If a query fails, read the error and try another. If you cannot know, say so.\n\
 You can also act, with the tool `run`, which runs one line at the prompt of XilaOS and gives you what it said: SQL that changes things \
 (insert into t values (...), update t set a = 1 where id = 2, delete from t where ..., create table t (a int, b text, c decimal), drop table t), \
@@ -578,7 +578,7 @@ fn messages(db: &Database, table: usize, from: i64, w: &mut json::Writer) {
                 w.raw(b"\",\"type\":\"function\",\"function\":{\"name\":");
                 w.text(name);
                 w.raw(b",\"arguments\":");
-                w.text(&inner[..length]);
+                w.json(&inner[..length]);
                 w.raw(b"}}");
                 if count < CALLS {
                     calls[count] = id as u64;
@@ -748,7 +748,7 @@ pub fn heard(sys: &mut System, got: Result<(u16, &[u8]), crate::ask::Failed>) {
         let tool = function.and_then(|function| json::get(function, b"name")).and_then(|name| TOOL.iter().position(|(tool, _)| name.len() == tool.len() + 2 && &name[1..name.len() - 1] == *tool));
         // what it gives the tool is JSON written as a text: read once, it is JSON again
         let mut arguments = [0u8; 2 * LINE];
-        let length = function.and_then(|function| json::get(function, b"arguments")).and_then(|arguments_| json::text(arguments_, &mut arguments)).unwrap_or(0);
+        let length = function.and_then(|function| json::get(function, b"arguments")).and_then(|arguments_| json::inner(arguments_, &mut arguments)).unwrap_or(0);
         let mut given = [0u8; LINE];
         let length = tool.and_then(|tool| json::get(&arguments[..length], TOOL[tool].1)).and_then(|given_| json::text(given_, &mut given)).unwrap_or(0);
         // a tool given nothing, or only spaces, is no tool
@@ -876,7 +876,8 @@ pub fn tell(sys: &mut System, session: usize, width: usize, out: &mut dyn crate:
                         line = FixedStr::from_bytes(line.bytes()[cut..].trim_ascii_start());
                     }
                     if byte != b'\n' {
-                        line.push(if (0x20..0x7f).contains(&byte) { byte } else { b' ' });
+                        // what is not drawn (a tab) takes the room of a space; the letters beyond ASCII are the font's own
+                        line.push(if byte < 0x20 || byte == 0x7f { b' ' } else { byte });
                     }
                 }
             });
@@ -1161,6 +1162,40 @@ mod tests {
         let said = results(&sys);
         assert_eq!(said[2], "error: The table programs is not the companion's to change.", "{said:?}");
         assert!(sys.db.find(b"programs").is_none() && sys.db.find(b"mine").is_some());
+    }
+
+    #[test]
+    fn accents_come_and_go_as_the_font_has_them() {
+        let mut sys = ready();
+        // typed on a French keyboard: the bytes of the font
+        let mut out = crate::shell::tests::Lines::default();
+        assert!(crate::shell::exec(&mut sys, b"insert into notes values ('\x82t\x82', 4)", &mut out));
+        ask(&mut sys, b"combien d'\x82toiles pour l'\x82t\x82 ? d\x82j\x85 not\x82 ?", crate::events::SERIAL).unwrap();
+        // the question goes out as the rest of the world writes it
+        let first = String::from_utf8(sent(&sys)).expect("UTF-8");
+        assert!(first.contains("\"combien d'\u{e9}toiles pour l'\u{e9}t\u{e9} ? d\u{e9}j\u{e0} not\u{e9} ?\""), "{first}");
+        // the model answers with its own letters, and asks for a query that has some
+        heard(&mut sys, Ok((200, &answer(Some("Je regarde \u{e7}a\u{2026}"), &["select stars from notes where label = '\u{e9}t\u{e9}'"]))));
+        let second = String::from_utf8(sent(&sys)).expect("UTF-8");
+        // the query found the row: it was run in the letters of the font
+        assert!(second.contains("\"content\":\"stars\\n4\""), "{second}");
+        // and what was said and asked goes back as it came
+        assert!(second.contains("Je regarde \u{e7}a...") && second.contains("where label = '\u{e9}t\u{e9}'"), "{second}");
+        heard(&mut sys, Ok((200, "{\"choices\":[{\"message\":{\"content\":\"D\\u00e9j\\u00e0 not\u{e9}\u{a0}: 4 \u{e9}toiles \u{2014} voil\u{e0}, \u{c0} bient\u{f4}t. \u{c8}ve, c\u{153}ur.\"}}]}".as_bytes())));
+        let mut all = Vec::new();
+        said(&sys.db, 1, &mut |text, _| all.push(text.to_vec()));
+        assert_eq!(all, [b"Je regarde \x87a...".to_vec(), b"D\x82j\x85 not\x82 : 4 \x82toiles - voil\x85, \xb7 bient\x93t. Eve, coeur.".to_vec()]);
+        // and it is told so to who asked: the lines of the screen have those letters
+        struct Seen(Vec<Vec<u8>>);
+        impl crate::shell::Out for Seen {
+            fn line(&mut self, _: crate::shell::Style, text: &[u8]) {
+                self.0.push(text.to_vec());
+            }
+            fn table(&mut self, _: &crate::shell::Table) {}
+        }
+        let mut seen = Seen(Vec::new());
+        assert_eq!(tell(&mut sys, crate::events::SERIAL, 30, &mut seen), Some(true));
+        assert_eq!(seen.0, [&b"Je regarde \x87a..."[..], b"D\x82j\x85 not\x82 : 4 \x82toiles -", b"voil\x85, \xb7 bient\x93t. Eve, coeur."]);
     }
 
     #[test]

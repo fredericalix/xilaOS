@@ -87,10 +87,36 @@ impl<'a> Writer<'a> {
                 b'\r' => self.raw(b"\\r"),
                 b'\t' => self.raw(b"\\t"),
                 0x20..=0x7e => self.byte(byte),
-                // what is not plain ASCII would not be read as it is meant
-                _ => self.byte(b'?'),
+                // a letter of the font beyond ASCII, as the rest of the world writes it
+                _ => match crate::chars::unicode(byte) {
+                    Some(code) => {
+                        let (bytes, length) = crate::chars::utf8(code);
+                        self.raw(&bytes[..length]);
+                    }
+                    // a drawing of the font, or what is not drawn
+                    None => self.byte(b'?'),
+                },
             }
         }
+    }
+
+    /// JSON that was written already, as a text: its marks are written so
+    /// that they end nothing, and the rest is left as it is, since what is
+    /// beyond ASCII in it is UTF-8 by now.
+    pub fn json(&mut self, written: &[u8]) {
+        self.byte(b'"');
+        for &byte in written {
+            match byte {
+                b'"' => self.raw(b"\\\""),
+                b'\\' => self.raw(b"\\\\"),
+                b'\n' => self.raw(b"\\n"),
+                b'\r' => self.raw(b"\\r"),
+                b'\t' => self.raw(b"\\t"),
+                0..=0x1f | 0x7f => self.byte(b'?'),
+                _ => self.byte(byte),
+            }
+        }
+        self.byte(b'"');
     }
 
     /// A text between its quotes.
@@ -231,20 +257,47 @@ pub fn none(value: Option<&[u8]>) -> bool {
     value.is_none_or(|value| value == b"null")
 }
 
-/// What a text says: written into `into` without its quotes, with what
-/// its marks stand for (`\n` a new line, `\"` a quote...). Returns how
-/// many bytes, as many as fit; None if the value is not a text. What is
-/// not plain ASCII becomes `?`, one for each character.
+/// Reads a text: writes in `into` what it says, in the characters of the
+/// font, with what its marks stand for (`\n` a new line, `\"` a quote...).
+/// Returns how many bytes, as many as fit; None if the value is not a
+/// text. A letter beyond ASCII becomes the font's own when it has it,
+/// the nearest thing or `?` when it does not (`chars::shown`).
 pub fn text(value: &[u8], into: &mut [u8]) -> Option<usize> {
+    read(value, into, true)
+}
+
+/// Reads a text that holds JSON: the same, but what is beyond ASCII stays
+/// as UTF-8 writes it, for the texts of that JSON to be read in their turn.
+pub fn inner(value: &[u8], into: &mut [u8]) -> Option<usize> {
+    read(value, into, false)
+}
+
+fn read(value: &[u8], into: &mut [u8], font: bool) -> Option<usize> {
     if value.len() < 2 || value[0] != b'"' || value[value.len() - 1] != b'"' {
         return None;
     }
     let inside = &value[1..value.len() - 1];
     let (mut at, mut len) = (0, 0);
-    let mut put = |byte: u8, len: &mut usize| {
-        if let Some(place) = into.get_mut(*len) {
-            *place = byte;
-            *len += 1;
+    let mut put = |bytes: &[u8], len: &mut usize| {
+        for byte in bytes {
+            if let Some(place) = into.get_mut(*len) {
+                *place = *byte;
+                *len += 1;
+            }
+        }
+    };
+    // a character by its number in Unicode
+    let character = |code: u32, put: &mut dyn FnMut(&[u8], &mut usize), len: &mut usize| match code {
+        0x0a => put(b"\n", len),
+        0x09 => put(b"\t", len),
+        0..=0x1f | 0x7f => put(b"?", len),
+        // the first half of a character written in two halves stands for it, the second for nothing
+        0xd800..=0xdbff => put(b"?", len),
+        0xdc00..=0xdfff => {}
+        _ if font => put(crate::chars::shown(code), len),
+        _ => {
+            let (bytes, length) = crate::chars::utf8(code);
+            put(&bytes[..length], len)
         }
     };
     while at < inside.len() {
@@ -255,49 +308,30 @@ pub fn text(value: &[u8], into: &mut [u8]) -> Option<usize> {
                 let mark = *inside.get(at)?;
                 at += 1;
                 match mark {
-                    b'n' => put(b'\n', &mut len),
-                    b't' => put(b'\t', &mut len),
+                    b'n' => put(b"\n", &mut len),
+                    b't' => put(b"\t", &mut len),
                     b'r' => {}
-                    b'b' | b'f' => put(b' ', &mut len),
+                    b'b' | b'f' => put(b" ", &mut len),
                     // a character by its number, in four hexadecimal digits
                     b'u' => {
                         let digits = core::str::from_utf8(inside.get(at..at + 4)?).ok()?;
                         let number = u32::from_str_radix(digits, 16).ok()?;
                         at += 4;
-                        match number {
-                            // the second half of a character written in two halves: said already
-                            0xdc00..=0xdfff => {}
-                            0x20..=0x7e => put(number as u8, &mut len),
-                            0x0a => put(b'\n', &mut len),
-                            0x09 => put(b'\t', &mut len),
-                            // quotes and dashes that have a plain form
-                            0x2018 | 0x2019 => put(b'\'', &mut len),
-                            0x201c | 0x201d => put(b'"', &mut len),
-                            0x2013 | 0x2014 => put(b'-', &mut len),
-                            _ => put(b'?', &mut len),
-                        }
+                        character(number, &mut put, &mut len);
                     }
-                    other => put(other, &mut len),
+                    other => put(&[other], &mut len),
                 }
             }
-            0x20..=0x7e | b'\n' | b'\t' => put(byte, &mut len),
-            // a character of several bytes (UTF-8): its first byte says how many
-            0xc0..=0xff => {
-                let more = if byte >= 0xf0 { 3 } else if byte >= 0xe0 { 2 } else { 1 };
-                let whole = inside.get(at - 1..at + more).unwrap_or(&[]);
-                at += more;
-                put(
-                    match whole {
-                        // the quotes and dashes of typographers
-                        [0xe2, 0x80, 0x98 | 0x99] => b'\'',
-                        [0xe2, 0x80, 0x9c | 0x9d] => b'"',
-                        [0xe2, 0x80, 0x93 | 0x94] => b'-',
-                        _ => b'?',
-                    },
-                    &mut len,
-                );
-            }
-            _ => put(b'?', &mut len),
+            0x20..=0x7e | b'\n' | b'\t' => put(&[byte], &mut len),
+            // a character of several bytes (UTF-8)
+            0x80..=0xff => match crate::chars::read(&inside[at - 1..]) {
+                Some((code, length)) => {
+                    at += length - 1;
+                    character(code, &mut put, &mut len);
+                }
+                None => put(b"?", &mut len),
+            },
+            _ => put(b"?", &mut len),
         }
     }
     Some(len)
@@ -319,15 +353,19 @@ mod tests {
     fn said(value: &[u8]) -> Option<String> {
         let mut into = [0u8; 200];
         let len = text(value, &mut into)?;
-        Some(String::from_utf8(into[..len].to_vec()).unwrap())
+        // a character of the font is one byte: here, the character of that number
+        Some(into[..len].iter().map(|byte| *byte as char).collect())
     }
 
     #[test]
     fn a_text_is_written_with_marks_for_what_would_end_it() {
         assert_eq!(written(|w| w.text(b"hello")), r#""hello""#);
         assert_eq!(written(|w| w.text(b"say \"hi\"\nC:\\x\tend\r")), r#""say \"hi\"\nC:\\x\tend\r""#);
-        // what is not plain ASCII would be read as something else
-        assert_eq!(written(|w| w.text(b"caf\xe9 \x07 \x7f")), r#""caf? ? ?""#);
+        // a letter of the font beyond ASCII goes out as UTF-8 writes it; a drawing has no such way
+        assert_eq!(written(|w| w.text(b"d\x82j\x85 l'\x82t\x82, gar\x87on \xae o\x97 \xaf")), "\"d\u{e9}j\u{e0} l'\u{e9}t\u{e9}, gar\u{e7}on \u{ab} o\u{f9} \u{bb}\"");
+        assert_eq!(written(|w| w.text(b"\xc4\xdb \x07 \x7f")), r#""?? ? ?""#);
+        // JSON written already, as a text: only its marks change
+        assert_eq!(written(|w| w.json("{\"query\":\"o\u{f9} \\\\ \\n\"}".as_bytes())), "\"{\\\"query\\\":\\\"o\u{f9} \\\\\\\\ \\\\n\\\"}\"");
         assert_eq!(written(|w| w.text(b"")), r#""""#);
         // pieces: names and brackets as they are, texts and numbers in between
         assert_eq!(
@@ -406,10 +444,13 @@ mod tests {
         assert_eq!(said(br#""hello""#).unwrap(), "hello");
         assert_eq!(said(br#""say \"hi\"\nC:\\x\tend\r\/""#).unwrap(), "say \"hi\"\nC:\\x\tend/");
         assert_eq!(said(br#""""#).unwrap(), "");
-        // characters by their number: plain ones as they are, the others as `?` or their plain form
-        assert_eq!(said(br#""\u0041\u00e9\u2019\u201cq\u201d \u2014 \ud83d\ude00.""#).unwrap(), "A?'\"q\" - ?.");
+        // characters by their number: those the font has as its own, the others as their plain form or `?`
+        assert_eq!(said(br#""\u0041\u00e9\u2019\u201cq\u201d \u2014 \ud83d\ude00.""#).unwrap(), "A\u{82}'\"q\" - ?.");
         // characters of several bytes, as servers also write them
-        assert_eq!(said("\"caf\u{e9} \u{2019}s \u{201c}q\u{201d} \u{2013} \u{1f600} \u{4e2d}.\"".as_bytes()).unwrap(), "caf? 's \"q\" - ? ?.");
+        assert_eq!(said("\"caf\u{e9} \u{2019}s \u{201c}q\u{201d} \u{2013} \u{1f600} \u{4e2d}.\"".as_bytes()).unwrap(), "caf\u{82} 's \"q\" - ? ?.");
+        assert_eq!(said("\"D\u{e9}j\u{e0} l\u{2019}\u{e9}t\u{e9}\u{a0}? \u{c0} No\u{eb}l, c\u{153}ur \u{ea}tre \u{c8}ve\"".as_bytes()).unwrap(), "D\u{82}j\u{85} l'\u{82}t\u{82} ? \u{b7} No\u{89}l, coeur \u{88}tre Eve");
+        // bytes that are not UTF-8: one `?` each, and what follows is read
+        assert_eq!(said(b"\"a\x82b\xc3 c\xe2\x82\"").unwrap(), "a?b? c??");
         // what is not a text
         for other in [&b"12"[..], b"null", b"{}", b"\"", b"", b"\"a", b"\"\\u00zz\"", b"\"\\u00\"", b"\"\\"] {
             assert_eq!(said(other), None, "{:?}", core::str::from_utf8(other));
@@ -420,6 +461,17 @@ mod tests {
         // a text that holds JSON holds it as a text: read once, it is JSON again
         let arguments = said(br#""{\"query\":\"select name from tasks where state = 'running'\"}""#).unwrap();
         assert_eq!(said(get(arguments.as_bytes(), b"query").unwrap()).unwrap(), "select name from tasks where state = 'running'");
+        // with letters beyond ASCII inside: UTF-8 until the texts of that JSON are read
+        let asked = "\"{\\\"query\\\":\\\"select 1 from t where label = '\u{e9}t\\\\u00e9'\\\"}\"";
+        let mut arguments = [0u8; 100];
+        let length = inner(asked.as_bytes(), &mut arguments).unwrap();
+        assert_eq!(core::str::from_utf8(&arguments[..length]).unwrap(), "{\"query\":\"select 1 from t where label = '\u{e9}t\\u00e9'\"}");
+        assert_eq!(said(get(&arguments[..length], b"query").unwrap()).unwrap(), "select 1 from t where label = '\u{82}t\u{82}'");
+        // a text of the font is read back the same once written
+        let mut back = [0u8; 40];
+        let sent = written(|w| w.text(b"d\x82j\x85 \x90t\x82 \xb7 \xf8"));
+        let length = text(sent.as_bytes(), &mut back).unwrap();
+        assert_eq!(&back[..length], b"d\x82j\x85 \x90t\x82 \xb7 \xf8");
         // what is written is read back the same
         for plain in ["", "a", "say \"hi\"\n\ttab \\ end", "{\"a\":[1,2]}"] {
             assert_eq!(said(written(|w| w.text(plain.as_bytes())).as_bytes()).unwrap(), plain);

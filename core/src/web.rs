@@ -75,8 +75,9 @@ impl Page {
     }
 
     /// Adds text as it is to be read: the characters HTML gives a meaning
-    /// to are written so that they have none. Characters beyond the plain
-    /// ones become `?`: the system's own set is not the browser's.
+    /// to are written so that they have none. The letters of the font
+    /// beyond ASCII are written as the browser reads them (UTF-8); its
+    /// drawings, which a browser has not, become `?`.
     fn text(&mut self, text: &[u8]) {
         for &byte in text {
             match byte {
@@ -85,7 +86,13 @@ impl Page {
                 b'>' => self.html(b"&gt;"),
                 b'"' => self.html(b"&quot;"),
                 0x20..=0x7e => self.html(&[byte]),
-                _ => self.html(b"?"),
+                _ => match crate::chars::unicode(byte) {
+                    Some(code) => {
+                        let (bytes, length) = crate::chars::utf8(code);
+                        self.html(&bytes[..length]);
+                    }
+                    None => self.html(b"?"),
+                },
             }
         }
     }
@@ -490,6 +497,21 @@ mod tests {
         assert!(page.contains("<p>The first 32 rows of 40.</p>"), "{}", &page[page.len() - 200..]);
         let page = page_of(&mut sys, "GET /K7QD-2MXP/t/notes HTTP/1.1\r\n\r\n");
         assert!(page.contains("<p>2 rows.</p>") && !page.contains("of 40"));
+    }
+
+    #[test]
+    fn letters_beyond_ascii_reach_the_browser_as_it_reads_them() {
+        let mut sys = opened();
+        crate::shell::tests::run_line(&mut sys, "create table notes (title text)");
+        // typed on a French keyboard: the bytes of the font, and one of its drawings
+        let mut out = crate::shell::tests::Lines::default();
+        assert!(crate::shell::exec(&mut sys, b"insert into notes values ('\x82t\x82 \x85 No\x89l \xdb')", &mut out));
+        // the page is UTF-8, as it says it is: `page_of` would not read it otherwise
+        let page = page_of(&mut sys, "GET /K7QD-2MXP/t/notes HTTP/1.1\r\n\r\n");
+        assert!(page.contains("charset=utf-8") && page.contains("<td>\u{e9}t\u{e9} \u{e0} No\u{eb}l ?</td>"), "{page}");
+        // and its length is said in bytes
+        let (before, body) = page.split_once("\r\n\r\n").unwrap();
+        assert!(before.contains(&std::format!("Content-Length: {}\r\n", body.len())), "{before}");
     }
 
     #[test]

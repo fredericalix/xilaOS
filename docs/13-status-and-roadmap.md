@@ -51,14 +51,15 @@ were also tried on the real machine.
 | The companion acts (`run`: one line at the prompt, written in `acts`), remembers (`remember`, the table `remembered`) and is stopped (`companion off`, kept between starts); what is refused to it | yes, against a made-up model and a real one; the refusals against the made-up one | yes, on 27 November 2026, through the relay; of the refusals only `web on`, which the real model tried; kept between starts not tried |
 | `install`, `disk erase`, `remote on`, `web on` refused to a program that runs by itself; `disk erase yes` refused to the network session | yes | not tried |
 | The table `companions`, which says where the key goes, changed at the machine only: not from the network prompt, not by a program that runs by itself | yes | not tried |
+| Accented letters between the font and the rest of the world (UTF-8): what is typed to the companion, what it answers, the web pages | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 36,000 lines, 324
-unit tests, 504 system checks.
+about 300 system checks. On 27 November 2026: about 36,000 lines, 329
+unit tests, 506 system checks.
 
 ## Known limits of what is done
 
@@ -406,8 +407,9 @@ through it, and the cost for the kernel (some fifty outside crates,
 
 ### Loose ends of what exists
 
-- Characters outside ASCII leave as `?` on the serial port and in the
-  web pages.
+- Characters outside ASCII leave as `?` on the serial port and in QR
+  codes. (The companion and the web pages read and write them as
+  UTF-8 since 27 November 2026.)
 - `net ping`, `net get` and `install from` hold the system while they
   wait: phase 3.
 - A development mode. The serial shell is always open and may do

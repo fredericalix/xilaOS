@@ -155,7 +155,11 @@ storage engine allocates.
 
 **Text** is bytes in the character set of the V2_OS font (ASCII below
 0x80), not UTF-8. It is `&[u8]` everywhere: `b"..."` literals and
-`FixedStr<N>` buffers.
+`FixedStr<N>` buffers. Where text meets the rest of the world, which
+writes UTF-8 (a model of the Internet, a browser), `chars.rs` is the
+way between the two: the number Unicode gives a letter of the font,
+and what the font shows for a character of Unicode, its own letter or
+the nearest thing it has.
 
 **Display.** A `Cell` stores a character, two color *roles* and effect
 bits (big logo letters, rounded bar ends, pulsing cursor). Colors come

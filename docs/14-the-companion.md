@@ -66,9 +66,14 @@ machine wants. One question at a time: a second one, while the first
 is being answered, is refused.
 
 A question is 150 characters at most. An answer is plain text, cut
-into lines at spaces; what the model writes outside plain ASCII
-becomes `?`, or its plain form for the quotes and dashes of
-typographers.
+into lines at spaces. Accented letters go both ways: those typed here
+(`keymap fr`) reach the model as the rest of the world writes them,
+and those it writes are shown with the font's own letters. The font
+has every accented small letter of French and some of the capitals;
+a letter it lacks comes without its accent or in two letters (`È` as
+`E`, `œ` as `oe`), the quotes and dashes of typographers in their
+plain form, and what it has nothing like (another alphabet, an emoji)
+as `?`.
 
 When there is no answer, one line says why: `No key opens the model.
 Type key set openrouter and the key.`, `The model's server refused
@@ -403,7 +408,8 @@ answers one of them, under a number made from the number of its row.
 What the model is told before anything else is in `companion.rs`
 (`TOLD`): that it lives in XilaOS, that XilaOS is not a Unix, what the
 tables are and how small the SQL is, when to act and what is refused,
-what its memory is for, and to answer briefly in plain ASCII. The
+what its memory is for, and to answer briefly in plain text, in the
+user's language with its accents. The
 tool that remembers was first called `note`: the model then took the
 user's table `notes` for its own memory, and wrote there what was
 meant for it; the name and two sentences of `TOLD` come from that.

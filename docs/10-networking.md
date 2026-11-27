@@ -468,7 +468,7 @@ An answer longer than twelve parts ends with `#cut` and the number of bytes left
 3. it builds the whole page in `web::Page`, a 48 KB buffer the kernel keeps, with `sql::select` on `&System`;
 4. it writes the page to TCP as room is made, over as many passes as it takes, then closes.
 
-The other browsers wait in TCP's places for their turn, which is short. The pages are HTTP/1.0 with `Connection: close`: one conversation, one page. Characters outside plain ASCII become `?`, since the system's own character set is not a browser's.
+The other browsers wait in TCP's places for their turn, which is short. The pages are HTTP/1.0 with `Connection: close`: one conversation, one page. The pages are UTF-8: a letter of the font beyond ASCII (`é`, `à`, `ç`...) is written as a browser reads it (`core/src/chars.rs`), and a drawing of the font, which a browser has not, becomes `?`.
 
 In QEMU the pages are reached through a forwarded host port. Many connections opened at the very same moment are reset by QEMU's forwarding itself, before XilaOS sees them.
 

@@ -14,6 +14,7 @@
 pub mod ask;
 pub mod catalog;
 pub mod change;
+pub mod chars;
 pub mod city;
 pub mod clock;
 pub mod companion;
