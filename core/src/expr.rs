@@ -141,6 +141,9 @@ enum Node {
     In(usize, usize, Option<usize>),
     Binary(Binary, usize, usize),
     Call(Function, usize, Option<usize>),
+    /// A name whose value is looked up when the expression is worked
+    /// out, not while it is read: what a compiled program has.
+    Name(FixedStr<VAR_NAME>),
 }
 
 /// An expression, ready to be worked out for a row.
@@ -333,7 +336,13 @@ impl Expr {
 
     /// Works the expression out for a row.
     pub fn eval(&self, row: &[Value]) -> Result<Value, Message> {
-        self.node(self.root, row)
+        self.eval_with(row, &NO_VARS)
+    }
+
+    /// Works the expression out for a row, the names it looks up now
+    /// (`Names::late`) being those of `vars`.
+    pub fn eval_with(&self, row: &[Value], vars: &Vars) -> Result<Value, Message> {
+        work(&self.nodes, self.root, row, vars)
     }
 
     /// The whole numbers outside which a column makes the expression
@@ -452,7 +461,12 @@ impl Expr {
 
     /// Whether the expression holds for a row, as a condition.
     pub fn holds(&self, row: &[Value]) -> Result<bool, Message> {
-        Ok(truth(&self.eval(row)?)? == Some(true))
+        self.holds_with(row, &NO_VARS)
+    }
+
+    /// As `holds`, with the names of `vars`.
+    pub fn holds_with(&self, row: &[Value], vars: &Vars) -> Result<bool, Message> {
+        Ok(truth(&self.eval_with(row, vars)?)? == Some(true))
     }
 
     /// Whether the expression is known not to hold for a row. What cannot
@@ -466,55 +480,122 @@ impl Expr {
     pub fn names(&self, column: usize) -> bool {
         self.nodes[..self.count].iter().any(|node| matches!(node, Node::Column(named) if *named == column))
     }
+}
 
-    fn node(&self, at: usize, row: &[Value]) -> Result<Value, Message> {
-        Ok(match self.nodes[at] {
-            Node::Value(value) => value,
-            Node::Column(column) => row.get(column).copied().unwrap_or(Value::Null),
-            Node::Negate(a) => binary(Binary::Subtract, Value::Int(0), self.node(a, row)?)?,
-            Node::Not(a) => truth(&self.node(a, row)?)?.map_or(Value::Null, |holds| boolean(!holds)),
-            Node::IsNull(a, wanted) => boolean((self.node(a, row)? == Value::Null) == wanted),
-            Node::In(a, ..) => {
-                // as with `=`: nothing is among nothing, and what is not
-                // found among values of which one is nothing is not known
-                let value = self.node(a, row)?;
-                let (mut rest, mut unknown) = (Some(at), value == Value::Null);
-                while let Some(Node::In(_, one, next)) = rest.map(|at| self.nodes[at]) {
-                    match binary(Binary::Equal, value, self.node(one, row)?)? {
-                        Value::Null => unknown = true,
-                        Value::Int(0) => {}
-                        _ => return Ok(boolean(true)),
-                    }
-                    rest = next;
+/// Works out the node at `at` of an expression: `row` gives the columns,
+/// `vars` the names that are looked up now.
+fn work(nodes: &[Node], at: usize, row: &[Value], vars: &Vars) -> Result<Value, Message> {
+    Ok(match nodes[at] {
+        Node::Value(value) => value,
+        Node::Name(name) => vars.get(name.bytes()).ok_or_else(|| error(b"Unknown name: ", name.bytes()))?,
+        Node::Column(column) => row.get(column).copied().unwrap_or(Value::Null),
+        Node::Negate(a) => binary(Binary::Subtract, Value::Int(0), work(nodes, a, row, vars)?)?,
+        Node::Not(a) => truth(&work(nodes, a, row, vars)?)?.map_or(Value::Null, |holds| boolean(!holds)),
+        Node::IsNull(a, wanted) => boolean((work(nodes, a, row, vars)? == Value::Null) == wanted),
+        Node::In(a, ..) => {
+            // as with `=`: nothing is among nothing, and what is not
+            // found among values of which one is nothing is not known
+            let value = work(nodes, a, row, vars)?;
+            let (mut rest, mut unknown) = (Some(at), value == Value::Null);
+            while let Some(Node::In(_, one, next)) = rest.map(|at| nodes[at]) {
+                match binary(Binary::Equal, value, work(nodes, one, row, vars)?)? {
+                    Value::Null => unknown = true,
+                    Value::Int(0) => {}
+                    _ => return Ok(boolean(true)),
                 }
-                if unknown {
-                    Value::Null
-                } else {
-                    boolean(false)
-                }
+                rest = next;
             }
-            // one side can settle these; the other is then not looked at
-            Node::Binary(operation @ (Binary::And | Binary::Or), a, b) => {
-                let settles = operation == Binary::Or;
-                let first = truth(&self.node(a, row)?)?;
-                if first == Some(settles) {
-                    return Ok(boolean(settles));
-                }
-                match (first, truth(&self.node(b, row)?)?) {
-                    (_, Some(second)) if second == settles => boolean(settles),
-                    (Some(_), Some(_)) => boolean(!settles),
-                    _ => Value::Null,
-                }
+            if unknown {
+                Value::Null
+            } else {
+                boolean(false)
             }
-            Node::Binary(operation, a, b) => binary(operation, self.node(a, row)?, self.node(b, row)?)?,
-            Node::Call(function, a, b) => {
-                let second = match b {
-                    Some(b) => Some(self.node(b, row)?),
-                    None => None,
-                };
-                call(function, self.node(a, row)?, second)?
+        }
+        // one side can settle these; the other is then not looked at
+        Node::Binary(operation @ (Binary::And | Binary::Or), a, b) => {
+            let settles = operation == Binary::Or;
+            let first = truth(&work(nodes, a, row, vars)?)?;
+            if first == Some(settles) {
+                return Ok(boolean(settles));
             }
-        })
+            match (first, truth(&work(nodes, b, row, vars)?)?) {
+                (_, Some(second)) if second == settles => boolean(settles),
+                (Some(_), Some(_)) => boolean(!settles),
+                _ => Value::Null,
+            }
+        }
+        Node::Binary(operation, a, b) => binary(operation, work(nodes, a, row, vars)?, work(nodes, b, row, vars)?)?,
+        Node::Call(function, a, b) => {
+            let second = match b {
+                Some(b) => Some(work(nodes, b, row, vars)?),
+                None => None,
+            };
+            call(function, work(nodes, a, row, vars)?, second)?
+        }
+    })
+}
+
+/// Nodes a pool holds: ten for each of the 48 lines of a program
+/// (`say row.label + ': ' + row.amount` takes five).
+pub(crate) const POOL: usize = 512;
+
+/// An expression kept in a pool: where it starts there.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Kept(u16);
+
+/// Expressions read once and kept one after the other, to be worked out
+/// again and again: those of a compiled program. An `Expr` alone takes
+/// room for the longest expression there can be; here each takes what
+/// it needs.
+pub(crate) struct Pool {
+    nodes: [Node; POOL],
+    count: usize,
+}
+
+impl Pool {
+    pub const fn new() -> Pool {
+        Pool { nodes: [Node::Value(Value::Null); POOL], count: 0 }
+    }
+
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    /// Nodes that still fit.
+    pub fn left(&self) -> usize {
+        POOL - self.count
+    }
+
+    /// Keeps an expression. None when it does not fit: nothing is kept.
+    pub fn keep(&mut self, expr: &Expr) -> Option<Kept> {
+        let base = self.count;
+        if expr.count > self.left() {
+            return None;
+        }
+        for (at, node) in expr.nodes[..expr.count].iter().enumerate() {
+            // what a node says of other nodes is where they are here
+            self.nodes[base + at] = match *node {
+                Node::Negate(a) => Node::Negate(a + base),
+                Node::Not(a) => Node::Not(a + base),
+                Node::IsNull(a, wanted) => Node::IsNull(a + base, wanted),
+                Node::In(a, one, rest) => Node::In(a + base, one + base, rest.map(|rest| rest + base)),
+                Node::Binary(operation, a, b) => Node::Binary(operation, a + base, b + base),
+                Node::Call(function, a, b) => Node::Call(function, a + base, b.map(|b| b + base)),
+                alone @ (Node::Value(_) | Node::Column(_) | Node::Name(_)) => alone,
+            };
+        }
+        self.count += expr.count;
+        Some(Kept((base + expr.root) as u16))
+    }
+
+    /// Works a kept expression out, with these names.
+    pub fn eval(&self, kept: Kept, vars: &Vars) -> Result<Value, Message> {
+        work(&self.nodes[..self.count], kept.0 as usize, &[], vars)
+    }
+
+    /// Whether a kept expression holds, with these names.
+    pub fn holds(&self, kept: Kept, vars: &Vars) -> Result<bool, Message> {
+        Ok(truth(&self.eval(kept, vars)?)? == Some(true))
     }
 }
 
@@ -607,21 +688,31 @@ pub(crate) struct Names<'a> {
     vars: &'a Vars,
     /// Without a table: what to say before a name that is unknown.
     unknown: &'static [u8],
+    /// A name that is no column is not given its value while the
+    /// expression is read: it is looked up when it is worked out.
+    late: bool,
 }
 
 impl<'a> Names<'a> {
     pub fn of(columns: &'a Schema, vars: &'a Vars) -> Names<'a> {
-        Names { columns: Some(columns), joined: None, alias: [b"", b""], vars, unknown: b"Unknown column: " }
+        Names { columns: Some(columns), joined: None, alias: [b"", b""], vars, unknown: b"Unknown column: ", late: false }
     }
 
     /// The names of a table, and of a second one joined to it if there
     /// is one, each with the other name the query gives it.
     pub fn of_tables(first: &'a Schema, joined: Option<&'a Schema>, alias: [&'a [u8]; 2], vars: &'a Vars) -> Names<'a> {
-        Names { columns: Some(first), joined, alias, vars, unknown: b"Unknown column: " }
+        Names { columns: Some(first), joined, alias, vars, unknown: b"Unknown column: ", late: false }
     }
 
     pub fn without(vars: &'a Vars, unknown: &'static [u8]) -> Names<'a> {
-        Names { columns: None, joined: None, alias: [b"", b""], vars, unknown }
+        Names { columns: None, joined: None, alias: [b"", b""], vars, unknown, late: false }
+    }
+
+    /// No table, and names that are looked up when the expression is
+    /// worked out (`Expr::eval_with`), not while it is read: an
+    /// expression read so can be kept and worked out again and again.
+    pub fn late() -> Names<'static> {
+        Names { columns: None, joined: None, alias: [b"", b""], vars: &NO_VARS, unknown: b"Unknown name: ", late: true }
     }
 
     /// Where a column is in a row, by its name. None when no table has
@@ -892,6 +983,7 @@ impl Parser<'_, '_> {
                         self.columns = true;
                         self.add(Node::Column(column))
                     }
+                    (None, _) if self.names.late && word.len() <= VAR_NAME => self.add(Node::Name(FixedStr::from_bytes(word))),
                     (None, Some(value)) => self.add(Node::Value(value)),
                     (None, None) => Err(error(self.names.unknown, word)),
                 }
@@ -1195,5 +1287,63 @@ mod tests {
         assert_eq!(vars.get(b"v3"), Some(Value::Int(-3)));
         assert!(!Vars::new().set(&[b'x'; VAR_NAME + 1], Value::Null));
         assert_eq!(vars.each().count(), MAX_VARS);
+    }
+
+    #[test]
+    fn a_name_is_looked_up_when_the_expression_is_worked_out() {
+        let mut lexer = Lexer::new(b"total * 2 + bonus");
+        // no name has a value yet
+        let read = parse(&mut lexer, Names::late()).unwrap();
+        let mut vars = Vars::new();
+        assert_eq!(read.eval_with(&[], &vars).unwrap_err().bytes(), b"Unknown name: total");
+        vars.set(b"total", Value::Int(20));
+        vars.set(b"bonus", Value::Int(2));
+        assert_eq!(read.eval_with(&[], &vars).unwrap(), Value::Int(42));
+        // read once, worked out again
+        vars.set(b"total", Value::Int(1));
+        assert_eq!(read.eval_with(&[], &vars).unwrap(), Value::Int(4));
+        // the names of the clock too, and a dotted name of a row
+        vars.clock = Some(0);
+        let mut lexer = Lexer::new(b"today");
+        assert_eq!(parse(&mut lexer, Names::late()).unwrap().eval_with(&[], &vars).unwrap(), vars.get(b"today").unwrap());
+        vars.set(b"row.amount", Value::Int(7));
+        let mut lexer = Lexer::new(b"row.amount > 5 and not missing is null");
+        assert_eq!(parse(&mut lexer, Names::late()).unwrap().holds_with(&[], &vars).unwrap_err().bytes(), b"Unknown name: missing");
+        // without names, a name is unknown
+        let mut lexer = Lexer::new(b"total");
+        assert_eq!(parse(&mut lexer, Names::late()).unwrap().eval(&[]).unwrap_err().bytes(), b"Unknown name: total");
+        // what is wrong with the form is still told while reading
+        let mut lexer = Lexer::new(b"total * ");
+        assert!(parse(&mut lexer, Names::late()).is_err());
+    }
+
+    #[test]
+    fn expressions_are_kept_in_a_pool_and_worked_out_from_it() {
+        let mut pool = Pool::new();
+        let mut vars = Vars::new();
+        vars.set(b"n", Value::Int(3));
+        let mut kept = Vec::new();
+        for text in ["n + 1", "n in (1, 2, 3) or n > 9", "round(n / 2, 1)", "'a' + n"] {
+            let mut lexer = Lexer::new(text.as_bytes());
+            let read = parse(&mut lexer, Names::late()).unwrap();
+            kept.push((pool.keep(&read).unwrap(), read));
+        }
+        // each gives from the pool what it gives alone
+        for (kept, read) in &kept {
+            assert_eq!(pool.eval(*kept, &vars).unwrap(), read.eval_with(&[], &vars).unwrap());
+        }
+        assert_eq!(pool.eval(kept[0].0, &vars).unwrap(), Value::Int(4));
+        assert!(pool.holds(kept[1].0, &vars).unwrap());
+        // a pool that is full says so, and is whole
+        let mut lexer = Lexer::new(b"n + 1");
+        let small = parse(&mut lexer, Names::late()).unwrap();
+        let before = pool.left();
+        assert!(before < POOL);
+        while pool.keep(&small).is_some() {}
+        assert!(pool.left() < 3);
+        assert_eq!(pool.eval(kept[0].0, &vars).unwrap(), Value::Int(4));
+        assert_eq!(pool.eval(kept[3].0, &vars).unwrap(), Value::text(b"a3"));
+        pool.clear();
+        assert_eq!(pool.left(), POOL);
     }
 }
