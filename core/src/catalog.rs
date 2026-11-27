@@ -15,7 +15,7 @@ use crate::sql::{row_from, Kind, Message, Row, Schema, Source, TableDef, Value, 
 use crate::theme::THEMES;
 
 /// The tables that are views of the live state of the system.
-pub const TABLES: [TableDef; 9] = [
+pub const TABLES: [TableDef; 10] = [
     TableDef { name: b"tables", columns: &[b"name", b"kind", b"columns", b"rows", b"about"], kinds: b"ttiit", about: b"all tables: views of the system, stored tables" },
     TableDef { name: b"columns", columns: &[b"table_name", b"position", b"name", b"type", b"rules", b"index"], kinds: b"titttt", about: b"the columns of every table" },
     TableDef { name: b"tasks", columns: &[b"id", b"name", b"state", b"ran_ms", b"share"], kinds: b"ittii", about: b"what runs, and its share of the processor in %" },
@@ -25,7 +25,13 @@ pub const TABLES: [TableDef; 9] = [
     TableDef { name: b"city", columns: &[b"plot", b"block", b"height", b"lit"], kinds: b"ttit", about: b"what the city shows" },
     TableDef { name: b"commands", columns: &[b"name"], kinds: b"t", about: b"the commands of the prompt" },
     TableDef { name: b"machine", columns: &[b"item", b"value"], kinds: b"tt", about: b"processor, firmware, screen, disk" },
+    TableDef { name: JOBS, columns: &[b"job", b"program", b"state", b"by", b"began", b"statements"], kinds: b"itttti", about: b"the jobs: programs run turn by turn" },
 ];
+
+/// The view of the jobs. It is the one view that has no block in the
+/// `data` plot of the city, which has nine places: a job that runs is a
+/// block among what runs.
+pub const JOBS: &[u8] = b"jobs";
 
 // A cell of a result holds a `Text`: what says what a view is must fit.
 const _: () = {
@@ -309,6 +315,12 @@ impl System {
                 visit(&row(&[text(b"clock"), Value::Text(clock)]));
                 visit(&row(&[text(b"disk"), text(m.disk.bytes())]));
                 visit(&row(&[text(b"stored tables"), Value::Text(kept(self))]));
+            }
+            9 => {
+                for job in self.jobs.list().iter().filter(|job| job.number != 0) {
+                    let began = job.began.map_or(Value::Null, |seconds| Value::Text(crate::clock::Moment::at(seconds).text()));
+                    visit(&row(&[number(job.number as u64), text(job.program.bytes()), text(crate::jobs::word(job.state)), text(crate::jobs::by(job.by)), began, number(job.statements)]));
+                }
             }
             _ => {}
         }

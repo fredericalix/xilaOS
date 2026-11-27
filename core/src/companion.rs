@@ -1248,9 +1248,19 @@ mod tests {
         assert_eq!(results(&sys)[..2], ["error: That command needs the machine itself: it was not run."; 2]);
         assert_eq!(results(&sys)[2..], ["error: One line at a time, and no block: if, for, while and program are not for you."; 2]);
         assert!(sys.request.is_none() && sys.mood.name() == b"auto" && !sys.reboot);
+        // jobs are not its own to start or stop: nothing it starts may outlive its answer
+        crate::machine::tests::rooms(&mut sys, 3);
+        run_line(&mut sys, "program report");
+        run_line(&mut sys, "say 1");
+        run_line(&mut sys, "end");
+        assert!(run_line(&mut sys, "submit report").0);
+        heard(&mut sys, Ok((200, &answer(None, &["run:submit report", "run:job 1 end", "run:job 1 hold", "run:job 1 release"]))));
+        assert_eq!(results(&sys), ["error: Jobs are not the companion's to start or stop."; 4]);
+        assert_eq!(sys.jobs.list().iter().filter(|job| job.number != 0).count(), 1);
+        assert_eq!(sys.jobs.list()[0].state, crate::jobs::State::Ready);
         // all of it is in the table of its acts, as failed
         let all = acts(&mut sys);
-        assert_eq!(all.len(), refused.len() + 4);
+        assert_eq!(all.len(), refused.len() + 8);
         assert!(all.iter().all(|act| act.1 == "failed"));
         // the same commands are still the user's
         sys.companion.stage = Stage::Idle;

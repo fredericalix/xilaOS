@@ -79,7 +79,7 @@ pub fn scene(sys: &System) -> [Plot; PLOTS] {
 
     // The data: one block per table, as tall as it has columns, lit for a
     // few seconds when a query reads it.
-    for (index, table) in crate::catalog::TABLES.iter().enumerate() {
+    for (index, table) in crate::catalog::TABLES.iter().enumerate().filter(|(_, table)| table.name != crate::catalog::JOBS) {
         let read = sys.queried[index];
         plots[DATA].add(table.name, 4 + 4 * table.columns.len() as u64, read != 0 && sys.ticks.saturating_sub(read) < 300);
     }
@@ -102,6 +102,12 @@ pub fn scene(sys: &System) -> [Plot; PLOTS] {
     for (id, task) in sys.tasks.iter().enumerate().filter(|(_, task)| task.used) {
         let share = sys.cpu_share[id] as u64;
         plots[RUNNING].add(task.name.bytes(), 5 + share * 35 / 1000, share >= 20);
+    }
+
+    // a job that has not ended is among what runs: as tall as what it has
+    // run, lit while it runs
+    for job in sys.jobs.list().iter().filter(|job| job.number != 0 && !job.ended()) {
+        plots[RUNNING].add(job.program.bytes(), 5 + (job.statements / 500).min(35), job.state == crate::jobs::State::Ready);
     }
 
     if sys.machine.serial {
@@ -525,5 +531,32 @@ mod tests {
         // the hue of the running plot is somewhere in the picture
         let green = mix(DAY.colors[role::HUE as usize + RUNNING], 0xffffff, 40);
         assert!(pixels.contains(&green));
+    }
+
+    #[test]
+    fn a_job_that_runs_is_a_block_among_what_runs() {
+        let mut sys = Box::new(System::new());
+        crate::machine::tests::rooms(&mut sys, 3);
+        let blocks = |sys: &System, plot: usize| scene(sys)[plot].blocks.iter().filter(|block| block.used).map(|block| String::from_utf8_lossy(block.name.bytes()).into_owned()).collect::<Vec<_>>();
+        let before = blocks(&sys, RUNNING);
+        for line in ["program spins", "while 1 = 1", "end", "end", "submit spins"] {
+            crate::shell::exec(&mut sys, line.as_bytes(), &mut crate::shell::tests::Lines::default());
+        }
+        let mut with = before.clone();
+        with.push("spins".to_string());
+        assert_eq!(blocks(&sys, RUNNING), with);
+        // it grows with what it runs, and is lit while it does
+        let low = scene(&sys)[RUNNING].blocks[before.len()];
+        for _ in 0..20_000 {
+            crate::jobs::work(&mut sys, &mut crate::shell::tests::Lines::default(), &mut || true);
+        }
+        let high = scene(&sys)[RUNNING].blocks[before.len()];
+        assert!(high.height > low.height && high.lit);
+        // ended, it is no longer there
+        crate::shell::exec(&mut sys, b"job 1 end", &mut crate::shell::tests::Lines::default());
+        assert_eq!(blocks(&sys, RUNNING), before);
+        // the view of the jobs takes no block among the data: nine places, nine blocks
+        assert_eq!(blocks(&sys, DATA).len(), 9);
+        assert!(!blocks(&sys, DATA).contains(&"jobs".to_string()));
     }
 }

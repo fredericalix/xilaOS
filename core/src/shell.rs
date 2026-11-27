@@ -1157,11 +1157,11 @@ impl System {
 }
 
 /// Names of the commands, for completion.
-pub const NAMES: [&[u8]; 54] = [
+pub const NAMES: [&[u8]; 57] = [
     b"about", b"alter", b"ask", b"cancel", b"city", b"clear", b"companion", b"create", b"delete", b"devices", b"disk", b"display", b"drop", b"else", b"end", b"every", b"for", b"help",
-    b"if", b"insert", b"install", b"key", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"peek", b"program", b"programs", b"qr", b"reboot",
+    b"if", b"insert", b"install", b"job", b"jobs", b"key", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"peek", b"program", b"programs", b"qr", b"reboot",
     b"remote", b"return",
-    b"run", b"say", b"screen", b"select", b"show", b"spin", b"stop", b"tables", b"tasks", b"theme", b"time", b"unlisten", b"update",
+    b"run", b"say", b"screen", b"select", b"show", b"spin", b"stop", b"submit", b"tables", b"tasks", b"theme", b"time", b"unlisten", b"update",
     b"uptime", b"vars", b"web", b"while",
 ];
 
@@ -1229,7 +1229,7 @@ const HELP_COMMANDS: [&[u8]; 38] = [
     b"   reboot                     - Restarts the machine.",
 ];
 
-const HELP_LANGUAGE: [&[u8]; 23] = [
+const HELP_LANGUAGE: [&[u8]; 26] = [
     b"XilaScript: one statement per line, at the prompt or in a program.",
     b"   let name = value           - Keeps a value: let total = select sum(n) from t",
     b"   say value                  - Shows a value: say 'Total: ' + total",
@@ -1240,6 +1240,9 @@ const HELP_LANGUAGE: [&[u8]; 23] = [
     b"   end                        - Closes if, while, for or program.",
     b"   program name ... end       - Keeps lines under a name, in the database.",
     b"   run name                   - Runs a program. Its name alone does too.",
+    b"   submit name                - Runs it as a job: the prompt does not wait.",
+    b"   jobs                       - Lists the jobs. job 3 shows one, what it said.",
+    b"   job 3 end                  - Stops a job. Also: job 3 hold, job 3 release.",
     b"   on insert into t ... end   - Runs when a row is added. Also: on update t,",
     b"                                on delete from t, on notify channel.",
     b"   every 5 minutes ... end    - Runs again and again: seconds, hours, days.",
@@ -1347,6 +1350,9 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
         b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"program") => crate::lang::remove(sys, trim(split_word(arg).1), out),
         b"alter" | b"create" | b"drop" | b"insert" | b"update" | b"delete" => change(sys, line, out),
         b"programs" => crate::lang::list(sys, out),
+        b"submit" => submit(sys, arg, out),
+        b"jobs" => jobs(sys, out),
+        b"job" => job(sys, arg, out),
         // a table as the statement that would make it; `show table` alone is a program of that name
         b"show" if split_word(arg).0.eq_ignore_ascii_case(b"table") && !trim(split_word(arg).1).is_empty() => crate::change::written(&sys.db, trim(split_word(arg).1), out),
         b"show" => crate::lang::show(sys, arg, out),
@@ -2063,6 +2069,137 @@ fn qr(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     sys.note = note;
     sys.noting = true;
     ok
+}
+
+/// What is refused to the companion about jobs: nothing it starts may
+/// outlive its answer, and those of the user are not its own to stop.
+fn not_its_jobs(sys: &System, out: &mut dyn Out) -> bool {
+    if sys.acting {
+        out.line(Style::Error, b"Jobs are not the companion's to start or stop.");
+    }
+    sys.acting
+}
+
+/// `submit name`: runs a program as a job nobody waits for.
+fn submit(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    if not_its_jobs(sys, out) {
+        return false;
+    }
+    if arg.is_empty() || arg.contains(&b' ') {
+        out.line(Style::Error, b"Type submit and the name of a program: submit report");
+        return false;
+    }
+    match crate::jobs::begin(sys, crate::jobs::What::Program(arg), crate::jobs::Watch::Nobody, out) {
+        Ok(number) => {
+            let mut line = FixedStr::<COLS>::new();
+            let _ = write!(line, "Job {number} submitted: {}.", Text::from_bytes(arg));
+            out.line(Style::Done, line.bytes());
+            true
+        }
+        Err(message) => {
+            // nothing more to say when why was said already
+            if !message.is_empty() {
+                out.line(Style::Error, message.bytes());
+            }
+            false
+        }
+    }
+}
+
+/// When a job began, as a time of the day, if the machine tells the time.
+fn began(job: &crate::jobs::Job) -> Text {
+    job.began.map_or(Text::new(), |seconds| Text::from_bytes(&crate::clock::Moment::at(seconds).text().bytes()[11..]))
+}
+
+/// `jobs`: the jobs that run, and those that ended and are still listed.
+fn jobs(sys: &mut System, out: &mut dyn Out) -> bool {
+    let mut listed = Table::new(b"jobs", &[b"job", b"program", b"state", b"by", b"since", b"statements"]);
+    // in the order they began
+    let mut numbers = [0u32; crate::jobs::PLACES + 1];
+    for (number, job) in numbers.iter_mut().zip(sys.jobs.list()) {
+        *number = job.number;
+    }
+    numbers.sort_unstable();
+    for number in numbers.into_iter().filter(|number| *number != 0) {
+        let Some(job) = sys.jobs.list().iter().find(|job| job.number == number) else {
+            continue;
+        };
+        let (mut shown, mut statements, mut command) = (Text::new(), Text::new(), Text::new());
+        let _ = write!(shown, "{number}");
+        let _ = write!(statements, "{}", job.statements);
+        let _ = write!(command, "job {number}");
+        listed.row_to(&[shown.bytes(), job.program.bytes(), crate::jobs::word(job.state), crate::jobs::by(job.by), began(job).bytes(), statements.bytes()], command.bytes());
+    }
+    if listed.rows == 0 {
+        out.line(Style::Out, b"No job yet. submit name runs a program as one.");
+        return true;
+    }
+    show(sys, out, &listed);
+    true
+}
+
+/// `job 3`: one job, and what it said. `job 3 end`, `hold`, `release`.
+fn job(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
+    let (number, verb) = split_word(arg);
+    let (Some(number), true) = (parse_number(number), matches!(trim(verb), b"" | b"end" | b"hold" | b"release")) else {
+        out.line(Style::Error, b"Type job and its number: job 3, job 3 end, job 3 hold, job 3 release");
+        return false;
+    };
+    let number = number as u32;
+    let done: Result<&str, crate::sql::Message> = match trim(verb) {
+        b"" => {
+            return match crate::jobs::find(sys, number) {
+                Ok(at) => {
+                    let job = &sys.jobs.list()[at];
+                    let mut line = FixedStr::<COLS>::new();
+                    let _ = write!(line, "Job {number} is {}: {}", Text::from_bytes(crate::jobs::word(job.state)), job.program);
+                    out.line(Style::Out, line.bytes());
+                    line.clear();
+                    let from: &str = match job.by {
+                        crate::events::SCREEN => "at the screen",
+                        crate::events::SERIAL => "at the serial port",
+                        crate::events::NETWORK => "at the network prompt",
+                        _ => "by a program",
+                    };
+                    let _ = write!(line, "Started {from}");
+                    if job.began.is_some() {
+                        let _ = write!(line, " at {}", began(job));
+                    }
+                    let _ = write!(line, ". {} statements run.", job.statements);
+                    out.line(Style::Out, line.bytes());
+                    if job.said.dropped() > 0 {
+                        line.clear();
+                        let _ = write!(line, "({} lines it said before these are no longer kept.)", job.said.dropped());
+                        out.line(Style::Out, line.bytes());
+                    }
+                    for said in job.said.lines() {
+                        out.line(Style::Out, said);
+                    }
+                    true
+                }
+                Err(message) => {
+                    out.line(Style::Error, message.bytes());
+                    false
+                }
+            };
+        }
+        _ if not_its_jobs(sys, out) => return false,
+        b"end" => crate::jobs::end(sys, number).map(|_| "is stopped."),
+        b"hold" => crate::jobs::hold(sys, number).map(|_| "is held."),
+        _ => crate::jobs::release(sys, number).map(|_| "goes on."),
+    };
+    match done {
+        Ok(what) => {
+            let mut line = FixedStr::<COLS>::new();
+            let _ = write!(line, "Job {number} {what}");
+            out.line(Style::Done, line.bytes());
+            true
+        }
+        Err(message) => {
+            out.line(Style::Error, message.bytes());
+            false
+        }
+    }
 }
 
 /// Tells whether something that was said is an error, on its way to
@@ -3981,14 +4118,14 @@ pub mod tests {
         let (ok, out) = run_line(&mut sys, "tables");
         assert!(ok);
         assert_eq!(out.lines[0], "     name      kind    rows  about");
-        assert_eq!(out.lines[1], " [1] tables    system  9     all tables: views of the system, stored tables");
-        assert_eq!(out.lines.len(), 10);
+        assert_eq!(out.lines[1], " [1] tables    system  10    all tables: views of the system, stored tables");
+        assert_eq!(out.lines.len(), 11);
         let (_, out) = run_line(&mut sys, "8"); // the table of the commands
         assert_eq!(out.lines[..2], ["   name", "   about"]);
         // more commands than a result shows
         assert_eq!(out.lines.len(), 1 + TABLE_ROWS + 1);
         assert_eq!(out.lines[TABLE_ROWS + 1], format!("{} more rows are not shown. Narrow the query with WHERE.", NAMES.len() - TABLE_ROWS));
-        assert_eq!(run_line(&mut sys, "select count(*) from tables").1.lines[1], "   9");
+        assert_eq!(run_line(&mut sys, "select count(*) from tables").1.lines[1], "   10");
     }
 
     #[test]
@@ -4056,9 +4193,9 @@ pub mod tests {
         assert!(!ok);
         assert_eq!((out.lines, out.errors), (vec!["Column title takes a 'text' between quotes.".to_string()], 1));
         let (_, out) = run_line(&mut sys, "tables");
-        assert_eq!(out.lines[10].trim_end(), "[10] notes     stored  1");
+        assert_eq!(out.lines[11].trim_end(), "[11] notes     stored  1");
         sys.ticks = 800;
-        assert_eq!(run_line(&mut sys, "10").1.lines, ["   id  title  stars", "   1   first  3"]);
+        assert_eq!(run_line(&mut sys, "11").1.lines, ["   id  title  stars", "   1   first  3"]);
         assert_eq!(sys.db.tables()[0].read_at, 800);
         assert_eq!(run_line(&mut sys, "update notes set stars = 5").1.lines, ["1 row changed in notes."]);
         assert_eq!(run_line(&mut sys, "delete from notes").1.lines, ["1 row removed from notes."]);
@@ -4165,5 +4302,74 @@ pub mod tests {
         let (n, common) = complete(b"st");
         assert_eq!((n, common.bytes()), (1, &b"stop "[..]));
         assert_eq!(complete(b"zz").0, 0);
+    }
+
+    #[test]
+    fn jobs_are_started_listed_shown_and_ended() {
+        let mut sys = Box::new(System::new());
+        let said = |sys: &mut System, line: &str| run_line(sys, line).1.lines;
+        // a system that was given no rooms has no jobs
+        assert_eq!(said(&mut sys, "jobs"), ["No job yet. submit name runs a program as one."]);
+        run_line(&mut sys, "program count");
+        for line in ["let n = 0", "while n < 40", "let n = n + 1", "say n", "end", "end"] {
+            run_line(&mut sys, line);
+        }
+        let (ok, out) = run_line(&mut sys, "submit count");
+        assert_eq!((ok, out.lines), (false, vec!["This machine has no room for jobs.".to_string()]));
+        crate::machine::tests::rooms(&mut sys, crate::jobs::PLACES + 1);
+        // what is typed wrong
+        assert_eq!(said(&mut sys, "submit"), ["Type submit and the name of a program: submit report"]);
+        assert_eq!(said(&mut sys, "submit nowhere"), ["Unknown program: nowhere. Type programs to list them."]);
+        assert_eq!(said(&mut sys, "job"), ["Type job and its number: job 3, job 3 end, job 3 hold, job 3 release"]);
+        assert_eq!(said(&mut sys, "job 9"), ["There is no job 9. Type jobs to list them."]);
+        // submitted: the prompt has its answer at once, and the job runs when it is given turns
+        assert_eq!(run_line(&mut sys, "submit count").1.lines, ["Job 1 submitted: count."]);
+        assert_eq!(said(&mut sys, "submit count"), ["Job 2 submitted: count."]);
+        for _ in 0..30 {
+            crate::jobs::work(&mut sys, &mut Lines::default(), &mut || true);
+        }
+        let listed = said(&mut sys, "jobs");
+        assert_eq!(listed[0].split_whitespace().collect::<Vec<_>>(), ["job", "program", "state", "by", "since", "statements"]);
+        assert_eq!(listed[1].split_whitespace().collect::<Vec<_>>()[..5], ["[1]", "1", "count", "running", "screen"]);
+        assert_eq!(listed.len(), 3);
+        // the number of a row shows that job
+        let shown = said(&mut sys, "2");
+        assert_eq!(shown[0], "Job 2 is running: count");
+        assert!(shown[1].starts_with("Started at the screen. ") && shown[1].ends_with(" statements run."), "{shown:?}");
+        assert_eq!(shown[2], "1");
+        // held, released, ended
+        assert_eq!(said(&mut sys, "job 2 hold"), ["Job 2 is held."]);
+        assert_eq!(said(&mut sys, "job 2")[0], "Job 2 is held: count");
+        assert_eq!(said(&mut sys, "job 2 hold"), ["Job 2 is held already."]);
+        assert_eq!(said(&mut sys, "job 2 release"), ["Job 2 goes on."]);
+        assert_eq!(said(&mut sys, "job 2 end"), ["Job 2 is stopped."]);
+        let (ok, out) = run_line(&mut sys, "job 2 end");
+        assert_eq!((ok, out.lines), (false, vec!["Job 2 has ended.".to_string()]));
+        assert_eq!(said(&mut sys, "job 2 dance"), ["Type job and its number: job 3, job 3 end, job 3 hold, job 3 release"]);
+        // the other runs to its end: its last lines are kept, and how it went
+        for _ in 0..1000 {
+            crate::jobs::work(&mut sys, &mut Lines::default(), &mut || true);
+        }
+        let shown = said(&mut sys, "job 1");
+        assert_eq!(shown[0], "Job 1 is done: count");
+        assert_eq!((shown.len(), shown.last().unwrap().as_str()), (42, "40"));
+        assert_eq!(said(&mut sys, "select job, went from job_log order by job"), ["   job  went", "   1    done", "   2    stopped"]);
+        // SQL sees them as a view
+        assert_eq!(said(&mut sys, "select job, program, state, by from jobs where state = 'stopped'"), ["   job  program  state    by", "   2    count    stopped  screen"]);
+        assert_eq!(said(&mut sys, "select count(*) from jobs"), ["   count", "   2"]);
+        // a job is who started it: from the network, what is refused there is refused to it
+        run_line(&mut sys, "program opens");
+        run_line(&mut sys, "web on");
+        run_line(&mut sys, "end");
+        sys.session = crate::events::NETWORK;
+        assert_eq!(said(&mut sys, "submit opens"), ["Job 3 submitted: opens."]);
+        sys.session = crate::events::SCREEN;
+        for _ in 0..10 {
+            crate::jobs::work(&mut sys, &mut Lines::default(), &mut || true);
+        }
+        let shown = said(&mut sys, "job 3");
+        assert_eq!(shown[0], "Job 3 is failed: opens");
+        assert_eq!(shown[1..], ["Started at the network prompt. 1 statements run.", "web on is typed at the machine itself.", "Stopped at line 1 of opens."]);
+        assert!(sys.web.code().is_none());
     }
 }

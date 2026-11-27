@@ -237,6 +237,28 @@ pub(crate) fn begin_system(sys: &mut System, place: usize, program: &[u8], depth
     (job.began, job.own, job.system, job.depth, job.vars) = (names.clock, true, true, depth, names);
 }
 
+/// A state as it is shown.
+pub fn word(state: State) -> &'static [u8] {
+    match state {
+        State::Ready => b"running",
+        State::Waiting => b"waiting",
+        State::Held => b"held",
+        State::Done => b"done",
+        State::Failed => b"failed",
+        State::Stopped => b"stopped",
+    }
+}
+
+/// The session a job was started from, as it is shown.
+pub fn by(session: usize) -> &'static [u8] {
+    match session {
+        crate::events::SCREEN => b"screen",
+        crate::events::SERIAL => b"serial",
+        crate::events::NETWORK => b"network",
+        _ => b"program",
+    }
+}
+
 fn missing(number: u32) -> Message {
     let mut message = Message::new();
     let _ = write!(message, "There is no job {number}. Type jobs to list them.");
@@ -463,12 +485,7 @@ fn record(sys: &mut System, at: usize) -> bool {
         },
     };
     let job = &sys.jobs.list[at];
-    let by: &[u8] = match job.by {
-        crate::events::SCREEN => b"screen",
-        crate::events::SERIAL => b"serial",
-        crate::events::NETWORK => b"network",
-        _ => b"program",
-    };
+    let by = by(job.by);
     // how it went: where it stopped is the last thing it said
     let mut went = Text::new();
     match job.state {
