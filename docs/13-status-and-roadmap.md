@@ -570,6 +570,11 @@ its cursors, who started it, and a state: ready, running, waiting
   They keep the limits that stop a program nobody watches (100 000
   statements, 10 000 rounds of a `while`); a job a person started
   loses them, since it can be stopped.
+- **For a first form** (the author's choice when step 2 was planned,
+  27 November 2026): what the prompt over the network and the
+  companion run stays as it was after step 1, run at once to its
+  end with the limits, the system held meanwhile. For long work from
+  the network: `submit`. What follows of them is for later.
 - **What the companion runs** (`run`) is a job it waits for before it
   answers the model, recorded in `acts` as today. What holds it stays
   whole: its job keeps the limits of a program nobody watches; a
@@ -596,7 +601,9 @@ run by themselves are recorded is for the design of scheduling. The
 rows are written as those of `acts` are, not through `change.rs`, and
 nobody is told of them, so that no program starts on its own record.
 `jobs` is a tenth view, and the `data` plot of the city has room for
-nine: where it shows there is decided before step 2.
+nine: the author decided on 27 November 2026 that it takes no block
+there. A job is a block of the `tasks` plot, since it is what runs,
+as high as what it has run.
 
 **The steps.** Each is merged when its unit tests and its checks
 pass.
@@ -742,7 +749,8 @@ ways the emulator never shows.
 - `insert into t select ...`, a `select` inside a calculation, loops
   over more than 32 rows of what is sorted, grouped or joined; a loop
   that goes by an index when its `select` names one (it reads the
-  whole table by `id` today).
+  whole table by `id` today): with batch work, the author decided,
+  when large tables come and are measured.
 - The values of before in `on update` and `on delete`.
 - More rhythms from the clock: `every monday at 9:00`, `every month`.
 - Screens in characters to enter data.
@@ -797,8 +805,8 @@ author's agreement. The order that was agreed:
   storage, or both.
 - One user, or several.
 - How a HyperCard-like is driven with the keyboard alone.
-- Where a tenth system view goes: the `data` plot of the city has
-  room for nine.
+- Where a system view goes that is not `jobs` (which shows in the
+  `tasks` plot): the `data` plot of the city has room for nine.
 
 ### Set aside
 
