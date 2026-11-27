@@ -345,6 +345,12 @@ The key goes out only where the way is sealed. A place that starts
 with `http://` gets no key, and needs none to be asked: that is how
 the checks speak to a made-up model on the development machine.
 
+Sealed is not the same as trusted: the key goes to whatever `https://`
+place the row names. The companion cannot change that row, but whoever
+types at a prompt can, the prompt over the network included: while
+`remote on` is open, whoever has its code can have the key sent to a
+server of their own. `remote off` closes that way.
+
 ## How it is built
 
 `core/src/companion.rs` has no network in it. `ask` takes a question,
@@ -418,8 +424,9 @@ it.
 
 On a real machine it was tried once, on 27 November 2026, on the
 T430: asked by a program, it read a table, made one, kept a fact, was
-refused `web on`, and was stopped and had back. Its questions went
-through a relay on the development machine, which held the key: a key
-kept on the T430 itself, and `ask` typed there with an answer, are
-not tried yet. [Status and roadmap](13-status-and-roadmap.md) says
+refused `web on`, and was stopped and had back. Its questions first
+went through a relay on the development machine, which held the key;
+then the key was kept on the T430 itself, which asked the model's
+server through TLS. `ask` typed there with an answer is not tried
+yet. [Status and roadmap](13-status-and-roadmap.md) says
 how.

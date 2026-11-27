@@ -44,10 +44,10 @@ were also tried on the real machine.
 | Names (DNS): `net name`, `net names`, `net get` by name | yes | yes, on 27 November 2026, asked of the name server the home router named; `net names` not tried |
 | TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | yes, on 27 November 2026: three servers of the Internet, with what its processor draws and the time its clock tells |
 | HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | `net get` only, on 27 November 2026; `net post` not tried |
-| Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | not tried |
+| Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | yes, on 27 November 2026: a key kept, used, and not among the tables the companion listed; kept between starts not tried |
 | What happens to the machine said as events: `start`, `network`, `disk`, `tasks`, `memory` | yes; `disk` and `memory` by unit tests only | not tried |
 | The companion asked by programs (`ask` in an `on` or `every` program), which is how it reacts to what happens | yes | yes, on 27 November 2026: an `on notify` program |
-| The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | yes, on 27 November 2026, asked by a program and through a relay (see below); `ask` typed there, and the key, not tried |
+| The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | yes, on 27 November 2026, asked by a program: through a relay first, then with a key kept there, through TLS (see below); `ask` typed there with an answer not tried |
 | The companion acts (`run`: one line at the prompt, written in `acts`), remembers (`remember`, the table `remembered`) and is stopped (`companion off`, kept between starts); what is refused to it | yes, against a made-up model and a real one; the refusals against the made-up one | yes, on 27 November 2026, through the relay; of the refusals only `web on`, which the real model tried; kept between starts not tried |
 | `install`, `disk erase`, `remote on`, `web on` refused to a program that runs by itself; `disk erase yes` refused to the network session | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
@@ -274,16 +274,18 @@ read a table (three `select`, the sum right), made a table and filled
 it (`run`, written in `acts`), kept a fact and said it again at the
 next question, tried `web on` when told to and was refused, declined
 to empty `acts`, and was stopped and had back (`companion off`, `on`).
-Seventeen calls in all. What that leaves untried is the last step of
-the real way: the key kept on the T430 and sent by it through TLS
-(a page of the model's server was read through TLS there, without a
-key).
+Seventeen calls in all. Then the author had the key put on the T430
+after all, from the development machine: a program written through
+the network prompt ran `key set`, which the prompt itself refuses, so
+the key crossed the local network in clear once. With `companions`
+pointing at the model's own server again, a question went from the
+T430 through TLS with the key kept there, and was answered (three
+calls, a `select` among them).
 
 What still waits for the T430, since it cannot be done over the
-network or was not tried: a key kept there (`key set`) and the
-companion asked with it, `ask` typed at the machine and on the
-companion's screen with an answer, what happens to the machine said
-as events, `net post`, the dead keys on the real keyboard, and a
+network or was not tried: the key still there after a restart, `ask`
+typed at the machine and on the companion's screen with an answer,
+what happens to the machine said as events, `net post`, the dead keys on the real keyboard, and a
 power cut while tables with indexes change.
 
 ### The companion

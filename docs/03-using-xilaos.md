@@ -326,6 +326,12 @@ the pages for browsers nor the companion can show a key. From the
 prompt over the network `key set` is refused, since the key would have
 crossed the network in clear to get there.
 
+That refusal is for the line typed there, not for a program written
+there: a program that runs by itself may run `key set`, and its lines
+cross the network in clear as they are written. The author's T430 got
+its key that way on 27 November 2026, by the author's choice, rather
+than by 73 characters typed at its keyboard.
+
 What this is not: a vault. The disk is not encrypted, and a key is
 written on it as it was typed, for whoever reads the disk from another
 system. On the serial port, the line that sets a key is echoed like
