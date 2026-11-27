@@ -53,7 +53,7 @@ were also tried on the real machine.
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
-| `install from` (TFTP), `tools/netboot.py` | yes | yes |
+| `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
 about 300 system checks. On 27 November 2026: about 36,000 lines, 321
@@ -222,8 +222,8 @@ designed with the author before it is built.
 
 ### The phases under way
 
-Chosen by the author on 23 November 2026. The T430 is out of reach for
-now, so these phases are the ones that can be built and verified in
+Chosen by the author on 23 November 2026. The T430 was out of reach
+then, so these phases are the ones that can be built and verified in
 QEMU alone; device interrupts and the drivers for recent PCs wait for
 a real machine. Each numbered step is merged once its unit tests and
 its checks in `tools/check.py` pass.
@@ -248,6 +248,13 @@ QEMU until it is tried there: the dead keys on the real keyboard,
 real disk, names asked of the name server of a real network, TLS
 with the keys its processor draws and the time its clock tells, and
 the companion as a whole.
+
+On 27 November 2026 the T430 was started from its network cable with
+the kernel of that day. Its system was replaced with the tables kept
+(`install from`, `install system`), then its whole disk was taken
+again (`install from`, `install n yes`): the volume it holds since was
+made in version 3 of the format. That is all that was done there that
+day: what the table above marks as not tried is still not tried.
 
 ### The companion
 
