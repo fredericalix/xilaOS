@@ -8,7 +8,9 @@
 //! use, where each is, how many rounds its loops went. Nothing of a run
 //! is on the stack of the task, so a run could be left between two
 //! instructions and taken up again; for now `lines` and `program` run
-//! to the end.
+//! to the end. One case is not so: a command that types a line (`qr`)
+//! runs it to its end from inside its own instruction, and that inner
+//! run is on the stack until it ends. Jobs will have to deal with it.
 //!
 //! The room is fixed: four units (lines typed, then programs three
 //! deep) and four cursors for loops over rows. A command that types at
@@ -393,8 +395,11 @@ fn step(sys: &mut System, unit: usize, instr: Instr, out: &mut dyn Out) -> Resul
                 // the name of a program is a command
                 call(sys, name, out)?;
             } else {
-                // inside a program, what a command did is not announced
-                let done = if sys.vm.programs > 0 { shell::command(sys, text, &mut Quiet(out)) } else { shell::command(sys, text, out) };
+                // In a program, what a command did is not announced. Lines
+                // typed say it, those included that a command of a program
+                // types (`qr`), which are a unit of their own.
+                let quiet = !sys.vm.calls[unit].program.is_empty();
+                let done = if quiet { shell::command(sys, text, &mut Quiet(out)) } else { shell::command(sys, text, out) };
                 if !done {
                     return Err(said());
                 }
@@ -648,5 +653,18 @@ mod tests {
         assert!(program(&mut sys, b"inner", &mut out));
         assert_eq!(out.lines, ["in"]);
         assert_eq!(block(&mut sys, &["outer"]), (true, texts(&["after"])));
+    }
+
+    #[test]
+    fn a_line_typed_by_a_command_of_a_program_says_what_it_does() {
+        let mut sys = books();
+        // qr keeps what the line it types says: all of it, as when it is typed at the prompt
+        typed(&mut sys, &["program noted", "qr insert into expenses values ('x', 1)", "end"]);
+        assert_eq!(block(&mut sys, &["noted"]), (true, vec![]));
+        assert_eq!(String::from_utf8_lossy(sys.note.bytes()), "1 row added to expenses, with id 4.\n");
+        // a program run that way is quiet as any program
+        typed(&mut sys, &["program quiet", "insert into expenses values ('y', 2)", "say 'done'", "end", "program outer", "qr quiet", "end"]);
+        assert!(block(&mut sys, &["outer"]).0);
+        assert_eq!(String::from_utf8_lossy(sys.note.bytes()), "done\n");
     }
 }

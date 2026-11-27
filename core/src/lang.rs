@@ -1496,4 +1496,26 @@ mod tests {
         assert_eq!(said(&mut sys, &["show old"]).len(), said(&mut sys, &["show two"]).len());
         assert!(type_lines(&mut sys, &["drop program old"]).0);
     }
+
+    #[test]
+    fn a_program_that_runs_by_itself_types_nothing_at_a_prompt() {
+        let mut sys = books();
+        // qr shows a code on the screen of who asked for it: a program that runs by itself is nobody there
+        type_lines(&mut sys, &["on insert into expenses", "say 'before'", "qr about", "say 'not here'", "end"]);
+        type_lines(&mut sys, &["insert into expenses values ('tea', 2)"]);
+        let mut log = Lines::default();
+        background(&mut sys, &mut log);
+        assert_eq!(
+            log.lines,
+            ["on_insert_expenses: before", "on_insert_expenses: qr is typed at a prompt: its code takes the screen of who asked for it.", "on_insert_expenses: Stopped at line 2 of on_insert_expenses."]
+        );
+        assert!(!sys.noting && sys.note.bytes().is_empty());
+        // and whatever gives such a session a line to run, it has no block to keep lines in
+        sys.session = BACKGROUND;
+        let mut out = Lines::default();
+        assert!(!shell::exec(&mut sys, b"if 1 = 1", &mut out));
+        assert!(shell::exec(&mut sys, b"say 'one line'", &mut out) && shell::exec(&mut sys, b"", &mut out));
+        assert_eq!(out.lines, ["A block is typed at a prompt, not by a program that runs by itself.", "one line"]);
+        assert!(sys.blocks.iter().all(|block| !block.open()));
+    }
 }

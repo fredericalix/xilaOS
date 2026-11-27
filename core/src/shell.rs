@@ -1264,8 +1264,18 @@ pub fn exec(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     let line = trim(line);
     // `now` and `today` are the moment the line was given
     sys.vars[sys.session].clock = sys.now();
+    // A program that runs by itself and the companion have no prompt, so no
+    // block to collect lines in: a command of theirs that types a line (`qr`)
+    // types one that is whole.
+    let Some(block) = sys.blocks.get(sys.session) else {
+        if crate::lang::opens(line) {
+            out.line(Style::Error, b"A block is typed at a prompt, not by a program that runs by itself.");
+            return false;
+        }
+        return line.is_empty() || crate::lang::line(sys, line, out);
+    };
     // the lines of a block wait for its end
-    if sys.blocks[sys.session].open() || crate::lang::opens(line) {
+    if block.open() || crate::lang::opens(line) {
         return crate::lang::typed(sys, line, out);
     }
     if line.is_empty() {
@@ -2032,6 +2042,13 @@ fn display(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
 fn qr(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     if arg.is_empty() {
         out.line(Style::Error, b"Type qr and a command, to read what it says with a phone: qr about");
+        return false;
+    }
+    // A code takes the screen until a key is pressed: that is for who typed
+    // the command. A program that runs by itself and the companion are
+    // nobody at a prompt.
+    if sys.session >= crate::events::SESSIONS {
+        out.line(Style::Error, b"qr is typed at a prompt: its code takes the screen of who asked for it.");
         return false;
     }
     let mut note = Note::new();

@@ -84,7 +84,9 @@ end
 
   What cannot be known before it runs is told when it runs, as a line that
   fails: a name that has no value, a table or a program that is not there,
-  what a command or a `select` says.
+  what a command or a `select` says. A name that has no value fails only
+  where its value is asked for: `if 1 = 1 or missing > 2` holds, since the
+  first side settles it.
 - **A line that starts with `#`** is a note.
 - **Every command of the prompt is a statement**, SQL included: `mood calm`,
   `insert into ...`, `notify ...` are written in a program as at the prompt.
@@ -314,6 +316,8 @@ model that can change the tables ([what holds it](14-the-companion.md#what-holds
   of a prompt; what must last goes into a table.
 - **They cannot `listen`**: only a prompt does. They can `notify`, and
   change tables, which may start other programs.
+- **`qr` is refused to them**: its code takes the screen of who asked
+  for it, and they are nobody at a prompt.
 - **Errors go to the log too**, with the line where the program stopped.
 - **What takes a disk or opens the machine is refused to them**:
   `install`, `disk erase`, `remote on` and `web on` are typed at the
@@ -349,8 +353,8 @@ model that can change the tables ([what holds it](14-the-companion.md#what-holds
 | Loops over rows, one inside the other | 4, the programs that are running counted together |
 | Calculations in one program | About ten values and operations a line for 48 lines (512 in all); beyond, the program is refused when it is kept: `Too many calculations for one program: split it in two.` |
 | Rounds of a `while` | 10 000, then it is stopped |
-| Statements run by one line typed at the prompt | 100 000, then it is stopped |
-| Programs that run programs | 3 deep |
+| Statements run by one line typed at the prompt | 100 000, then it is stopped: that is also how far a loop over a large table goes, one statement for each line of its body at each row |
+| Programs that run programs | 3 deep. A program run through a command that types a line (`qr name`) counts for two |
 | `on` programs | 16 |
 | `every` programs, `every day at` included | 8 |
 | Events waiting for the `on` programs | 16; more are lost, and the log says how many |
@@ -426,7 +430,8 @@ the table of programs, the programs that run by themselves), `code.rs`
   runs it. Everything it knows of a run is in `System::vm` (which units
   are in use, where each is, the rounds of its loops, the cursors), not on
   the stack of the task: a run can be left between two instructions, which
-  is what jobs will need. Its room is fixed: four units, for lines typed
+  is what jobs will need. One case is not so yet: a command that types a
+  line (`qr`) runs that line to its end from inside the instruction. Its room is fixed: four units, for lines typed
   and programs three deep, and four cursors. A command that types at the
   prompt from inside a program (`qr`) enters the machine again on the next
   unit.

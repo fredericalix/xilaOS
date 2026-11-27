@@ -59,8 +59,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 37,000 lines, 346
-unit tests, 513 system checks.
+about 300 system checks. On 27 November 2026: about 37,000 lines, 349
+unit tests, 515 system checks.
 
 ## Known limits of what is done
 
@@ -740,7 +740,9 @@ ways the emulator never shows.
 - Parameters, and names that belong to a program.
 - An editor, to change a program without typing it again.
 - `insert into t select ...`, a `select` inside a calculation, loops
-  over more than 32 rows.
+  over more than 32 rows of what is sorted, grouped or joined; a loop
+  that goes by an index when its `select` names one (it reads the
+  whole table by `id` today).
 - The values of before in `on update` and `on delete`.
 - More rhythms from the clock: `every monday at 9:00`, `every month`.
 - Screens in characters to enter data.

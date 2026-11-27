@@ -336,8 +336,9 @@ on, stack pointer, stack segment). The first switch to it simply
 cannot be stopped, nor can the calling task.
 
 Stacks are 256 KB because `xila-core` builds its results on the stack:
-a `SELECT` takes about 50 KB of tables and buffers, a running program
-12 KB for its lines.
+a `SELECT` takes about 50 KB of tables and buffers. A running program
+keeps its lines and its rows in the room of the virtual machine
+(`System::vm`), not there.
 
 ### The tasks that exist
 

@@ -31,10 +31,11 @@ use crate::text::{split_word, trim};
 pub(crate) const LOOPS: usize = 4;
 /// The `while` loops of one unit: each has its count of rounds.
 pub(crate) const WHILES: usize = MAX_LINES / 2;
-/// Instructions of one unit. No line makes more than two on average: a
-/// `while` three and its `end` one, a `for` two and its `end` two, an
-/// `else if` two.
-const INSTRS: usize = 2 * MAX_LINES + 2;
+/// Instructions of one unit. No line makes more than three (a `while`),
+/// so there is room for any 48 lines, those included that the prompt
+/// cannot type but a row of the table of programs can hold: blocks
+/// opened again and again and never closed. A jump still fits a byte.
+const INSTRS: usize = 3 * MAX_LINES;
 /// A jump that is not yet known to lead anywhere.
 const NOWHERE: u8 = u8::MAX;
 
@@ -427,5 +428,19 @@ mod tests {
         // more lines than a block takes
         let over: Vec<&str> = (0..49).map(|_| "say 1").collect();
         assert_eq!(fault(&over).0, 49);
+    }
+
+    #[test]
+    fn lines_that_open_blocks_and_never_close_them_are_a_fault_not_a_crash() {
+        // what the prompt cannot type, but a row of the table of programs can hold
+        for opener in ["while 1 = 1", "if 1 = 1", "for r in select 1"] {
+            let many: Vec<&str> = (0..48).map(|_| opener).collect();
+            let (line, message) = fault(&many);
+            assert!(line >= 1 && line <= 48, "{opener}");
+            assert!(message == "This block has no end." || message == "Loops over rows go four deep at most.", "{opener}: {message}");
+        }
+        let mut mixed: Vec<&str> = (0..47).map(|_| "while 1 = 1").collect();
+        mixed.push("else if 1 = 1");
+        assert_eq!(fault(&mixed).1, "else belongs to an if.");
     }
 }

@@ -509,6 +509,26 @@ with Xila(disk=disk) as x:
           not ok and lines == ["A loop takes 32 rows at most; this query has 200.", "Stopped at line 1."], lines)
     x.cmd("drop program grow")
     x.cmd("drop table wide")
+    # what the prompt cannot type, a row of the table of programs can hold
+    for line in range(1, 41):
+        x.cmd("insert into programs values ('boom', %d, 'while 1 = 1')" % line)
+    ok, lines = x.cmd("boom")
+    check("a program made of blocks that never close says so, and the system goes on",
+          not ok and lines == ["This block has no end.", "Stopped at line 40 of boom."] and x.cmd("say 'alive'") == (True, ["alive"]), lines)
+    x.cmd("drop program boom")
+    # a program that runs by itself is nobody at a prompt: no code takes the screen for it, and nothing stops
+    for line in ("on notify typed", "qr about", "end"):
+        x.cmd(line)
+    x.cmd("notify typed")
+    time.sleep(0.5)
+    ok, lines = x.cmd("say 'alive'")
+    seen = x.peek()
+    x.cmd("screen 1")
+    logged = [row.strip() for row in x.peek() if "on_notify_typed" in row]
+    x.cmd("screen 0")
+    check("qr is refused to a program that runs by itself, and the system goes on",
+          ok and lines == ["alive"] and not any("Read this code" in row for row in seen) and any("qr is typed at a prompt" in row for row in logged), (lines, logged))
+    x.cmd("drop program on_notify_typed")
     ok, lines = x.cmd("help l")
     check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 23, lines[:2])
     x.cmd("drop program broken")
