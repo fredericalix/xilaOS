@@ -28,6 +28,7 @@ pub mod gpt;
 pub mod grid;
 pub mod install;
 pub mod intel;
+pub mod jobs;
 pub mod json;
 pub mod keys;
 pub mod lang;

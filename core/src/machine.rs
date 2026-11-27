@@ -330,7 +330,10 @@ pub fn turn(sys: &mut System, room: Room, base: usize, out: &mut dyn Out, spent:
         let instr = vm(sys, room).units[top].at(at);
         vm_mut(sys, room).calls[top].next = at + 1;
         let Err(mut message) = step(sys, room, top, instr, out) else {
-            if spent() {
+            // A job stops where an instruction asked the kernel something,
+            // to go on once that is served. What runs at once goes on, as it
+            // always did: its request is served when it has ended.
+            if spent() || (room != Room::Own && sys.request.is_some()) {
                 return Turn::More;
             }
             continue;
@@ -406,7 +409,9 @@ fn read(sys: &mut System, room: Room, at: usize, query: &[u8]) -> Result<Option<
 
 /// Runs one instruction of the unit `unit`, which is at the top.
 fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn Out) -> Result<(), Message> {
-    if instr.begins {
+    // a statement begins, or a `while` is looked at once more: a loop that
+    // does nothing else is still seen to run
+    if instr.begins || matches!(instr.op, Op::Round(_)) {
         let machine = vm_mut(sys, room);
         machine.steps += 1;
         if machine.steps > MAX_STEPS && !machine.unbound {
@@ -513,7 +518,7 @@ fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn O
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::shell::tests::Lines;
 

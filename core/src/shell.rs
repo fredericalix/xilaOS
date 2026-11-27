@@ -911,6 +911,8 @@ pub struct System {
     /// The rooms the kernel gave for jobs: a machine each. None on a system
     /// that was given none, where everything runs at once in `vm`.
     pub rooms: Option<&'static mut [crate::machine::Machine]>,
+    /// The jobs: what runs in those rooms. See `jobs.rs`.
+    pub jobs: crate::jobs::Jobs,
     pub display: Display,
     /// The kernel's answer to `Request::Measure`.
     pub measured: Option<Measure>,
@@ -1056,6 +1058,7 @@ impl System {
             request: None,
             vm: crate::machine::Machine::new(),
             rooms: None,
+            jobs: crate::jobs::Jobs::new(),
             display: Display { shown: Pictures::Direct, every: 0, sweeps: 0, light: None, direct: false, combining: false, whole_us: 0, firmware_us: 0, pictures: 0, longest_us: 0, city_us: 0, skipped: 0 },
             measured: None,
             note: Note::new(),
