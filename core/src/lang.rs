@@ -38,10 +38,15 @@
 //!   the others, under a name made from its first line, which is its line 0
 //!   in the table.
 //!
-//! Lines are run as they are read: nothing is compiled. A program runs in
-//! the session that started it, with the names of that session, and holds
-//! the system until it ends; this is why loops and programs are stopped
-//! after a number of statements.
+//! Nothing here runs a line: a block typed at a prompt and the lines of a
+//! program are compiled (`code.rs`) and run by the virtual machine
+//! (`machine.rs`). What is wrong with the form of a program is told when
+//! it is kept, and it is then not kept. This module collects the lines
+//! of a block, keeps programs in their table, and starts those that run
+//! by themselves. A program runs in the session that started it, with
+//! the names of that session, and still holds the system until it ends;
+//! this is why loops and programs are stopped after a number of
+//! statements.
 
 use core::fmt::Write;
 
@@ -49,10 +54,10 @@ use xila_db::{Database, Field, Kind};
 
 use crate::change::engine_error;
 use crate::events::{Happened, What, BACKGROUND};
-use crate::expr::{self, Names, Vars, NO_VARS, VAR_NAME};
+use crate::expr::{Vars, NO_VARS, VAR_NAME};
 use crate::grid::COLS;
 use crate::shell::{self, Out, Style, System, Table};
-use crate::sql::{self, Lexer, Message, Value, MAX_COLUMNS};
+use crate::sql::{self, Lexer, Message, Value};
 use crate::text::{split_word, trim, FixedStr};
 
 /// Lines of a block typed at the prompt, and of a program.
@@ -60,12 +65,6 @@ pub const MAX_LINES: usize = 48;
 /// Longest line: what the serial port takes. The screen takes less.
 pub const LINE_MAX: usize = 240;
 pub type Line = FixedStr<LINE_MAX>;
-/// Programs that run programs: how deep.
-const MAX_LEVELS: usize = 3;
-/// Times a `while` goes round before it is stopped.
-const MAX_ROUNDS: u32 = 10_000;
-/// Statements one line typed at the prompt may run in all.
-const MAX_STEPS: u32 = 100_000;
 
 /// Programs that wait for events, and programs that run again and again.
 const MAX_ON: usize = 16;
@@ -136,28 +135,6 @@ impl Default for Block {
     }
 }
 
-/// Whether to go on with the next line.
-enum Flow {
-    On,
-    /// `return` was met: the program ends here.
-    Return,
-}
-
-struct Machine<'a> {
-    sys: &'a mut System,
-    out: &'a mut dyn Out,
-    steps: u32,
-    /// Programs that are running, one inside the other.
-    level: usize,
-    /// The line that failed, counted from 1; 0 when none did.
-    failed_at: usize,
-}
-
-/// A failure that was already told to the user.
-fn said() -> Message {
-    Message::new()
-}
-
 /// What to say when a calculation has a SELECT in it: a SELECT is a value
 /// only when it is the whole value.
 pub(crate) fn whole_select(text: &[u8]) -> Option<Message> {
@@ -173,279 +150,13 @@ pub(crate) fn whole_select(text: &[u8]) -> Option<Message> {
     }
 }
 
-/// Where the block that starts at `at` ends.
-fn matching_end(lines: &[Line], at: usize, to: usize) -> Result<usize, Message> {
-    let mut depth = 0;
-    for (i, line) in lines.iter().enumerate().take(to).skip(at) {
-        let word = word_of(line.bytes()).0;
-        if OPENERS.contains(&word.bytes()) {
-            depth += 1;
-        } else if word.bytes() == b"end" {
-            depth -= 1;
-            if depth == 0 {
-                return Ok(i);
-            }
-        }
-    }
-    Err(Message::from_bytes(b"This block has no end."))
-}
-
-/// The next `else` of the block that starts or continues at `at` and ends
-/// at `end`; `end` when there is none.
-fn next_else(lines: &[Line], at: usize, end: usize) -> usize {
-    let mut depth = 0;
-    for (i, line) in lines.iter().enumerate().take(end).skip(at + 1) {
-        let word = word_of(line.bytes()).0;
-        if OPENERS.contains(&word.bytes()) {
-            depth += 1;
-        } else if word.bytes() == b"end" {
-            depth -= 1;
-        } else if word.bytes() == b"else" && depth == 0 {
-            return i;
-        }
-    }
-    end
-}
-
-impl Machine<'_> {
-    /// Works out a value: a SELECT gives its first column of its first
-    /// row, anything else is an expression.
-    fn value(&self, text: &[u8]) -> Result<Value, Message> {
-        let vars = &self.sys.vars[self.sys.session];
-        if word_of(text).0.bytes() == b"select" {
-            let rows = sql::query(&*self.sys, vars, text)?;
-            return Ok(if rows.count > 0 && rows.cols > 0 { rows.rows[0][0] } else { Value::Null });
-        }
-        let mut lexer = Lexer::new(text);
-        let parsed = expr::parse(&mut lexer, Names::without(vars, b"Unknown name: ")).map_err(|message| whole_select(text).unwrap_or(message))?;
-        lexer.end()?;
-        parsed.eval(&[Value::Null; MAX_COLUMNS])
-    }
-
-    fn holds(&self, text: &[u8]) -> Result<bool, Message> {
-        let vars = &self.sys.vars[self.sys.session];
-        let mut lexer = Lexer::new(text);
-        let parsed = expr::parse(&mut lexer, Names::without(vars, b"Unknown name: ")).map_err(|message| whole_select(text).unwrap_or(message))?;
-        lexer.end()?;
-        parsed.holds(&[Value::Null; MAX_COLUMNS])
-    }
-
-    fn keep(&mut self, name: &[u8], value: Value) -> Result<(), Message> {
-        if self.sys.vars[self.sys.session].set(name, value) {
-            Ok(())
-        } else {
-            Err(Message::from_bytes(b"There is no room for one more name: 32 are kept at most."))
-        }
-    }
-
-    /// Runs the lines from `from` up to `to`.
-    fn lines(&mut self, lines: &[Line], from: usize, to: usize) -> Result<Flow, Message> {
-        let mut at = from;
-        while at < to {
-            match self.statement(lines, at, to) {
-                Ok((_, Flow::Return)) => return Ok(Flow::Return),
-                Ok((next, Flow::On)) => at = next,
-                Err(message) => {
-                    if self.failed_at == 0 {
-                        self.failed_at = at + 1;
-                    }
-                    return Err(message);
-                }
-            }
-        }
-        Ok(Flow::On)
-    }
-
-    /// Runs the statement at line `at`, with its block if it has one.
-    /// Returns the line to go on with.
-    fn statement(&mut self, lines: &[Line], at: usize, to: usize) -> Result<(usize, Flow), Message> {
-        let text = trim(lines[at].bytes());
-        if text.is_empty() || text[0] == b'#' {
-            return Ok((at + 1, Flow::On));
-        }
-        self.steps += 1;
-        if self.steps > MAX_STEPS {
-            return Err(Message::from_bytes(b"This ran 100000 statements and was stopped."));
-        }
-        let (word, rest) = word_of(text);
-        let mut flow = Flow::On;
-        let next = match word.bytes() {
-            b"let" => {
-                let Some(equals) = rest.iter().position(|b| *b == b'=') else {
-                    return Err(Message::from_bytes(b"A name gets a value like this: let total = 3"));
-                };
-                let name = trim(&rest[..equals]);
-                if !free_name(name) {
-                    return Err(Message::from_bytes(b"A name is a letter, then letters, digits or _, and not a command."));
-                }
-                let value = self.value(trim(&rest[equals + 1..]))?;
-                self.keep(name, value)?;
-                at + 1
-            }
-            b"say" => {
-                let shown = if rest.is_empty() { Value::Null } else { self.value(rest)? };
-                self.out.line(Style::Out, shown.shown().bytes());
-                at + 1
-            }
-            b"if" => {
-                let end = matching_end(lines, at, to)?;
-                let (mut from, mut condition) = (at, rest);
-                loop {
-                    let branch_end = next_else(lines, from, end);
-                    if self.holds(condition)? {
-                        flow = self.lines(lines, from + 1, branch_end)?;
-                        break;
-                    }
-                    if branch_end == end {
-                        break;
-                    }
-                    // an `else`: the last branch, or one more condition
-                    let (after, more) = word_of(word_of(lines[branch_end].bytes()).1);
-                    if after.bytes() == b"if" {
-                        (from, condition) = (branch_end, more);
-                        continue;
-                    }
-                    if !word_of(lines[branch_end].bytes()).1.is_empty() || next_else(lines, branch_end, end) != end {
-                        self.failed_at = branch_end + 1;
-                        return Err(Message::from_bytes(b"After else comes nothing, or if and a condition; a plain else is last."));
-                    }
-                    flow = self.lines(lines, branch_end + 1, end)?;
-                    break;
-                }
-                end + 1
-            }
-            b"while" => {
-                let end = matching_end(lines, at, to)?;
-                let mut rounds = 0;
-                while self.holds(rest)? {
-                    rounds += 1;
-                    if rounds > MAX_ROUNDS {
-                        return Err(Message::from_bytes(b"This loop went round 10000 times and was stopped."));
-                    }
-                    if let Flow::Return = self.lines(lines, at + 1, end)? {
-                        return Ok((end + 1, Flow::Return));
-                    }
-                }
-                end + 1
-            }
-            b"for" => {
-                let end = matching_end(lines, at, to)?;
-                let (name, after) = split_word(rest);
-                let (word_in, query) = word_of(after);
-                if !free_name(name) || word_in.bytes() != b"in" || word_of(query).0.bytes() != b"select" {
-                    return Err(Message::from_bytes(b"A loop over rows is written: for row in select ..."));
-                }
-                let rows = sql::query(&*self.sys, &self.sys.vars[self.sys.session], query)?;
-                if rows.more > 0 {
-                    let mut message = Message::new();
-                    let _ = write!(message, "A loop takes {} rows at most; this query has {}.", rows.count, rows.count + rows.more);
-                    return Err(message);
-                }
-                for row in rows.rows.iter().take(rows.count) {
-                    // the columns of the row, as row.column
-                    for (header, value) in rows.headers.iter().zip(row).take(rows.cols) {
-                        let mut column = FixedStr::<VAR_NAME>::from_bytes(name);
-                        if column.len() + 1 + header.len() > VAR_NAME {
-                            return Err(crate::sql::error(b"This name is too long: ", name).also(b".").also(header.bytes()));
-                        }
-                        column.push(b'.');
-                        column.push_bytes(header.bytes());
-                        self.keep(column.bytes(), *value)?;
-                    }
-                    if let Flow::Return = self.lines(lines, at + 1, end)? {
-                        return Ok((end + 1, Flow::Return));
-                    }
-                }
-                end + 1
-            }
-            b"else" => return Err(Message::from_bytes(b"else belongs to an if.")),
-            b"end" => return Err(Message::from_bytes(b"end closes if, while, for or program: none is open.")),
-            b"return" => {
-                flow = Flow::Return;
-                at + 1
-            }
-            b"run" => {
-                self.program(rest)?;
-                at + 1
-            }
-            b"program" | b"on" | b"every" => return Err(Message::from_bytes(b"A program is made at the prompt, not inside another.")),
-            _ => {
-                let (name, arguments) = split_word(text);
-                let mut lower = shell::Text::from_bytes(name);
-                lower.lower();
-                if !shell::knows(lower.bytes()) && arguments.is_empty() && exists(&self.sys.db, name) {
-                    // the name of a program is a command
-                    self.program(name)?;
-                } else {
-                    // inside a program, what a command did is not announced
-                    let done = if self.level > 0 { shell::command(self.sys, text, &mut Quiet(self.out)) } else { shell::command(self.sys, text, self.out) };
-                    if !done {
-                        return Err(said());
-                    }
-                }
-                at + 1
-            }
-        };
-        Ok((next, flow))
-    }
-
-    /// Runs a program kept in the database.
-    fn program(&mut self, name: &[u8]) -> Result<(), Message> {
-        if self.level == MAX_LEVELS {
-            return Err(Message::from_bytes(b"Programs run programs three deep at most."));
-        }
-        let mut lines = [Line::new(); MAX_LINES];
-        let Some(count) = load(&self.sys.db, name, &mut lines)? else {
-            return Err(crate::sql::error(b"Unknown program: ", name).also(b". Type programs to list them."));
-        };
-        self.level += 1;
-        let before = core::mem::take(&mut self.failed_at);
-        let result = self.lines(&lines[..count], 0, count);
-        self.level -= 1;
-        let failed_at = core::mem::replace(&mut self.failed_at, before);
-        match result {
-            Ok(_) => Ok(()),
-            Err(message) => {
-                if !message.is_empty() {
-                    self.out.line(Style::Error, message.bytes());
-                }
-                let mut place = FixedStr::<COLS>::new();
-                let _ = write!(place, "Stopped at line {failed_at} of {}.", shell::Text::from_bytes(name));
-                self.out.line(Style::Error, place.bytes());
-                Err(said())
-            }
-        }
-    }
-}
-
-/// Runs lines for the session that typed them. Says why and returns false
-/// if one failed.
-fn run(sys: &mut System, lines: &[Line], out: &mut dyn Out) -> bool {
-    let mut machine = Machine { sys, out, steps: 0, level: 0, failed_at: 0 };
-    match machine.lines(lines, 0, lines.len()) {
-        Ok(_) => true,
-        Err(message) => {
-            let failed_at = machine.failed_at;
-            if !message.is_empty() {
-                out.line(Style::Error, message.bytes());
-            }
-            if lines.len() > 1 {
-                let mut place = FixedStr::<COLS>::new();
-                let _ = write!(place, "Stopped at line {failed_at}.");
-                out.line(Style::Error, place.bytes());
-            }
-            false
-        }
-    }
-}
-
 /// Runs one line typed at a prompt.
 pub fn line(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     if line.len() > LINE_MAX {
         out.line(Style::Error, b"A line takes 240 characters at most.");
         return false;
     }
-    run(sys, &[Line::from_bytes(line)], out)
+    crate::machine::lines(sys, &[Line::from_bytes(line)], out)
 }
 
 /// Takes a line that opens a block, or that comes while one is open. The
@@ -479,7 +190,7 @@ pub fn typed(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     match first.bytes() {
         b"program" => define(sys, rest, &lines[1..lines.len() - 1], out),
         b"on" | b"every" => define_runs(sys, lines[0].bytes(), &lines[1..lines.len() - 1], out),
-        _ => run(sys, lines, out),
+        _ => crate::machine::lines(sys, lines, out),
     }
 }
 
@@ -712,6 +423,15 @@ fn define_runs(sys: &mut System, first: &[u8], lines: &[Line], out: &mut dyn Out
 fn keep(sys: &mut System, name: &[u8], runs: Option<&[u8]>, lines: &[Line], out: &mut dyn Out) -> bool {
     if let Err(message) = programs(&sys.db) {
         out.line(Style::Error, message.bytes());
+        return false;
+    }
+    // what is wrong with its form is told now, and the program of that
+    // name that was kept before, if any, stays as it was
+    if let Err(fault) = crate::machine::check(sys, lines) {
+        out.line(Style::Error, fault.message.bytes());
+        let mut place = FixedStr::<COLS>::new();
+        let _ = write!(place, "Line {} is not right: the program is not kept.", fault.line);
+        out.line(Style::Error, place.bytes());
         return false;
     }
     match store(&mut sys.db, name, runs, lines) {
@@ -972,25 +692,6 @@ fn refresh(sys: &mut System) {
     sys.events.watched = sys.triggers.on_count > 0;
 }
 
-/// Lets through what a command says, but not that it is done.
-struct Quiet<'a>(&'a mut dyn Out);
-
-impl Out for Quiet<'_> {
-    fn line(&mut self, style: Style, text: &[u8]) {
-        if style != Style::Done {
-            self.0.line(style, text);
-        }
-    }
-
-    fn table(&mut self, table: &Table) {
-        self.0.table(table);
-    }
-
-    fn clear(&mut self) {
-        self.0.clear();
-    }
-}
-
 /// Puts the name of the program before every line it says.
 struct Named<'a> {
     out: &'a mut dyn Out,
@@ -1058,9 +759,8 @@ fn fire(sys: &mut System, program: &[u8], happened: Option<&Happened>, out: &mut
     sys.vars[BACKGROUND].clock = sys.now();
     match ready {
         Ok(true) => {
-            let mut machine = Machine { sys, out: &mut named, steps: 0, level: 0, failed_at: 0 };
             // a failure was said where it happened
-            let _ = machine.program(program);
+            crate::machine::program(sys, program, &mut named);
         }
         Ok(false) => {}
         Err(message) => named.line(Style::Error, message.bytes()),
@@ -1288,12 +988,16 @@ mod tests {
         assert!(!ok);
         assert_eq!(out, ["This loop went round 10000 times and was stopped.", "Stopped at line 1."]);
         assert_eq!(said(&mut sys, &["say n"]), ["10000"]);
-        // and one that would not see every row says so
+        // a loop reads every row of a stored table, however many
         type_lines(&mut sys, &["create table many (n int)"]);
         for _ in 0..5 {
             type_lines(&mut sys, &["insert into many values (1), (2), (3), (4), (5), (6), (7), (8)"]);
         }
         let (ok, out) = type_lines(&mut sys, &["for row in select n from many", "say row.n", "end"]);
+        assert!(ok);
+        assert_eq!((out.len(), out[39].as_str()), (40, "8"));
+        // and one that would not see every row of what is sorted says so
+        let (ok, out) = type_lines(&mut sys, &["for row in select n from many order by n", "say row.n", "end"]);
         assert!(!ok);
         assert_eq!(out, ["A loop takes 32 rows at most; this query has 40.", "Stopped at line 1."]);
         assert!(type_lines(&mut sys, &["for row in select n from many limit 3", "let n = row.n", "end"]).0);
@@ -1315,12 +1019,14 @@ mod tests {
         assert_eq!(said(&mut sys, &["let x = 1 / 0"]), ["Division by zero."]);
         assert_eq!(said(&mut sys, &["end"]), ["end closes if, while, for or program: none is open."]);
         assert_eq!(said(&mut sys, &["else"]), ["else belongs to an if."]);
-        assert_eq!(type_lines(&mut sys, &["if 1 = 1", "else", "else", "end"]), (true, vec![]));
-        assert_eq!(
-            said(&mut sys, &["if 1 = 2", "else", "else", "end"]),
-            ["After else comes nothing, or if and a condition; a plain else is last.", "Stopped at line 2."]
-        );
-        assert_eq!(said(&mut sys, &["for x in tables", "end"]), ["A loop over rows is written: for row in select ...", "Stopped at line 1."]);
+        // what is wrong with the form of a block is told when it ends, whatever would have run
+        for condition in ["if 1 = 1", "if 1 = 2"] {
+            assert_eq!(
+                type_lines(&mut sys, &[condition, "else", "else", "end"]),
+                (false, vec!["After else comes nothing, or if and a condition; a plain else is last.".to_string(), "Line 3 is not right: nothing was run.".to_string()])
+            );
+        }
+        assert_eq!(said(&mut sys, &["for x in tables", "end"]), ["A loop over rows is written: for row in select ...", "Line 1 is not right: nothing was run."]);
         // lines typed in a block can be dropped
         assert_eq!(said(&mut sys, &["while 1 = 1", "say 'forever'", "cancel"]), ["The lines are dropped."]);
         assert!(!sys.blocks[0].open());
@@ -1402,7 +1108,7 @@ mod tests {
         assert_eq!(out.len(), 4);
         assert_eq!(said(&mut sys, &["say depth"]), ["3"]);
         // programs are made at the prompt
-        assert_eq!(said(&mut sys, &["if 1 = 1", "program nested", "end", "end"]), ["A program is made at the prompt, not inside another.", "Stopped at line 2."]);
+        assert_eq!(said(&mut sys, &["if 1 = 1", "program nested", "end", "end"]), ["A program is made at the prompt, not inside another.", "Line 2 is not right: nothing was run."]);
     }
 
     /// Lets the system run what waits, and returns what the programs said.
@@ -1743,5 +1449,51 @@ mod tests {
         assert_eq!(said(&mut sys, &["notify alerts 2 * 21"]), ["Sent to 1 listener."]);
         assert_eq!(sys.events.take(0).map(|event| String::from_utf8_lossy(event.text.bytes()).into_owned()), Some("42".to_string()));
         assert_eq!(said(&mut sys, &["notify alerts hello"]), ["Put the text between quotes, or give a name that has a value, not: hello"]);
+    }
+
+    #[test]
+    fn a_program_with_a_fault_of_form_is_not_kept() {
+        let mut sys = books();
+        let (ok, out) = type_lines(&mut sys, &["program report", "say 'one'", "say 2 +", "end"]);
+        assert!(!ok);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[1], "Line 2 is not right: the program is not kept.");
+        assert_eq!(said(&mut sys, &["report"]), ["Unknown command: report"]);
+        assert_eq!(said(&mut sys, &["programs"]), ["There is no program yet. help l shows how to make one."]);
+        // one that was there stays as it was
+        type_lines(&mut sys, &["program report", "say 'good'", "end"]);
+        let (ok, out) = type_lines(&mut sys, &["program report", "say 'worse'", "else", "end"]);
+        assert!(!ok);
+        assert_eq!(out, ["else belongs to an if.", "Line 2 is not right: the program is not kept."]);
+        assert_eq!(said(&mut sys, &["report"]), ["good"]);
+        // and so does one that runs by itself, with what starts it
+        type_lines(&mut sys, &["on insert into expenses", "say 'seen'", "end"]);
+        let (ok, out) = type_lines(&mut sys, &["on insert into expenses", "for x in tables", "end", "end"]);
+        assert!(!ok);
+        assert_eq!(out, ["A loop over rows is written: for row in select ...", "Line 1 is not right: the program is not kept."]);
+        type_lines(&mut sys, &["insert into expenses values ('tea', 2)"]);
+        let mut log = Lines::default();
+        background(&mut sys, &mut log);
+        assert_eq!(log.lines, ["on_insert_expenses: seen"]);
+        // a block that is run at once says that nothing was
+        let (ok, out) = type_lines(&mut sys, &["if 1 = 1", "say 'ran'", "else", "else", "end"]);
+        assert!(!ok);
+        assert_eq!(out, ["After else comes nothing, or if and a condition; a plain else is last.", "Line 4 is not right: nothing was run."]);
+    }
+
+    #[test]
+    fn a_program_kept_before_with_a_fault_of_form_says_it_when_run() {
+        let mut sys = books();
+        type_lines(&mut sys, &["program two", "say 1", "say 2", "end"]);
+        // as an older system would have kept it: stored without being compiled
+        store(&mut sys.db, b"old", None, &[Line::from_bytes(b"say 'first'"), Line::from_bytes(b"else")]).unwrap();
+        let (ok, out) = type_lines(&mut sys, &["old"]);
+        assert!(!ok);
+        assert_eq!(out, ["else belongs to an if.", "Stopped at line 2 of old."]);
+        // nothing of it runs, and who ran it says where it stopped
+        assert_eq!(said(&mut sys, &["if 1 = 1", "say 1", "old", "end"]), ["1", "else belongs to an if.", "Stopped at line 2 of old.", "Stopped at line 3."]);
+        // it is shown as any program of two lines is, and can be removed
+        assert_eq!(said(&mut sys, &["show old"]).len(), said(&mut sys, &["show two"]).len());
+        assert!(type_lines(&mut sys, &["drop program old"]).0);
     }
 }

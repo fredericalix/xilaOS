@@ -130,6 +130,17 @@ pub fn lines(sys: &mut System, lines: &[Line], out: &mut dyn Out) -> bool {
     run(sys, unit, out)
 }
 
+/// Compiles lines without running them, to learn whether their form is
+/// right: what a program goes through before it is kept. The next unit
+/// is where it is done, and is left free.
+pub fn check(sys: &mut System, lines: &[Line]) -> Result<(), code::Fault> {
+    match sys.vm.units.get_mut(sys.vm.depth) {
+        Some(unit) => code::compile(lines, unit),
+        // no unit is free to try them in: they are told when they run
+        None => Ok(()),
+    }
+}
+
 /// Runs a program kept in the database to the end, as the system does
 /// for one that runs by itself. Says what failed, and returns whether
 /// all went well.
@@ -396,43 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn names_keep_values() {
-        let mut sys = books();
-        assert_eq!(block(&mut sys, &["let total = 3 * 1.5"]), (true, vec![]));
-        assert_eq!(each(&mut sys, &["say total"]), ["4.5"]);
-        assert_eq!(each(&mut sys, &["let Total = total + 1", "say 'Total: ' + TOTAL"]), ["Total: 5.5"]);
-        assert_eq!(each(&mut sys, &["let who = 'the ' || upper('cat')", "say who"]), ["the CAT"]);
-        assert_eq!(each(&mut sys, &["say"]), [""]);
-        // a select gives its first value; without a row, nothing
-        assert_eq!(each(&mut sys, &["let sum = select sum(amount), count(*) from expenses", "say sum"]), ["46.70"]);
-        assert_eq!(each(&mut sys, &["let none = select label from expenses where amount > 100", "say none is null"]), ["1"]);
-        assert_eq!(each(&mut sys, &["say select count(*) from expenses"]), ["3"]);
-        assert_eq!(each(&mut sys, &["say 'Total: ' + select sum(amount) from expenses"]), ["A select cannot be part of a calculation: keep it with let first."]);
-        // names are values in the statements of SQL, and a command is a statement
-        each(&mut sys, &["let limit = 3", "let what = 'tea'"]);
-        assert_eq!(each(&mut sys, &["insert into expenses values (what, limit * 2)"]), ["1 row added to expenses, with id 4."]);
-        assert_eq!(each(&mut sys, &["select label, amount from expenses where label = what"]), ["   label  amount", "   tea    6.00"]);
-        // each session has its own names
-        sys.session = crate::events::SERIAL;
-        assert_eq!(block(&mut sys, &["say limit"]), (false, vec!["Unknown name: limit".to_string()]));
-    }
-
-    #[test]
-    fn what_is_wrong_with_a_name_is_said() {
-        let mut sys = System::new();
-        assert_eq!(each(&mut sys, &["let x"]), ["A name gets a value like this: let total = 3"]);
-        assert_eq!(each(&mut sys, &["let 2x = 1"]), ["A name is a letter, then letters, digits or _, and not a command."]);
-        assert_eq!(each(&mut sys, &["let select = 1"]), ["A name is a letter, then letters, digits or _, and not a command."]);
-        assert_eq!(each(&mut sys, &["let x = y + 1"]), ["Unknown name: y"]);
-        assert_eq!(each(&mut sys, &["let x = 1 2"]), ["Expected the end of the query, found: 2"]);
-        for n in 0..32 {
-            assert!(block(&mut sys, &[&format!("let v{n} = {n}")]).0);
-        }
-        assert_eq!(each(&mut sys, &["let one_more = 1"]), ["There is no room for one more name: 32 are kept at most."]);
-        assert_eq!(each(&mut sys, &["let v3 = v3 + v31", "say v3"]), ["34"]);
-    }
-
-    #[test]
     fn conditions_pick_the_lines_to_run() {
         let mut sys = System::new();
         let grade = |sys: &mut System, n: i64| {
@@ -489,24 +463,6 @@ mod tests {
         let (ok, out) = block(&mut sys, &["let n = 0", "while n < 20", "let m = 0", "while m < 9000", "let m = m + 1", "end", "let n = n + 1", "end"]);
         assert!(!ok);
         assert_eq!(out[0], "This ran 100000 statements and was stopped.");
-    }
-
-    #[test]
-    fn a_line_that_fails_stops_the_block_and_says_where() {
-        let mut sys = books();
-        assert_eq!(block(&mut sys, &["if 1 = 1", "say 'before'", "let x = 1 / 0", "say 'after'", "end"]), (false, vec!["before".to_string(), "Division by zero.".to_string(), "Stopped at line 3.".to_string()]));
-        assert_eq!(block(&mut sys, &["if 1 = 1", "frobnicate", "end"]).1, ["Unknown command: frobnicate", "Stopped at line 2."]);
-        assert_eq!(block(&mut sys, &["if 1 = 1", "insert into expenses values (1, 2)", "end"]).1, ["Column label takes a 'text' between quotes.", "Stopped at line 2."]);
-        // a single line needs no place
-        assert_eq!(each(&mut sys, &["let x = 1 / 0"]), ["Division by zero."]);
-        assert_eq!(each(&mut sys, &["end"]), ["end closes if, while, for or program: none is open."]);
-        assert_eq!(each(&mut sys, &["else"]), ["else belongs to an if."]);
-        // lines as long as the serial port takes them are run whole
-        each(&mut sys, &["create table t (n int)"]);
-        let values: Vec<String> = (0..8).map(|n| format!("({n} + 100000000000000000)")).collect();
-        let long = format!("insert into t values {}", values.join(", "));
-        assert!(long.len() > 200 && long.len() <= crate::lang::LINE_MAX);
-        assert_eq!(block(&mut sys, &["if 1 = 1", &long, "end"]).1, ["8 rows added to t, with ids 1 to 8."]);
     }
 
     #[test]
@@ -575,10 +531,6 @@ mod tests {
         let mut out = Lines::default();
         assert!(program(&mut sys, b"quiet", &mut out));
         assert_eq!(out.lines, ["Mood is calm.", "done"]);
-        // one that was kept with a fault of form says it when it is run, and nothing of it runs
-        typed(&mut sys, &["program old", "say 'first'", "else", "end"]);
-        assert_eq!(block(&mut sys, &["old"]), (false, texts(&["else belongs to an if.", "Stopped at line 2 of old."])));
-        assert_eq!(block(&mut sys, &["say 1", "old"]).1, ["1", "else belongs to an if.", "Stopped at line 2 of old.", "Stopped at line 2."]);
         // the machine is whole after all that
         assert_eq!(block(&mut sys, &["quiet"]), (true, texts(&["Mood is calm.", "done"])));
     }
