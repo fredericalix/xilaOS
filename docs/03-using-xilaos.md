@@ -327,7 +327,8 @@ prompt over the network `key set` is refused, since the key would have
 crossed the network in clear to get there.
 
 That refusal is for the line typed there, not for a program written
-there: a program that runs by itself may run `key set`, and its lines
+there (setting a key lets nothing out; where a key is sent is another
+matter, and the table that says it is changed at the machine only): a program that runs by itself may run `key set`, and its lines
 cross the network in clear as they are written. The author's T430 got
 its key that way on 27 November 2026, by the author's choice, rather
 than by 73 characters typed at its keyboard.

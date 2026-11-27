@@ -50,14 +50,15 @@ were also tried on the real machine.
 | The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | yes, on 27 November 2026, asked by a program: through a relay first, then with a key kept there, through TLS (see below); `ask` typed there with an answer not tried |
 | The companion acts (`run`: one line at the prompt, written in `acts`), remembers (`remember`, the table `remembered`) and is stopped (`companion off`, kept between starts); what is refused to it | yes, against a made-up model and a real one; the refusals against the made-up one | yes, on 27 November 2026, through the relay; of the refusals only `web on`, which the real model tried; kept between starts not tried |
 | `install`, `disk erase`, `remote on`, `web on` refused to a program that runs by itself; `disk erase yes` refused to the network session | yes | not tried |
+| The table `companions`, which says where the key goes, changed at the machine only: not from the network prompt, not by a program that runs by itself | yes | not tried |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 36,000 lines, 322
-unit tests, 502 system checks.
+about 300 system checks. On 27 November 2026: about 36,000 lines, 324
+unit tests, 504 system checks.
 
 ## Known limits of what is done
 
@@ -281,6 +282,13 @@ the key crossed the local network in clear once. With `companions`
 pointing at the model's own server again, a question went from the
 T430 through TLS with the key kept there, and was answered (three
 calls, a `select` among them).
+
+Doing that showed two ways around what guards the key, both from the
+network prompt: a program written there may run `key set`, and the
+row of `companions`, which says where the key is sent, could be
+changed there. The author chose to close the second and keep the
+first: `companions` is now changed at the machine only. The system on
+the T430's disk is from before that too, until it is replaced.
 
 What still waits for the T430, since it cannot be done over the
 network or was not tried: the key still there after a restart, `ask`

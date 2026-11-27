@@ -1395,13 +1395,23 @@ fn query(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
 
 /// Runs a statement that changes stored tables.
 fn change(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
-    // the companion acting by itself leaves alone what holds it
-    if let Some(table) = crate::change::target(line).filter(|table| sys.acting && crate::companion::held_by(table)) {
-        let mut message = crate::sql::Message::from_bytes(b"The table ");
-        message.push_bytes(table);
-        message.push_bytes(b" is not the companion's to change.");
-        out.line(Style::Error, message.bytes());
-        return false;
+    // the table the statement is about, and the name it would give one
+    for table in [crate::change::target(line), crate::change::becomes(line)].into_iter().flatten() {
+        // the companion acting by itself leaves alone what holds it
+        if sys.acting && crate::companion::held_by(table) {
+            let mut message = crate::sql::Message::from_bytes(b"The table ");
+            message.push_bytes(table);
+            message.push_bytes(b" is not the companion's to change.");
+            out.line(Style::Error, message.bytes());
+            return false;
+        }
+        // who the companion is says where its key is sent: from the network,
+        // or from a program either could have written, that would be a way
+        // to have the key sent elsewhere
+        if !at_the_machine(sys) && table.eq_ignore_ascii_case(crate::companion::COMPANIONS) {
+            out.line(Style::Error, b"The table companions is changed at the machine: it says where the key goes.");
+            return false;
+        }
     }
     let now = sys.ticks.max(1);
     let (events, vars) = (&mut sys.events, &sys.vars[sys.session]);

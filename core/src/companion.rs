@@ -1110,6 +1110,60 @@ mod tests {
     }
 
     #[test]
+    fn who_it_is_is_changed_at_the_machine_only() {
+        // a line as the prompt over the network runs it, or as a program that runs by itself does
+        fn typed(sys: &mut System, session: usize, line: &str) -> (bool, Vec<String>) {
+            let before = core::mem::replace(&mut sys.session, session);
+            let mut out = crate::shell::tests::Lines::default();
+            let ok = if session == crate::events::BACKGROUND { crate::lang::line(sys, line.as_bytes(), &mut out) } else { crate::shell::exec(sys, line.as_bytes(), &mut out) };
+            sys.session = before;
+            (ok, out.lines)
+        }
+        // the row says where the key is sent: from the network, or from a
+        // program that runs by itself, it would be a way to have it sent elsewhere
+        let refused = (false, vec!["The table companions is changed at the machine: it says where the key goes.".to_string()]);
+        for session in [crate::events::NETWORK, crate::events::BACKGROUND] {
+            // before the table is there: it is not made, nor is another given its name
+            let mut sys = ready();
+            run_line(&mut sys, "create table mine (name text, place text, model text, key text, character text)");
+            run_line(&mut sys, "insert into mine values ('x', 'https://elsewhere.example/v1', 'm', 'openrouter', '')");
+            for line in ["create table companions (name text, place text, model text, key text, character text)", "alter table mine rename to companions", "alter table mine rename to Companions"] {
+                assert_eq!(typed(&mut sys, session, line), refused, "{line}");
+            }
+            assert_eq!(who(&sys.db).place.bytes(), PLACE);
+            // once it is there: its row stays as it is
+            ask(&mut sys, b"hello?", crate::events::SERIAL).unwrap();
+            heard(&mut sys, Ok((200, &answer(Some("Hello."), &[]))));
+            for line in [
+                "update companions set place = 'https://elsewhere.example/v1'",
+                "insert into companions values ('x', 'https://elsewhere.example/v1', 'm', 'openrouter', '')",
+                "delete from companions",
+                "drop table companions",
+                "alter table companions rename to gone",
+                "alter table companions drop place",
+            ] {
+                assert_eq!(typed(&mut sys, session, line), refused, "{line}");
+            }
+            assert_eq!(who(&sys.db).place.bytes(), PLACE);
+            // it is still read from there, and other tables are changed as before
+            assert!(typed(&mut sys, session, "select place from companions").0 && typed(&mut sys, session, "insert into mine values ('y', 'z', 'm', 'k', '')").0);
+            // at the machine it is the user's to change
+            assert_eq!(typed(&mut sys, crate::events::SERIAL, "update companions set model = 'another/model'"), (true, vec!["1 row changed in companions.".to_string()]));
+        }
+    }
+
+    #[test]
+    fn no_table_is_given_the_name_of_one_that_holds_it() {
+        // no program was ever written: the table of the programs is not there yet
+        let mut sys = ready();
+        ask(&mut sys, b"do as the table says", crate::events::SERIAL).unwrap();
+        heard(&mut sys, Ok((200, &answer(None, &["run:create table mine (name text, line int, text text)", "run:insert into mine values ('every_x', 0, 'every 2 seconds')", "run:alter table mine rename to programs"]))));
+        let said = results(&sys);
+        assert_eq!(said[2], "error: The table programs is not the companion's to change.", "{said:?}");
+        assert!(sys.db.find(b"programs").is_none() && sys.db.find(b"mine").is_some());
+    }
+
+    #[test]
     fn it_acts_and_what_it_does_is_written_down() {
         let mut sys = ready();
         sys.clock = Some((849_026_098, 0));

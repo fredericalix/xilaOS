@@ -937,6 +937,21 @@ pub fn target(statement: &[u8]) -> Option<&[u8]> {
     lexer.word(b"a table").ok()
 }
 
+/// The name a statement gives to a table that had another one: `alter
+/// table a rename to b` is about `a`, and makes a `b`. Whoever keeps a
+/// table from someone keeps its name from them too.
+pub fn becomes(statement: &[u8]) -> Option<&[u8]> {
+    let mut lexer = Lexer::new(statement);
+    if !(lexer.keyword(b"alter") && lexer.keyword(b"table")) {
+        return None;
+    }
+    lexer.word(b"a table").ok()?;
+    if !(lexer.keyword(b"rename") && lexer.keyword(b"to")) {
+        return None;
+    }
+    lexer.word(b"a name").ok()
+}
+
 /// Runs a statement that changes the database. `changed` is called for
 /// every row the statement added, changed or removed, once it is certain:
 /// the name of the table, what happened, the id of the row.

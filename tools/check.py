@@ -890,6 +890,13 @@ with Xila(net="e1000e", forward=forwarded) as x:
     web_is = {row["item"]: row["value"] for row in x.table("web")}.get("the tables")
     check("remote: a program written there, running by itself, opens nothing either", all(ok for ok, _ in planted) and web_is == "closed to the network" and log[:1] == ["on_notify_way_around: web on is typed at the machine itself."], (planted, web_is, log))
     far.cmd("drop program on_notify_way_around")
+    # who the companion is says where its key is sent: that table is not made, named or changed from here
+    wanted = (False, ["The table companions is changed at the machine: it says where the key goes."])
+    held = [far.cmd("create table companions (name text, place text, model text, key text, character text)"), far.cmd("create table elsewhere (name text)"), far.cmd("alter table elsewhere rename to companions"),
+            x.cmd("create table companions (name text, place text, model text, key text, character text)"), far.cmd("update companions set place = 'https://elsewhere.example/v1'"), far.cmd("select count(*) from companions")[0]]
+    check("remote: the table that says where the key goes is not made, named or changed from there", held == [wanted, (True, ["Table elsewhere created."]), wanted, (True, ["Table companions created."]), wanted, True], held)
+    far.cmd("drop table elsewhere")
+    x.cmd("drop table companions")
     # the same message twice, as a network may deliver it: the command runs once
     x.cmd("create table doors (n int)")
     raw = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1511,6 +1518,16 @@ with Xila(net="e1000e") as x:
     held = [m["content"] for m in model_asked[-1][1]["messages"] if m["role"] == "tool"][-3:]
     kept = (len(x.table("select id from acts")), "every_x" in [row["name"] for row in x.table("programs")], x.table("select place from companions")[0]["place"])
     check("acting: what holds it is not its own to change: what it did, the programs, who it is", held == ["error: The table %s is not the companion's to change." % name for name in ("acts", "programs", "companions")] and kept == (13, False, "http://%s/v1/chat/completions" % there), (held, kept))
+    # who it is says where its key goes: a program that runs by itself does not change it either
+    for line in ("on notify sent_elsewhere", "update companions set place = 'https://elsewhere.example/v1'", "end", "notify sent_elsewhere 'now'"):
+        x.cmd(line)
+    time.sleep(0.5)
+    x.cmd("screen 1")
+    log_rows = [row.strip() for row in x.peek() if "sent_elsewhere" in row]
+    x.cmd("screen 0")
+    place = x.table("select place from companions")[0]["place"]
+    check("who the companion is: a program that runs by itself does not change it", place == "http://%s/v1/chat/completions" % there and log_rows[:1] and log_rows[0].startswith("on_notify_sent_elsewhere: The table companions is changed at the machine: it"), (place, log_rows))
+    x.cmd("drop program on_notify_sent_elsewhere")
     # Notes: kept in a table, and told to it again in the next conversations.
     model_says[:] = [{"facts": ["The user counts stars from 1 to 5."]}, {"said": "Noted."}]
     x.cmd("ask remember that I count stars from one to five", timeout=30)

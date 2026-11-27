@@ -222,7 +222,7 @@ with an error the model reads, when it is:
 | `reboot` | |
 | `ask`, `companion on` | It does not ask itself, nor turn itself on again. |
 | A block: `if`, `while`, `for`, `program`, `on`, `every` | One line at a time. |
-| A change to the tables `programs`, `acts` or `companions`; `drop program` | See below. |
+| A change to the tables `programs`, `acts` or `companions`, or another table given one of those names; `drop program` | See below. |
 | What needs the kernel while it is served: `net ping`, `net get`, `net restart`, `display test`, `disk check`... | The answer would come later, to nobody. |
 
 The author asked for the first two rows. The others were added while
@@ -239,7 +239,13 @@ stops it, could be walked around:
   a program started there with `run`;
 - the row of `companions` says where the model is, and that is where
   the key is sent: a companion that could change it could send the key
-  elsewhere;
+  elsewhere. For the same reason that table is changed at the machine
+  only, by anybody: see [Who it is](#who-it-is);
+- a table that is not there yet has a name all the same: until 27
+  November 2026 the companion could make a table, fill it, and give
+  it the name `programs` on a machine where no program was written
+  yet. `alter table ... rename to` one of the three names is refused
+  to it;
 - `acts` is the record of what it did.
 
 **What does not hold it.** Everything else at the prompt is its own to
@@ -346,10 +352,14 @@ with `http://` gets no key, and needs none to be asked: that is how
 the checks speak to a made-up model on the development machine.
 
 Sealed is not the same as trusted: the key goes to whatever `https://`
-place the row names. The companion cannot change that row, but whoever
-types at a prompt can, the prompt over the network included: while
-`remote on` is open, whoever has its code can have the key sent to a
-server of their own. `remote off` closes that way.
+place the row names. So the table `companions` is changed at the
+machine only, at its keyboard or on its serial port. From the prompt
+over the network, and from a program that runs by itself (which
+somebody there may have written), a statement that changes it, makes
+it, or gives its name to another table answers `The table companions
+is changed at the machine: it says where the key goes.` Until 27
+November 2026 whoever had the code of the network prompt could have
+had the key sent to a server of their own.
 
 ## How it is built
 
