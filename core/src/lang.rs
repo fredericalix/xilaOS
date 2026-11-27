@@ -631,6 +631,9 @@ pub struct Triggers {
     /// machine, since the year 2000.
     every: [(shell::Text, u64, u64, bool); MAX_EVERY],
     every_count: usize,
+    /// As jobs: what happened whose `on` programs are being run one after
+    /// the other, and the next of them to look at.
+    pending: Option<(Happened, usize)>,
 }
 
 impl Triggers {
@@ -641,6 +644,7 @@ impl Triggers {
             on_count: 0,
             every: [(FixedStr::new(), 0, 0, false); MAX_EVERY],
             every_count: 0,
+            pending: None,
         }
     }
 
@@ -662,6 +666,8 @@ fn refresh(sys: &mut System) {
     let clock = sys.now();
     let (triggers, now) = (&mut sys.triggers, sys.ticks);
     triggers.stale = false;
+    // the event whose programs are being run stays the one
+    triggers.pending = before.pending;
     if let Ok(Some(table)) = programs(&sys.db) {
         let _ = sys.db.scan(table, &mut |fields| {
             let (Field::Text(name), Field::Int(0), Field::Text(text)) = (fields[1], fields[2], fields[3]) else {
@@ -777,6 +783,33 @@ pub fn background(sys: &mut System, out: &mut dyn Out) {
     if sys.triggers.stale {
         refresh(sys);
     }
+    match crate::jobs::system_place(sys) {
+        // As jobs: this starts the next program when the one before has
+        // ended, and the turns it is given run it. One at a time, in the
+        // order a system without rooms runs them.
+        Some(place) => {
+            let mut looked = 0;
+            while crate::jobs::free(sys, place) {
+                let Some((program, happened)) = due(sys, out, &mut looked) else {
+                    break;
+                };
+                start(sys, place, program.bytes(), happened.as_ref(), out);
+            }
+        }
+        None => at_once(sys, out),
+    }
+    let unseen = sys.events.take_unseen();
+    if unseen > 0 {
+        let mut line = FixedStr::<COLS>::new();
+        let _ = write!(line, "{unseen} events came too fast for the programs that wait for them.");
+        out.line(Style::Error, line.bytes());
+    }
+}
+
+/// Runs to the end, here and now, the programs whose time has come and
+/// those that wait for what just happened: what a system does that was
+/// given no rooms for jobs.
+fn at_once(sys: &mut System, out: &mut dyn Out) {
     let clock = sys.now();
     for at in 0..sys.triggers.every_count.min(MAX_EVERY) {
         let (program, period, next, daily) = sys.triggers.every[at];
@@ -816,12 +849,83 @@ pub fn background(sys: &mut System, out: &mut dyn Out) {
             fire(sys, program.bytes(), Some(&happened), out);
         }
     }
-    let unseen = sys.events.take_unseen();
-    if unseen > 0 {
-        let mut line = FixedStr::<COLS>::new();
-        let _ = write!(line, "{unseen} events came too fast for the programs that wait for them.");
-        out.line(Style::Error, line.bytes());
+}
+
+/// The next program to run by itself, with what happened if something
+/// did: an `every` whose time has come, else the next `on` program of
+/// the event being gone through, else those of the next event. `looked`
+/// counts the events taken in this call, which are so many at most.
+fn due(sys: &mut System, out: &mut dyn Out, looked: &mut usize) -> Option<(shell::Text, Option<Happened>)> {
+    let clock = sys.now();
+    for at in 0..sys.triggers.every_count.min(MAX_EVERY) {
+        let (program, period, next, daily) = sys.triggers.every[at];
+        match (daily, clock) {
+            (false, _) if sys.ticks >= next => sys.triggers.every[at].2 = sys.ticks + period,
+            // the same hour tomorrow, by the clock and not by a count
+            (true, Some(clock)) if clock >= next => sys.triggers.every[at].2 = crate::clock::next_at(clock, period as u32),
+            _ => continue,
+        }
+        return Some((program, None));
     }
+    loop {
+        let (happened, from) = match sys.triggers.pending.take() {
+            Some(pending) => pending,
+            None if *looked == PER_CALL => return None,
+            None => {
+                *looked += 1;
+                (sys.events.take_happened()?, 0)
+            }
+        };
+        // a program may have changed the programs
+        if sys.triggers.stale {
+            refresh(sys);
+        }
+        for at in from..sys.triggers.on_count {
+            let (when, target, program) = sys.triggers.on[at];
+            let is = matches!(
+                (when, happened.what),
+                (When::Insert, What::Insert(_)) | (When::Update, What::Update(_)) | (When::Delete, What::Delete(_)) | (When::Notify, What::Said)
+            );
+            if !is || target.bytes() != happened.channel.bytes() {
+                continue;
+            }
+            if happened.depth >= MAX_CHAIN {
+                let line = FixedStr::<LINE_MAX>::from_bytes(program.bytes()).also(b": not run, programs kept starting each other.");
+                out.line(Style::Error, line.bytes());
+                continue;
+            }
+            // the programs after this one are for when it has ended
+            sys.triggers.pending = Some((happened, at + 1));
+            return Some((program, Some(happened)));
+        }
+    }
+}
+
+/// Starts a program for the system as a job: what `fire` does before it
+/// runs one, the names of what happened among it.
+fn start(sys: &mut System, place: usize, program: &[u8], happened: Option<&Happened>, out: &mut dyn Out) {
+    let session = core::mem::replace(&mut sys.session, BACKGROUND);
+    sys.vars[BACKGROUND] = Vars::new();
+    // what this program causes is one step further down the chain
+    let depth = happened.map_or(0, |happened| happened.depth) + 1;
+    let mut named = Named { out, name: program };
+    let ready = match happened {
+        Some(happened) => describe(sys, happened),
+        None => Ok(true),
+    };
+    sys.vars[BACKGROUND].clock = sys.now();
+    match ready {
+        // why it could not start, if it could not, was said
+        Ok(true) => crate::jobs::begin_system(sys, place, program, depth, &mut named),
+        Ok(false) => {}
+        Err(message) => named.line(Style::Error, message.bytes()),
+    }
+    sys.session = session;
+}
+
+/// What a program that runs by itself says, with its name before it.
+pub(crate) fn named<'a>(out: &'a mut dyn Out, name: &'a [u8]) -> impl Out + 'a {
+    Named { out, name }
 }
 
 #[cfg(test)]
@@ -1111,11 +1215,104 @@ mod tests {
         assert_eq!(said(&mut sys, &["if 1 = 1", "program nested", "end", "end"]), ["A program is made at the prompt, not inside another.", "Line 2 is not right: nothing was run."]);
     }
 
+    thread_local! {
+        /// Whether the tests of this thread give their systems rooms, so that
+        /// the programs that run by themselves run as jobs.
+        static AS_JOBS: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+
     /// Lets the system run what waits, and returns what the programs said.
+    /// As jobs, they are given their turns until none is left to run.
     fn in_background(sys: &mut System) -> Vec<String> {
         let mut out = Lines::default();
-        background(sys, &mut out);
-        out.lines
+        if !AS_JOBS.get() {
+            background(sys, &mut out);
+            return out.lines;
+        }
+        if sys.rooms.is_none() {
+            crate::machine::tests::rooms(sys, 2);
+        }
+        for _ in 0..100_000 {
+            background(sys, &mut out);
+            if crate::jobs::idle(sys) {
+                return out.lines;
+            }
+            // one instruction a turn: the worst case for what must be put back between two
+            crate::jobs::work(sys, &mut out, &mut || true);
+        }
+        panic!("the programs never end: {:?}", out.lines);
+    }
+
+    #[test]
+    fn the_programs_that_run_by_themselves_run_the_same_as_jobs() {
+        AS_JOBS.set(true);
+        // with rooms, the background starts a program and does not run it: its turns do
+        let mut sys = books();
+        crate::machine::tests::rooms(&mut sys, 2);
+        type_lines(&mut sys, &["on notify alerts", "say 'heard ' + text", "say 'twice'", "end", "notify alerts, 'this'", "notify alerts, 'that'"]);
+        let mut log = Lines::default();
+        background(&mut sys, &mut log);
+        background(&mut sys, &mut log);
+        assert!(log.lines.is_empty(), "{:?}", log.lines);
+        let job = &sys.jobs.list()[1];
+        assert_eq!((job.program.bytes(), job.by, job.state, job.watch), (&b"on_notify_alerts"[..], BACKGROUND, crate::jobs::State::Ready, crate::jobs::Watch::Nobody));
+        // one at a time: the second waits for the first to end
+        crate::jobs::work(&mut sys, &mut log, &mut || true);
+        background(&mut sys, &mut log);
+        assert_eq!(log.lines, ["on_notify_alerts: heard this"]);
+        crate::jobs::work(&mut sys, &mut log, &mut || false);
+        assert_eq!(log.lines, ["on_notify_alerts: heard this", "on_notify_alerts: twice"]);
+        assert!(sys.jobs.list()[1].ended() && sys.firing.is_empty() && sys.session == crate::events::SCREEN);
+        background(&mut sys, &mut log);
+        crate::jobs::work(&mut sys, &mut log, &mut || false);
+        assert_eq!(log.lines[2..], ["on_notify_alerts: heard that", "on_notify_alerts: twice"]);
+        // they are not written in the record of the jobs people start
+        assert!(sys.db.find(crate::jobs::LOG).is_none());
+        a_program_runs_when_a_row_is_added();
+        programs_run_on_changes_removals_and_notifications();
+        a_program_runs_again_and_again();
+        what_goes_wrong_in_the_background_is_said_in_the_log();
+        a_program_that_runs_by_itself_neither_takes_a_disk_nor_opens_the_machine();
+        a_program_that_hears_something_knows_the_time();
+        a_program_runs_every_day_at_its_time();
+        the_first_line_of_a_program_that_runs_by_itself_is_checked();
+        programs_that_start_each_other_keep_their_order_and_their_limit();
+    }
+
+    #[test]
+    fn programs_that_start_each_other_keep_their_order_and_their_limit() {
+        let mut sys = books();
+        type_lines(&mut sys, &["create table a (n int)", "create table b (n int)", "create table c (n int)"]);
+        // a row in a adds one in b and tells of it, b in c, c in a again: round and round, until the chain is cut
+        type_lines(&mut sys, &["on insert into a", "say 'a ' + new.n", "insert into b values (new.n + 1)", "notify heard, 'from a'", "end"]);
+        type_lines(&mut sys, &["on insert into b", "say 'b ' + new.n", "insert into c values (new.n + 1)", "end"]);
+        type_lines(&mut sys, &["on insert into c", "say 'c ' + new.n", "insert into a values (new.n + 1)", "end"]);
+        type_lines(&mut sys, &["on notify heard", "say 'heard ' + text", "end"]);
+        // two programs for the same thing run in the order they were made
+        type_lines(&mut sys, &["on update a", "say 'changed'", "end", "insert into a values (1)"]);
+        let mut said = Vec::new();
+        for _ in 0..12 {
+            said.extend(in_background(&mut sys));
+        }
+        assert_eq!(
+            said,
+            [
+                "on_insert_a: a 1",
+                "on_insert_b: b 2",
+                "on_notify_heard: heard from a",
+                "on_insert_c: c 3",
+                "on_insert_a: a 4",
+                "on_insert_b: not run, programs kept starting each other.",
+                "on_notify_heard: not run, programs kept starting each other.",
+            ]
+        );
+        // the names of each run are its own: nothing of the last one is left for the next
+        type_lines(&mut sys, &["on notify fresh", "say made", "let made = 1", "end", "notify fresh", "notify fresh"]);
+        let mut said = Vec::new();
+        for _ in 0..4 {
+            said.extend(in_background(&mut sys));
+        }
+        assert_eq!(said, ["on_notify_fresh: Unknown name: made", "on_notify_fresh: Stopped at line 1 of on_notify_fresh."].repeat(2));
     }
 
     #[test]

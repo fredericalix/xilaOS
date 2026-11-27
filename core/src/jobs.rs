@@ -156,13 +156,17 @@ pub struct Job {
     taken: bool,
     /// Whether something the kernel answered it was a failure.
     refused: bool,
+    /// A program that runs by itself, which the system started: how far
+    /// down a chain of programs that start each other it is.
+    pub system: bool,
+    depth: u8,
     /// What it said, when nobody waits for it.
     pub said: Said,
 }
 
 impl Job {
     const fn new() -> Job {
-        Job { number: 0, program: Text::new(), state: State::Done, by: 0, acting: false, watch: Watch::Nobody, began: None, statements: 0, vars: Vars::new(), own: false, taken: true, refused: false, said: Said::new() }
+        Job { number: 0, program: Text::new(), state: State::Done, by: 0, acting: false, watch: Watch::Nobody, began: None, statements: 0, vars: Vars::new(), own: false, taken: true, refused: false, system: false, depth: 0, said: Said::new() }
     }
 
     /// Whether it will run no more.
@@ -201,6 +205,36 @@ impl Default for Jobs {
 /// last room being the system's.
 pub fn places(sys: &System) -> usize {
     sys.rooms.as_ref().map_or(0, |rooms| rooms.len().saturating_sub(1)).min(PLACES)
+}
+
+/// The place of the programs that run by themselves, on a system that
+/// was given rooms: the last one.
+pub fn system_place(sys: &System) -> Option<usize> {
+    sys.rooms.as_ref().and_then(|rooms| rooms.len().checked_sub(1)).filter(|place| *place <= PLACES)
+}
+
+/// Whether nothing runs at a place.
+pub fn free(sys: &System, place: usize) -> bool {
+    sys.jobs.list.get(place).is_some_and(|job| job.number == 0 || job.ended())
+}
+
+/// Starts a program that runs by itself as the system's job. The
+/// session is the one such programs run as, and their names, already
+/// those of what happened, become the job's. It keeps the limits of a
+/// program nobody watches. Why it could not start is said.
+pub(crate) fn begin_system(sys: &mut System, place: usize, program: &[u8], depth: u8, out: &mut dyn Out) {
+    if machine::start_program(sys, Room::Given(place), program, out).is_none() {
+        return;
+    }
+    if let Some(rooms) = &mut sys.rooms {
+        rooms[place].unbound(false);
+    }
+    sys.jobs.last += 1;
+    let names = sys.vars[sys.session].clone();
+    let job = &mut sys.jobs.list[place];
+    *job = Job::new();
+    (job.number, job.program, job.state, job.by, job.watch) = (sys.jobs.last, Text::from_bytes(program), State::Ready, sys.session, Watch::Nobody);
+    (job.began, job.own, job.system, job.depth, job.vars) = (names.clock, true, true, depth, names);
 }
 
 fn missing(number: u32) -> Message {
@@ -272,7 +306,17 @@ pub fn turn(sys: &mut System, at: usize, out: &mut dyn Out, spent: &mut dyn FnMu
     if own {
         core::mem::swap(&mut sys.vars[by], &mut sys.jobs.list[at].vars);
     }
+    // a program that runs by itself is known by its name to what it asks
+    // of the companion, and what it causes is one step down its chain
+    if sys.jobs.list[at].system {
+        sys.firing = crate::sql::Name::from_bytes(sys.jobs.list[at].program.bytes());
+        sys.events.depth = sys.jobs.list[at].depth;
+    }
     let came = machine::turn(sys, Room::Given(at), 0, out, spent);
+    if sys.jobs.list[at].system {
+        sys.firing.clear();
+        sys.events.depth = 0;
+    }
     if own {
         core::mem::swap(&mut sys.vars[by], &mut sys.jobs.list[at].vars);
     }
@@ -335,7 +379,7 @@ pub fn end(sys: &mut System, number: u32) -> Result<(), Message> {
     }
     machine::stop(sys, Room::Given(at));
     sys.jobs.list[at].state = State::Stopped;
-    if sys.jobs.list[at].watch == Watch::Nobody {
+    if sys.jobs.list[at].watch == Watch::Nobody && !sys.jobs.list[at].system {
         record(sys, at);
     }
     Ok(())
@@ -361,6 +405,12 @@ pub fn work(sys: &mut System, log: &mut dyn Out, spent: &mut dyn FnMut() -> bool
         job.number != 0 && job.watch == Watch::Nobody && job.state == State::Ready
     })?;
     sys.jobs.next = (at + 1) % count;
+    if sys.jobs.list[at].system {
+        // a program that runs by itself says in the log, under its name
+        let name = sys.jobs.list[at].program;
+        turn(sys, at, &mut crate::lang::named(log, name.bytes()), spent);
+        return (sys.jobs.list[at].state == State::Waiting).then_some(at);
+    }
     // what it says is kept with it: taken out while the system is its own to change
     let mut said = core::mem::take(&mut sys.jobs.list[at].said);
     turn(sys, at, &mut said, spent);
@@ -376,7 +426,13 @@ pub fn work(sys: &mut System, log: &mut dyn Out, spent: &mut dyn FnMut() -> bool
 
 /// The kernel served what the job at a place asked: what it answered is
 /// said where the job says, and the job goes on.
-pub fn served(sys: &mut System, at: usize, _log: &mut dyn Out) -> bool {
+pub fn served(sys: &mut System, at: usize, log: &mut dyn Out) -> bool {
+    if sys.jobs.list[at].system {
+        let name = sys.jobs.list[at].program;
+        let ok = shell::served(sys, &mut crate::lang::named(log, name.bytes()));
+        answered(sys, at, ok);
+        return ok;
+    }
     let mut said = core::mem::take(&mut sys.jobs.list[at].said);
     let ok = shell::served(sys, &mut said);
     sys.jobs.list[at].said = said;
