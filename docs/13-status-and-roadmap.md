@@ -44,14 +44,14 @@ were also tried on the real machine.
 | Names (DNS): `net name`, `net names`, `net get` by name | yes | yes, on 27 November 2026, asked of the name server the home router named; `net names` not tried |
 | TLS 1.3, the side that calls: `net get https://`, checked against OpenSSL and servers of the Internet | yes | yes, on 27 November 2026: three servers of the Internet, with what its processor draws and the time its clock tells |
 | HTTP questions with lines and bytes of their own (`net post`), answers read whole: a said length, chunks, to the end | yes | `net get` only, on 27 November 2026; `net post` not tried |
-| Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | yes, on 27 November 2026: a key kept, used, and not among the tables the companion listed; kept between starts not tried |
+| Keys to services (`key`): kept on the disk in a table SQL does not know, shown by nothing | yes | yes, on 27 November 2026: a key kept, used, and not among the tables the companion listed; still there after `install system` and a restart |
 | What happens to the machine said as events: `start`, `network`, `disk`, `tasks`, `memory` | yes; `disk` and `memory` by unit tests only | not tried |
 | The companion asked by programs (`ask` in an `on` or `every` program), which is how it reacts to what happens | yes | yes, on 27 November 2026: an `on notify` program |
 | The companion, first form: `ask` and a screen of its own, a model of the Internet that answers and reads the tables (`select`), what is said kept in `talk` | yes, against a made-up model and a real one | yes, on 27 November 2026, asked by a program: through a relay first, then with a key kept there, through TLS (see below); `ask` typed there with an answer not tried |
 | The companion acts (`run`: one line at the prompt, written in `acts`), remembers (`remember`, the table `remembered`) and is stopped (`companion off`, kept between starts); what is refused to it | yes, against a made-up model and a real one; the refusals against the made-up one | yes, on 27 November 2026, through the relay; of the refusals only `web on`, which the real model tried; kept between starts not tried |
 | `install`, `disk erase`, `remote on`, `web on` refused to a program that runs by itself; `disk erase yes` refused to the network session | yes | not tried |
-| The table `companions`, which says where the key goes, changed at the machine only: not from the network prompt, not by a program that runs by itself | yes | not tried |
-| Accented letters between the font and the rest of the world (UTF-8): what is typed to the companion, what it answers, the web pages | yes | not tried |
+| The table `companions`, which says where the key goes, changed at the machine only: not from the network prompt, not by a program that runs by itself | yes | yes, on 27 November 2026, for the network prompt |
+| Accented letters between the font and the rest of the world (UTF-8): what is typed to the companion, what it answers, the web pages | yes | yes, on 27 November 2026, for what it answers (see below) |
 | TCP, both sides | yes | yes, through the web pages |
 | Prompt over the network (`remote`), not encrypted | yes | yes |
 | Tables in a browser (`web`), read only, not encrypted | yes | yes |
@@ -291,15 +291,25 @@ first: `companions` is now changed at the machine only.
 
 At the end of that day the system on the T430's disk was replaced
 once more (`install from`, `install system`) by the one that holds
-those two corrections and the accented letters. None of the three was
-tried there after that, nor whether the key was still there after the
-restart.
+those two corrections and the accented letters. After the restart
+the key was still there, and a change to `companions` was refused to
+the network prompt. The accents were not there at first: the author,
+writing to the companion in French, still read `t?che`. The system
+was not at fault. The rows of `talk` written before it held `?` where
+accents had been lost, the last six turns go to the model with every
+question, and the model wrote as it saw itself write: the same rows
+copied into QEMU gave the same `?`, and a `talk` with nothing lost
+gave accents. Each answer written so kept the fault going. With
+`talk` emptied on the T430 the next answer came with its accents, on
+the screen and in the table.
 
 What still waits for the T430, since it cannot be done over the
-network or was not tried: the key still there after a restart, `ask`
-typed at the machine and on the companion's screen with an answer,
-what happens to the machine said as events, `net post`, the dead keys on the real keyboard, and a
-power cut while tables with indexes change.
+network or was not tried: `ask` typed at the prompt (the author wrote
+on the companion's screen and was answered there), accented letters
+typed to the companion (`keymap fr`) and in the web pages, `now` in a
+program that hears something, what happens to the machine said as
+events, `net post`, the dead keys on the real keyboard, and a power
+cut while tables with indexes change.
 
 ### The companion
 

@@ -73,7 +73,11 @@ has every accented small letter of French and some of the capitals;
 a letter it lacks comes without its accent or in two letters (`È` as
 `E`, `œ` as `oe`), the quotes and dashes of typographers in their
 plain form, and what it has nothing like (another alphabet, an emoji)
-as `?`.
+as `?`. That `?` is what `talk` keeps, and so what the model reads
+of its own earlier answers at the next question: a model that sees
+itself write `?` for a letter goes on doing it. It was seen on the
+T430, whose `talk` held answers of a system from before the accents;
+`delete from talk` was the cure.
 
 When there is no answer, one line says why: `No key opens the model.
 Type key set openrouter and the key.`, `The model's server refused
