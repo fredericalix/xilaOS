@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn the_cursor_moves_one_step_per_picture() {
-        let (mut ui, mut sys) = (Ui::new(), System::new());
+        let (mut ui, mut sys) = (Box::new(Ui::new()), Box::new(System::new()));
         let (mut steps, mut level) = (0, ui.grid.pulse);
         for _ in 0..128 {
             ui.tick(&mut sys, 1);
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn what_the_kernel_answers_is_shown_where_the_command_was_typed() {
-        let (mut ui, mut sys) = (Ui::new(), System::new());
+        let (mut ui, mut sys) = (Box::new(Ui::new()), Box::new(System::new()));
         type_text(&mut ui, &mut sys, "display test");
         ui.key(&mut sys, key(Key::Enter));
         assert_eq!(sys.request, Some(shell::Request::Measure));
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn a_code_takes_the_screen_until_a_key_is_pressed() {
-        let (mut ui, mut sys) = (Ui::new(), System::new());
+        let (mut ui, mut sys) = (Box::new(Ui::new()), Box::new(System::new()));
         ui.grid.rows = 48;
         ui.welcome();
         type_text(&mut ui, &mut sys, "qr about");

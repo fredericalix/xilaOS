@@ -32,6 +32,7 @@ pub mod json;
 pub mod keys;
 pub mod lang;
 pub mod line;
+pub mod machine;
 pub mod mem;
 pub mod net;
 pub mod qr;

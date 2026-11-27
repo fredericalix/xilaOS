@@ -903,8 +903,10 @@ mod tests {
     use crate::shell::tests::run_line;
 
     /// A system with an address, a key, and a table of its own.
-    fn ready() -> System {
-        let mut sys = System::new();
+    // On the heap: a test makes several, and each is too large for its stack
+    // since a System holds the room of the virtual machine.
+    fn ready() -> Box<System> {
+        let mut sys = Box::new(System::new());
         sys.net.ip = Some([10, 0, 2, 15]);
         crate::secrets::set(&mut sys.db, b"openrouter", b"sk-or-v1-secret").unwrap();
         run_line(&mut sys, "create table notes (label text, stars int)");

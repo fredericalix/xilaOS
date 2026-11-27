@@ -904,6 +904,10 @@ pub struct System {
     pub queried: [u64; crate::catalog::TABLES.len()],
     /// Left by a command for the kernel.
     pub request: Option<Request>,
+    /// The virtual machine, which runs the language: its units of code,
+    /// where each is, its cursors. See `machine.rs`. (`machine` is the
+    /// computer.)
+    pub vm: crate::machine::Machine,
     pub display: Display,
     /// The kernel's answer to `Request::Measure`.
     pub measured: Option<Measure>,
@@ -1047,6 +1051,7 @@ impl System {
             session: crate::events::SCREEN,
             queried: [0; crate::catalog::TABLES.len()],
             request: None,
+            vm: crate::machine::Machine::new(),
             display: Display { shown: Pictures::Direct, every: 0, sweeps: 0, light: None, direct: false, combining: false, whole_us: 0, firmware_us: 0, pictures: 0, longest_us: 0, city_us: 0, skipped: 0 },
             measured: None,
             note: Note::new(),
