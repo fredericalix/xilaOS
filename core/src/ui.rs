@@ -392,6 +392,34 @@ impl Ui {
         }
     }
 
+    /// Gives a turn to one of the jobs nobody waits for. What a program
+    /// that runs by itself says goes to the log screen. Returns the place
+    /// of a job that asked the kernel something: once that is served,
+    /// `carried` tells it.
+    pub fn carry(&mut self, sys: &mut System, spent: &mut dyn FnMut() -> bool) -> Option<usize> {
+        let rows = self.terms[LOG].len();
+        let asked = crate::jobs::work(sys, &mut TermOut { term: &mut self.terms[LOG] }, spent);
+        self.logged(sys, rows);
+        asked
+    }
+
+    /// The kernel served what the job at a place asked: its answer is
+    /// said where that job says, and the job goes on.
+    pub fn carried(&mut self, sys: &mut System, at: usize) {
+        let rows = self.terms[LOG].len();
+        crate::jobs::served(sys, at, &mut TermOut { term: &mut self.terms[LOG] });
+        self.logged(sys, rows);
+    }
+
+    /// The log may have grown: the system knows how long it is, and the
+    /// screen that shows it is drawn again.
+    fn logged(&mut self, sys: &mut System, rows: usize) {
+        if self.terms[LOG].len() != rows {
+            sys.log_rows = self.terms[LOG].len();
+            self.dirty = true;
+        }
+    }
+
     /// Shows on the last row how far a long piece of work is, written
     /// then read back, for the kernel to put on the screen while it works:
     /// the next `render` takes the row back. Returns how much of the bar
@@ -1329,5 +1357,41 @@ mod tests {
         let shown = rows(&mut ui, &mut sys);
         assert_eq!(shown[shown.len() - 2].trim(), "after");
         assert!(shown.last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
+    }
+
+    #[test]
+    fn the_jobs_nobody_waits_for_are_carried_and_the_log_shows_what_they_say() {
+        let (mut ui, mut sys) = with_jobs();
+        // (a job that is submitted has names of its own: one that counts to a name of the screen would stop)
+        for line in ["on notify alerts", "say 'heard ' + text", "spin", "say 'and went on'", "end", "program plain", "say 'counted'", "end", "notify alerts, 'this'", "submit plain"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        // the tick starts the program that runs by itself; carrying runs it, and the one that was submitted
+        ui.tick(&mut sys, 1);
+        let logged = ui.terms[LOG].len();
+        let mut asked = None;
+        for _ in 0..3000 {
+            asked = asked.or(ui.carry(&mut sys, &mut || true));
+            if asked.is_some() {
+                break;
+            }
+        }
+        // the program asked the kernel something: it is served, and what was answered is in the log too
+        assert_eq!(sys.request, Some(shell::Request::Spin));
+        sys.request = None;
+        ui.carried(&mut sys, asked.unwrap());
+        for _ in 0..3000 {
+            ui.carry(&mut sys, &mut || true);
+        }
+        assert!(crate::jobs::idle(&sys));
+        sys.screen = LOG;
+        let shown = rows(&mut ui, &mut sys);
+        assert!(shown.iter().any(|text| text.trim() == "on_notify_alerts: heard this"), "{shown:?}");
+        assert!(shown.iter().any(|text| text.trim() == "on_notify_alerts: and went on"));
+        assert_eq!(sys.log_rows, ui.terms[LOG].len());
+        assert!(ui.terms[LOG].len() > logged);
+        // what the submitted job said is with it, not in the log
+        assert!(!shown.iter().any(|text| text.contains("counted")));
+        assert_eq!(sys.jobs.list()[0].said.lines().last().unwrap(), b"counted");
     }
 }

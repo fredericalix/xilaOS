@@ -84,6 +84,42 @@ struct Stage {
     code: alloc::vec::Vec<u32>,
 }
 
+/// A virtual machine as it is before anything runs in it: what each room
+/// of the jobs is made from. One of them is in the file of the kernel,
+/// not nine: a machine is 270 KB, and is not made of zeros.
+static NEW_ROOM: xila_core::machine::Machine = xila_core::machine::Machine::new();
+
+/// The rooms of the jobs: a virtual machine each, eight for the jobs
+/// people start and one for the programs that run by themselves, in the
+/// memory of the kernel. Asked for once, by the interface task as it
+/// sets up; they are never given back.
+fn rooms() -> &'static mut [xila_core::machine::Machine] {
+    use xila_core::machine::Machine;
+    let count = xila_core::jobs::PLACES + 1;
+    let Ok(layout) = core::alloc::Layout::array::<Machine>(count) else {
+        fatal(format_args!("the rooms of the jobs have no size"));
+    };
+    // Safety: the memory is as large as `count` machines and aligned for
+    // them; each is written whole before the slice is made, from a machine
+    // that owns nothing outside itself, so a copy of its bytes is one too.
+    unsafe {
+        let memory = alloc::alloc::alloc(layout) as *mut Machine;
+        if memory.is_null() {
+            fatal(format_args!("no memory for the rooms of the jobs"));
+        }
+        for at in 0..count {
+            core::ptr::copy_nonoverlapping(&NEW_ROOM, memory.add(at), 1);
+        }
+        core::slice::from_raw_parts_mut(memory, count)
+    }
+}
+
+/// How long jobs run before the system is given back, in microseconds:
+/// those nobody waits for, then the one a prompt waits for, which has
+/// most of a tick since that prompt does nothing else meanwhile.
+const SLICE: u64 = 3_000;
+const SLICE_WAITED: u64 = 8_000;
+
 static SHARED: task::Mutex<Shared> =
     task::Mutex::new(Shared { ui: Ui::new(), sys: System::new(), stage: None, disks: disk::Disks::new(), system: &[], nic: None, answer: xila_core::remote::Answer::new(), page: xila_core::web::Page::new(), call: None, room: None });
 
@@ -195,6 +231,7 @@ extern "C" fn interface(boot: usize) -> ! {
         let Shared { ui, sys, disks, system, nic, .. } = &mut *shared;
         ui.grid.rows = screen.rows;
 
+        sys.rooms = Some(rooms());
         sys.machine.cpu = arch::cpu_name();
         sys.machine.firmware = boot.firmware;
         sys.machine.screen_width = screen.width() as u32;
@@ -349,6 +386,9 @@ extern "C" fn interface(boot: usize) -> ! {
     if serial.present() && task::spawn(b"serial shell", serial_shell, 0, true).is_none() {
         fatal(format_args!("no room for the serial shell task"));
     }
+    if task::spawn(b"jobs", jobs, 0, true).is_none() {
+        fatal(format_args!("no room for the task of the jobs"));
+    }
 
     let mut decoder = Decoder::new();
     let mut seen = arch::ticks();
@@ -394,6 +434,15 @@ extern "C" fn interface(boot: usize) -> ! {
             if now != seen {
                 ui.tick(sys, now - seen);
                 seen = now;
+            }
+            // The program the prompt of the screen waits for: some of it, then
+            // the rest of this pass. What it asks of the kernel is served as
+            // what a command typed here asks.
+            let began = arch::micros();
+            ui.work(sys, &mut || arch::micros().wrapping_sub(began) >= SLICE_WAITED);
+            if sys.request.is_some() {
+                serve(sys, ui, Some(stage), disks, system, nic.as_mut());
+                ui.served(sys);
             }
             // The network: the frames that came, and the time that passes.
             if let Some(nic) = nic {
@@ -992,6 +1041,36 @@ extern "C" fn spin(_: usize) -> ! {
     }
 }
 
+/// The task that carries the jobs nobody waits for: those that were
+/// submitted or sent to the background, and the programs that run by
+/// themselves. It lets one of them run for a slice, serves what it may
+/// have asked of the kernel, and gives the system back: nothing a job
+/// does holds the system longer than a slice and one instruction.
+extern "C" fn jobs(_: usize) -> ! {
+    loop {
+        let worked = {
+            let mut shared = SHARED.lock();
+            let Shared { ui, sys, stage, disks, system, nic, .. } = &mut *shared;
+            if xila_core::jobs::idle(sys) || sys.request.is_some() {
+                false
+            } else {
+                observe(sys);
+                let began = arch::micros();
+                if let Some(at) = ui.carry(sys, &mut || arch::micros().wrapping_sub(began) >= SLICE) {
+                    serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut());
+                    ui.carried(sys, at);
+                }
+                true
+            }
+        };
+        if worked {
+            arch::yield_now();
+        } else {
+            task::sleep(1);
+        }
+    }
+}
+
 /// The task of the shell on the serial port.
 extern "C" fn serial_shell(_: usize) -> ! {
     let serial = serial();
@@ -1048,9 +1127,43 @@ extern "C" fn serial_shell(_: usize) -> ! {
                         }
                         ok
                     };
+                    // A program: this prompt waits for it, and the rest of the
+                    // machine does not. Ctrl+C stops it.
+                    let mut ok = ok;
+                    loop {
+                        {
+                            let mut shared = SHARED.lock();
+                            let Shared { ui, sys, stage, disks, system, nic, .. } = &mut *shared;
+                            let watch = xila_core::jobs::Watch::Serial;
+                            let Some(at) = xila_core::jobs::watched(sys, watch) else {
+                                break;
+                            };
+                            while let Some(byte) = serial.read() {
+                                if byte == 0x03 {
+                                    if let Some(message) = xila_core::jobs::stop_watched(sys, watch) {
+                                        serial.write(message.bytes());
+                                        serial.write(b"\n");
+                                    }
+                                }
+                            }
+                            observe(sys);
+                            let began = arch::micros();
+                            xila_core::jobs::turn(sys, at, &mut SerialOut { serial: &serial }, &mut || arch::micros().wrapping_sub(began) >= SLICE_WAITED);
+                            if sys.request.is_some() {
+                                serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut());
+                                let answered = shell::served(sys, &mut SerialOut { serial: &serial });
+                                xila_core::jobs::answered(sys, at, answered);
+                            }
+                            ui.dirty = true;
+                            if let Some(went) = xila_core::jobs::outcome(sys, watch) {
+                                ok &= went;
+                                break;
+                            }
+                        }
+                        arch::yield_now();
+                    }
                     // A question to the companion: this prompt waits for
                     // the answer, and the rest of the machine does not.
-                    let mut ok = ok;
                     loop {
                         {
                             let mut shared = SHARED.lock();
