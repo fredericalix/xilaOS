@@ -605,6 +605,7 @@ pub const MAX_VARS: usize = 32;
 /// Longest name of a variable.
 pub const VAR_NAME: usize = 32;
 
+#[derive(Clone)]
 pub struct Vars {
     names: [FixedStr<VAR_NAME>; MAX_VARS],
     values: [Value; MAX_VARS],

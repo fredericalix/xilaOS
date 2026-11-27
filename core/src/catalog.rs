@@ -151,6 +151,11 @@ impl Source for System {
         self.read(table, first, last, true, visit)
     }
 
+    fn last_id(&self, table: usize) -> Option<i64> {
+        let stored = self.db.tables().get(table.checked_sub(TABLES.len())?)?;
+        Some(stored.last_id() as i64)
+    }
+
     fn scan_by(&self, table: usize, column: usize, first: &Value, last: &Value, apart: bool, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
         let found = table.checked_sub(TABLES.len()).and_then(|index| Some((index, self.db.tables().get(index)?)));
         let Some((index, stored)) = found else {

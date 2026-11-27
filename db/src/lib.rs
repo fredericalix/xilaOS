@@ -266,6 +266,11 @@ impl Table {
         self.rows as usize
     }
 
+    /// The largest id the table has given a row: no row has one above.
+    pub fn last_id(&self) -> u64 {
+        self.next_id - 1
+    }
+
     /// Index of a column by name, whatever the case of the letters.
     pub fn column(&self, name: &[u8]) -> Option<usize> {
         self.columns.iter().position(|column| column.name.eq_ignore_ascii_case(name))

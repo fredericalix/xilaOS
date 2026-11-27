@@ -255,6 +255,13 @@ pub trait Source {
     fn scan_apart(&self, table: usize, first: i64, last: i64, visit: &mut dyn FnMut(&Row)) -> Result<(), Message> {
         self.scan_among(table, first, last, visit)
     }
+    /// The largest whole number the first column of a table has had, when
+    /// the table gives its rows in the order of that column and finds them
+    /// by it (`scan_among`): the `id` of a stored table. None for the
+    /// others, whose rows a cursor cannot walk.
+    fn last_id(&self, _table: usize) -> Option<i64> {
+        None
+    }
 }
 
 pub type Message = FixedStr<80>;
@@ -463,6 +470,11 @@ pub struct Rows {
 }
 
 impl Rows {
+    /// A result with nothing in it.
+    pub const fn empty() -> Rows {
+        Rows { name: Name::new(), headers: [Name::new(); MAX_COLUMNS], cols: 0, rows: [[Value::Null; MAX_COLUMNS]; TABLE_ROWS], count: 0, more: 0 }
+    }
+
     /// The result as a table of texts, ready to be shown.
     pub fn table(&self) -> Table {
         let mut header: [&[u8]; MAX_COLUMNS] = [b""; MAX_COLUMNS];
@@ -487,12 +499,132 @@ impl Rows {
 }
 
 /// Runs a SELECT and returns its result as a table.
+/// Rows a walk asks for at a time: what a result holds.
+const BATCH: i64 = TABLE_ROWS as i64;
+/// The widest span of ids a walk looks at in one go, when rows are few.
+const WIDEST: i64 = 1 << 20;
+
+/// Where a cursor is in the table it walks by `id`.
+struct Walk {
+    /// The last id looked at: the next rows are after it.
+    after: i64,
+    /// The largest id the table had when the walk began.
+    upto: i64,
+    /// How many ids to look at next time.
+    width: i64,
+    opened: bool,
+    /// Nothing is left to read.
+    done: bool,
+    /// The SELECT could not be walked: it was run whole.
+    whole: bool,
+}
+
+impl Walk {
+    const fn new() -> Walk {
+        Walk { after: 0, upto: 0, width: BATCH, opened: false, done: false, whole: false }
+    }
+}
+
+/// The rows of a SELECT, one at a time: what a loop of the language reads.
+///
+/// A SELECT of one stored table that neither sorts, groups nor limits is
+/// *walked* by `id`, 32 rows at a time, so it may give any number of
+/// rows: each as it is when its 32 are read, changes made meanwhile
+/// included, but none added after the cursor opened, so that a loop
+/// that adds to the table it reads ends. Any other SELECT (a join, a
+/// view, `ORDER BY`, `GROUP BY`, a function over the rows, `LIMIT`) is
+/// worked out whole when the cursor opens, and is refused when it has
+/// more rows than a result holds. The names of the SELECT are those of
+/// the moment the cursor opened.
+pub struct Cursor {
+    rows: Rows,
+    at: usize,
+    walk: Walk,
+    vars: Vars,
+}
+
+impl Cursor {
+    pub const fn new() -> Cursor {
+        let mut cursor = Cursor { rows: Rows::empty(), at: 0, walk: Walk::new(), vars: Vars::new() };
+        cursor.walk.whole = true;
+        cursor
+    }
+
+    /// Starts reading a SELECT. Says why when it cannot be read.
+    pub fn open(&mut self, source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<(), Message> {
+        self.close();
+        self.vars = vars.clone();
+        self.walk = Walk::new();
+        let rows = match run(source, &self.vars, query, Some(&mut self.walk)) {
+            Ok(rows) => rows,
+            Err(message) => {
+                self.close();
+                return Err(message);
+            }
+        };
+        if self.walk.whole && rows.more > 0 {
+            let mut message = Message::new();
+            let _ = write!(message, "A loop takes {} rows at most; this query has {}.", rows.count, rows.count + rows.more);
+            self.close();
+            return Err(message);
+        }
+        self.rows = rows;
+        Ok(())
+    }
+
+    /// The next row, or None when there is none left. `query` is the
+    /// SELECT the cursor was opened with.
+    pub fn next(&mut self, source: &dyn Source, query: &[u8]) -> Result<Option<[Value; MAX_COLUMNS]>, Message> {
+        loop {
+            if self.at < self.rows.count {
+                self.at += 1;
+                return Ok(Some(self.rows.rows[self.at - 1]));
+            }
+            if self.walk.whole || self.walk.done {
+                return Ok(None);
+            }
+            match run(source, &self.vars, query, Some(&mut self.walk)) {
+                Ok(rows) => (self.rows, self.at) = (rows, 0),
+                Err(message) => {
+                    self.close();
+                    return Err(message);
+                }
+            }
+        }
+    }
+
+    /// The names of the columns of the rows.
+    pub fn headers(&self) -> &[Name] {
+        &self.rows.headers[..self.rows.cols]
+    }
+
+    /// Stops reading: there is no next row.
+    pub fn close(&mut self) {
+        (self.rows.count, self.at) = (0, 0);
+        self.walk = Walk::new();
+        self.walk.whole = true;
+    }
+}
+
+impl Default for Cursor {
+    fn default() -> Cursor {
+        Cursor::new()
+    }
+}
+
 pub fn select(source: &dyn Source, query: &[u8]) -> Result<Table, Message> {
     self::query(source, &NO_VARS, query).map(|rows| rows.table())
 }
 
 /// Runs a SELECT in which names may also be variables.
 pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Message> {
+    run(source, vars, query, None)
+}
+
+/// Runs a SELECT. With a `walk`, and when the SELECT can be walked, it
+/// reads only the next rows of the walk and moves it on; when it cannot,
+/// it runs whole and the walk says so.
+fn run(source: &dyn Source, vars: &Vars, query: &[u8], mut walk: Option<&mut Walk>) -> Result<Rows, Message> {
     let mut lexer = Lexer::new(query);
     if !lexer.keyword(b"select") {
         return Err(Message::from_bytes(b"This is not a SELECT."));
@@ -676,7 +808,8 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
     let mut limit = TABLE_ROWS;
     // whoever asks for fewer rows than fit is not told that there are more
     let mut asked = false;
-    if lexer.keyword(b"limit") {
+    let limited = lexer.keyword(b"limit");
+    if limited {
         match lexer.next() {
             Token::Number(n) => {
                 asked = n as usize <= TABLE_ROWS;
@@ -707,6 +840,8 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
     let mut counts = [[0u32; MAX_COLUMNS]; TABLE_ROWS];
     let mut row_count = 0;
     let mut dropped = 0usize;
+    // the first column of the last row kept: its id, for a walk
+    let mut last_kept = 0i64;
     let before = |a: &Value, b: &Value| a.compare(b) == if descending { Ordering::Greater } else { Ordering::Less };
     let mut take = |row: &[Value]| -> Result<(), Message> {
         if let Some(filter) = &filter {
@@ -742,6 +877,9 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
             rows.copy_within(place..row_count - 1, place + 1);
             sorts.copy_within(place..row_count - 1, place + 1);
             (rows[place], sorts[place]) = (made, sort);
+            if let Some(Value::Int(id)) = row.first() {
+                last_kept = *id;
+            }
             return Ok(());
         }
         let key = group_by.map_or(Value::Null, |column| row.get(column).copied().unwrap_or(Value::Null));
@@ -779,6 +917,8 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
         }
         Ok(())
     };
+    // for a walk: whether this was one, and the last id it looked at
+    let (mut walked, mut span) = (false, None);
     match (&schema, &second, &on) {
         (Some(schema), Some(second), Some(on)) => {
             let mut failed = None;
@@ -837,15 +977,51 @@ pub fn query(source: &dyn Source, vars: &Vars, query: &[u8]) -> Result<Rows, Mes
                     failed = take(row).err();
                 }
             };
-            match way(schema, [filter.as_ref(), None], 0, &[]) {
-                Way::Ids(first, last) => source.scan_among(schema.table, first, last, &mut each)?,
-                Way::By(column, first, last) => source.scan_by(schema.table, column, &first, &last, false, &mut each)?,
+            let found = way(schema, [filter.as_ref(), None], 0, &[]);
+            // A walk reads the table by its id, some rows at a time: it can
+            // when the rows come as they are, in that order, and are all wanted.
+            let upto = source.last_id(schema.table).filter(|_| !grouped && order.is_none() && !limited);
+            match (walk.as_deref_mut(), upto, found) {
+                (Some(walk), Some(upto), found) => {
+                    let (low, high) = match found {
+                        Way::Ids(low, high) => (low, high),
+                        Way::By(..) => (i64::MIN, i64::MAX),
+                    };
+                    if !walk.opened {
+                        // no row added from now on is given: the walk ends where the table ends today
+                        (walk.opened, walk.upto, walk.after) = (true, upto.min(high), low.saturating_sub(1).max(0));
+                    }
+                    let (first, last) = (walk.after + 1, walk.after.saturating_add(walk.width).min(walk.upto));
+                    if first <= last {
+                        source.scan_among(schema.table, first, last, &mut each)?;
+                        span = Some(last);
+                    }
+                    walked = true;
+                }
+                (_, _, Way::Ids(first, last)) => source.scan_among(schema.table, first, last, &mut each)?,
+                (_, _, Way::By(column, first, last)) => source.scan_by(schema.table, column, &first, &last, false, &mut each)?,
             }
             if let Some(message) = failed {
                 return Err(message);
             }
         }
         (None, ..) => take(&[Value::Null; MAX_COLUMNS])?,
+    }
+    if let Some(walk) = walk {
+        match (walked, span) {
+            // more rows than fit: the next ones start after the last one kept
+            (true, Some(_)) if dropped > 0 => (walk.after, walk.width) = (last_kept, (walk.width / 2).max(BATCH)),
+            // nothing there: look further at once next time
+            (true, Some(last)) if row_count == 0 => (walk.after, walk.width) = (last, walk.width.saturating_mul(2).min(WIDEST)),
+            (true, Some(last)) => walk.after = last,
+            (true, None) => walk.after = walk.upto,
+            (false, _) => walk.whole = true,
+        }
+        walk.done = walk.after >= walk.upto;
+        if walked {
+            // the rows that did not fit come next time: none is missing
+            dropped = 0;
+        }
     }
 
     if grouped {
@@ -1196,5 +1372,127 @@ mod tests {
         assert!(like(b"abc", b"a_c"));
         assert!(!like(b"abc", b"a_"));
         assert!(like(b"", b"%"));
+    }
+
+    /// Types a line at the prompt of a system: it must go well.
+    fn typed(sys: &mut crate::shell::System, line: &str) {
+        assert!(crate::shell::exec(sys, line.as_bytes(), &mut crate::shell::tests::Lines::default()), "{line}");
+    }
+
+    /// A table `name` with a column `n` holding these numbers, eight to an INSERT.
+    fn filled(sys: &mut crate::shell::System, name: &str, numbers: core::ops::Range<i64>) {
+        typed(sys, &format!("create table {name} (n int)"));
+        let numbers: Vec<i64> = numbers.collect();
+        for eight in numbers.chunks(8) {
+            typed(sys, &format!("insert into {name} values {}", eight.iter().map(|n| format!("({n})")).collect::<Vec<_>>().join(", ")));
+        }
+    }
+
+    #[test]
+    fn a_cursor_walks_a_stored_table_row_by_row_however_long() {
+        let mut sys = crate::shell::System::new();
+        filled(&mut sys, "many", 0..200);
+        let query = b"select n, n * 2 from many where n >= 10";
+        let (mut cursor, mut seen) = (Cursor::new(), Vec::new());
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        assert_eq!(cursor.headers()[0].bytes(), b"n");
+        while let Some(row) = cursor.next(&sys, query).unwrap() {
+            seen.push((row[0], row[1]));
+        }
+        assert_eq!(seen.len(), 190);
+        assert_eq!((seen[0], seen[189]), ((Value::Int(10), Value::Int(20)), (Value::Int(199), Value::Int(398))));
+        // in the order of their id, none twice
+        assert!(seen.windows(2).all(|two| two[0].0.compare(&two[1].0) == Ordering::Less));
+        // what the condition says of the id is where the walk starts and ends
+        let query = b"select id from many where id between 150 and 160";
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        let mut ids = Vec::new();
+        while let Some(row) = cursor.next(&sys, query).unwrap() {
+            ids.push(row[0]);
+        }
+        assert_eq!(ids, (150..=160).map(Value::Int).collect::<Vec<_>>());
+        // few rows far apart are found, and a table with none ends at once
+        let query = b"select n from many where n = 3 or n = 197";
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        assert_eq!((cursor.next(&sys, query).unwrap().unwrap()[0], cursor.next(&sys, query).unwrap().unwrap()[0]), (Value::Int(3), Value::Int(197)));
+        assert!(cursor.next(&sys, query).unwrap().is_none() && cursor.next(&sys, query).unwrap().is_none());
+        typed(&mut sys, "create table none (n int)");
+        cursor.open(&sys, &NO_VARS, b"select n from none").unwrap();
+        assert!(cursor.next(&sys, b"select n from none").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_cursor_sees_rows_as_they_are_and_none_added_after_it_opened() {
+        let mut sys = crate::shell::System::new();
+        // ids 1 to 80
+        filled(&mut sys, "t", 1..81);
+        let query = b"select id, n from t";
+        let mut cursor = Cursor::new();
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        let first = cursor.next(&sys, query).unwrap().unwrap();
+        assert_eq!(first[0], Value::Int(1));
+        // after it opened: never given
+        typed(&mut sys, "insert into t values (1000)");
+        // ahead of it: gone
+        typed(&mut sys, "delete from t where id between 40 and 79");
+        // ahead of it: seen as it is
+        typed(&mut sys, "update t set n = -1 where id = 80");
+        let mut rest = Vec::new();
+        while let Some(row) = cursor.next(&sys, query).unwrap() {
+            rest.push((row[0], row[1]));
+        }
+        // the rest of the rows read with the first, then 33 to 39, then 80
+        assert_eq!(rest.len(), 31 + 7 + 1);
+        assert_eq!(*rest.last().unwrap(), (Value::Int(80), Value::Int(-1)));
+        assert!(rest.iter().all(|(id, _)| *id != Value::Int(81)));
+        // the names are those of the moment it opened
+        let mut vars = Vars::new();
+        vars.set(b"least", Value::Int(70));
+        let query = b"select id from t where id >= least";
+        cursor.open(&sys, &vars, query).unwrap();
+        assert_eq!(cursor.next(&sys, query).unwrap().unwrap()[0], Value::Int(80));
+        // the table goes while it is walked
+        let query = b"select id, n from t";
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        typed(&mut sys, "drop table t");
+        let mut ended = Ok(None);
+        for _ in 0..60 {
+            ended = cursor.next(&sys, query);
+            if ended.is_err() {
+                break;
+            }
+        }
+        assert!(ended.unwrap_err().bytes().starts_with(b"Unknown table: t"));
+    }
+
+    #[test]
+    fn a_cursor_takes_whole_what_cannot_be_walked() {
+        let mut sys = crate::shell::System::new();
+        typed(&mut sys, "create table many (n int)");
+        for _ in 0..5 {
+            typed(&mut sys, "insert into many values (1), (2), (3), (4), (5), (6), (7), (8)");
+        }
+        let mut cursor = Cursor::new();
+        // what is sorted has the limit of a result, and says so
+        let refused = cursor.open(&sys, &NO_VARS, b"select n from many order by n desc");
+        assert_eq!(refused.unwrap_err().bytes(), b"A loop takes 32 rows at most; this query has 40.");
+        // eight groups fit
+        let query = b"select n, count(*) from many group by n";
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        assert_eq!(cursor.next(&sys, query).unwrap().unwrap()[1], Value::Int(5));
+        // a limit is kept, and a view is taken whole
+        let query = b"select n from many limit 3";
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        assert_eq!((0..5).filter(|_| cursor.next(&sys, query).unwrap().is_some()).count(), 3);
+        cursor.open(&sys, &NO_VARS, b"select name from settings").unwrap();
+        assert!(cursor.next(&sys, b"select name from settings").unwrap().is_some());
+        // no table at all: one row
+        cursor.open(&sys, &NO_VARS, b"select 1 + 1").unwrap();
+        assert_eq!(cursor.next(&sys, b"select 1 + 1").unwrap().unwrap()[0], Value::Int(2));
+        assert!(cursor.next(&sys, b"select 1 + 1").unwrap().is_none());
+        // once closed it gives nothing
+        cursor.open(&sys, &NO_VARS, query).unwrap();
+        cursor.close();
+        assert!(cursor.next(&sys, query).unwrap().is_none());
     }
 }

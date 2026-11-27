@@ -485,9 +485,11 @@ failure still says `Stopped at line 3 of restock.`
   asks. The rights of zones will be checked there.
 - **A `for` is a cursor**, read row by row, so its limit of 32 rows
   goes, and a job can be left between two rows of a large table. A
-  cursor over a plain `select` of one table walks it by `id` and
-  keeps only the last `id` it gave: it sees each row as it is when it
-  reaches it, changes made by others meanwhile included. A `select`
+  cursor over a plain `select` of one table walks it by `id`, a few
+  rows at a time, and keeps only the last `id` it gave: it sees rows
+  as they are when it reaches them, changes made by others meanwhile
+  included, but none added after it opened, so that a loop that adds
+  to the table it reads ends. A `select`
   that sorts, groups or joins is worked out whole when the cursor
   opens, within the limits a result has today, until batch work gives
   sorting its room. The columns of the row stay names (`item.name`),
