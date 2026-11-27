@@ -67,6 +67,24 @@ end
   screen becomes `..>`, and the serial port answers each line with `#more`.
   At the last `end` the whole block runs, or is kept if it is a program.
   `cancel` drops the lines typed so far.
+- **A block is compiled before it runs.** What is wrong with its form is
+  told at the last `end`, with its line, and then nothing of it runs: an
+  `else` that belongs to no `if`, a `for` that is not `for row in select
+  ...`, a calculation that cannot be read.
+
+  ```
+  XilaOS|all:/>if total > 100
+  ..>say 'large'
+  ..>else
+  ..>else
+  ..>end
+  After else comes nothing, or if and a condition; a plain else is last.
+  Line 4 is not right: nothing was run.
+  ```
+
+  What cannot be known before it runs is told when it runs, as a line that
+  fails: a name that has no value, a table or a program that is not there,
+  what a command or a `select` says.
 - **A line that starts with `#`** is a note.
 - **Every command of the prompt is a statement**, SQL included: `mood calm`,
   `insert into ...`, `notify ...` are written in a program as at the prompt.
@@ -194,7 +212,12 @@ coffee 3.50
   `report now` is an unknown command.
 - **Programs run programs**, three deep at most.
 - **A program is made at the prompt**: `program`, `on` and `every` inside a
-  program are refused when it runs.
+  block or a program are refused.
+- **A program whose form is wrong is not kept**, and says which line:
+  `Line 2 is not right: the program is not kept.` If a program of that name
+  was there, it stays as it was, with what starts it. A program kept by a
+  system from before 27 November 2026, which kept anything, says what is
+  wrong with it when it is run, and stops there.
 - **Inside a program, commands do not say that they succeeded.** At the
   prompt, `insert` answers `1 row added to expenses, with id 4.`; in a
   program, only `say`, the results of `select` and errors are shown.
@@ -322,7 +345,9 @@ model that can change the tables ([what holds it](14-the-companion.md#what-holds
 | Names with a value, per session | 32 |
 | A name | 24 characters; with its `row.` in front, 32 |
 | A text | 48 characters, as in the tables |
-| Rows a `for` goes through | 32; with more, it refuses to start rather than forget some |
+| Rows a `for` goes through | Any number, for a `select` of one stored table that neither sorts, groups nor limits; 32 for any other (a join, a view, `order by`, `group by`, a function over the rows): with more, it refuses to start rather than forget some |
+| Loops over rows, one inside the other | 4, the programs that are running counted together |
+| Calculations in one program | About ten values and operations a line for 48 lines (512 in all); beyond, the program is refused when it is kept: `Too many calculations for one program: split it in two.` |
 | Rounds of a `while` | 10 000, then it is stopped |
 | Statements run by one line typed at the prompt | 100 000, then it is stopped |
 | Programs that run programs | 3 deep |
@@ -342,12 +367,35 @@ What is not there:
 - **A program holds the system while it runs.** It runs in the task of
   whoever started it, with the system locked: the screen does not answer
   until it ends. This is why loops and programs are stopped after a number
-  of rounds and statements.
+  of rounds and statements. The virtual machine was made so that this can
+  end: programs as jobs that hold nothing are the next step of the
+  [plan](13-status-and-roadmap.md#the-virtual-machine-and-the-jobs).
+
+## How a loop reads its rows
+
+A `for` over a `select` of one stored table, with no `order by`, `group
+by`, function over the rows or `limit`, walks the table by `id`, 32 rows
+at a time. So it may read any number of rows, and what it sees is this:
+
+- **The rows that were there when the loop began**, in the order of
+  their `id`. A row added meanwhile, by the loop itself or by a program
+  that runs by itself, is not given: a loop that adds to the table it
+  reads ends.
+- **Each row as it is when its 32 are read.** A row changed or removed
+  ahead of the loop is seen changed, or not at all; one of the 32 already
+  read is given as it was.
+- **The names of its `select` as they were when the loop began.**
+  Changing one inside the loop does not change which rows come.
+
+Any other `select` is worked out whole before the first round, as at the
+prompt, and gives 32 rows at most.
 
 ## How it is implemented
 
-The language is `core/src/lang.rs`, a little over a thousand lines without
-its tests, with no heap.
+The language is three modules of `core/`, with no heap: `lang.rs` (blocks,
+the table of programs, the programs that run by themselves), `code.rs`
+(the compiler) and `machine.rs` (the virtual machine). Until 27 November
+2026 `lang.rs` interpreted each line as it read it.
 
 - **Every line goes through it.** `shell::exec` gives each line typed at a
   prompt to `lang`. A line that opens a block, or that comes while one is
@@ -355,17 +403,42 @@ its tests, with no heap.
   depth is counted: up at each opening word, down at each `end`. At depth
   zero the block is run, or stored if its first word is `program`, `on` or
   `every`. Any other line is a block of one line.
-- **Lines are interpreted as they are read.** Nothing is compiled and no
-  tree of the program is kept. To run a statement the interpreter looks at
-  its first word: `let`, `say`, `if`, `while`, `for`, `return` and `run` are
-  its own; anything else is the name of a program, or falls through to
-  `shell::command`, which is how every command is a statement. For a block
-  it finds the matching `end` (and the `else` lines of an `if`) by scanning
-  the lines and counting, each time it gets there.
+- **Lines are compiled** (`code::compile`) into a *unit*: instructions that
+  hold numbers only (the line each came from, where to jump, where its
+  calculation is kept), beside the lines themselves, from which an
+  instruction reads the texts it needs (the name of a `let`, a `select`, a
+  command). `let`, `say`, `if`, `while`, `for`, `return` and `run` have
+  instructions of their own; any other line is the instruction `command`,
+  which is the name of a program or goes to `shell::command` when it runs:
+  that is how every command is a statement. The jumps of a block are
+  settled once, when it is compiled.
+
+  ```
+  for item in select name, qty        0  open   c0
+      from stock where qty < 5        1  next   c0, else 4
+    say item.name                     2  say    item.name
+  end                                 3  jump   1
+                                      4  close  c0
+  ```
+
+- **The machine** (`machine.rs`) runs the unit at the top: one instruction,
+  then the next. A program that is run is one more unit above the one that
+  runs it. Everything it knows of a run is in `System::vm` (which units
+  are in use, where each is, the rounds of its loops, the cursors), not on
+  the stack of the task: a run can be left between two instructions, which
+  is what jobs will need. Its room is fixed: four units, for lines typed
+  and programs three deep, and four cursors. A command that types at the
+  prompt from inside a program (`qr`) enters the machine again on the next
+  unit.
 - **Values** are worked out by the expression code of SQL (`expr.rs`), with
   the variables of the session (`System::vars[session]`, an `expr::Vars`:
-  two fixed arrays of 32 names and 32 values) where a query would have
-  columns. A line that starts with `select` goes to `sql::query` instead.
+  two fixed arrays of 32 names and 32 values). A calculation is read once,
+  when its line is compiled (`expr::Names::late`), and kept in the pool of
+  its unit (`expr::Pool`); the value of a name in it is looked up each time
+  it is worked out. A line that starts with `select` goes to `sql::query`
+  when it runs.
+- **A `for`** reads its rows through a `sql::Cursor`, which walks a stored
+  table by `id` or takes a result whole (see above).
 - **Programs** are read from and written to the table `programs` through
   the storage engine directly, not through SQL, because a line is longer
   than the 48 bytes a SQL value holds. Storing a program is one
@@ -388,7 +461,8 @@ its tests, with no heap.
 - **The chain limit** rides on the events: an event sent while a program
   started by an event runs carries that program's depth plus one, and an
   event of depth four starts nothing.
-- **Stack use.** A running program reads its 48 lines into an array on the
-  stack, about 12 KB, and a `for` keeps its rows there, about 17 KB more.
-  Three programs deep with loops in each fits in the 256 KB stack of a
-  kernel task with room to spare, and the depth limit keeps it so.
+- **Room.** A running program keeps nothing on the stack of its task but
+  what one instruction needs: its lines, its instructions and its rows are
+  in `System::vm`, about 250 KB (four units of 46 KB, four cursors of
+  20 KB), which makes a `System` about 380 KB. The lines of a program are
+  on the stack, 12 KB, only while it is loaded and compiled.

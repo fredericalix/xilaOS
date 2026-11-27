@@ -116,13 +116,15 @@ storage engine allocates.
 | Module | Lines | What it is |
 |---|---|---|
 | `shell.rs` | 3,167 | `System`, `exec`, every command, `Table`, the help texts. |
-| `lang.rs` | 1,705 | XilaScript: blocks, variables, programs, `on` and `every`. |
+| `lang.rs` | 1,499 | XilaScript: blocks, the table of programs, `on` and `every`. |
+| `code.rs` | 431 | XilaScript compiled: the instructions, the compiler, the faults of form. |
+| `machine.rs` | 628 | The virtual machine that runs them: units, programs three deep, loops over rows. |
 | `tcp.rs` | 1,305 | TCP as a state machine with no hardware. |
 | `net.rs` | 1,015 | Ethernet, ARP, IPv4, ICMP, UDP, the DHCP client. |
-| `sql.rs` | 974 | Lexer, `SELECT`, values, the `Source` trait. |
+| `sql.rs` | 1,523 | Lexer, `SELECT`, values, the `Source` trait, the cursor a loop reads its rows through. |
 | `intel.rs` | 936 | The Intel graphics chip: what its registers say; page flipping; brightness. |
 | `ui.rs` | 855 | The interface: header, title bar, screens, menu, terminal view. |
-| `expr.rs` | 755 | Expressions: parsing into a small tree, evaluation per row. |
+| `expr.rs` | 1,350 | Expressions: parsing into a small tree, evaluation per row; the pool where a compiled program keeps its own. |
 | `qr.rs` | 673 | QR codes: encoding, error correction, painting. |
 | `change.rs` | 1,550 | `CREATE TABLE` and what its columns ask, `ALTER TABLE`, `DROP TABLE`, indexes, `INSERT`, `UPDATE`, `DELETE`. |
 | `city.rs` | 529 | The city: the scene from the system state, the isometric drawing. |
@@ -183,8 +185,10 @@ statements that write: one statement is one transaction. See
 [The database and SQL](04-sql.md).
 
 **The language.** Every line goes to `lang` first. A line that opens a
-block is collected until its `end`; `let`, `say`, the blocks, `run` and
-`return` are run by `lang`; everything else falls through to
+block is collected until its `end`. Lines are then compiled (`code.rs`)
+and run by the virtual machine (`machine.rs`, whose room is `System::vm`):
+`let`, `say`, the blocks, `run` and `return` are instructions of their
+own; everything else is the instruction `command`, which goes to
 `shell::command`, so every command is a statement. Programs are rows of
 the stored table `programs`. See [XilaScript](05-xilascript.md).
 
@@ -202,16 +206,18 @@ when there is an answer, `shell::served` words it. See
 A task locks it, does its work, unlocks, then sleeps one tick.
 
 **Stack use.** Tables and query buffers are large values on the stack
-(a `SELECT` takes about 50 KB, a running program 12 KB for its lines, a
-`for` 17 KB for its rows). Task stacks are 256 KB for that reason, and
-programs call each other three levels deep at most.
+(a `SELECT` takes about 50 KB). Task stacks are 256 KB for that reason.
+A running program keeps its lines and its rows in the room of the
+virtual machine, `System::vm`, not on the stack; what runs one
+instruction stays small there, since every command of a program is
+above it.
 
 ## Where to add things
 
 | To add | Do this |
 |---|---|
 | A command | A function in `shell.rs`, an arm in `command`, its name in `NAMES` (kept sorted, for completion) and in `HELP_COMMANDS`, a unit test, then a check in `tools/check.py`. |
-| A statement of the language | In `lang.rs`, with its word in `shell::LANGUAGE` and its line in `HELP_LANGUAGE`. |
+| A statement of the language | An instruction in `code.rs` (`Op`, and its line in `translate`) and what it does in `machine::step`, with its word in `shell::LANGUAGE` and its line in `HELP_LANGUAGE`. |
 | A system view | A `TableDef` in `catalog::TABLES` and an arm in `scan`. |
 | A block of the city | An entry in `city::scene`. |
 | A setting kept between starts | A field of `settings::Kept`, a row in `rows`, an arm in `take`. |

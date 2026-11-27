@@ -471,6 +471,44 @@ with Xila(disk=disk) as x:
     x.cmd("let floor = floor + 1")
     ok, lines = x.cmd("end")
     check("a loop that never ends is stopped", not ok and lines[0] == "This loop went round 10000 times and was stopped.", lines)
+    # what is wrong with the form of a program is told when it is kept
+    for line in ("program bad", "say 'one'", "say 2 +"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("a program with a fault of form is not kept", not ok and len(lines) == 2 and lines[1] == "Line 2 is not right: the program is not kept.", lines)
+    ok, lines = x.cmd("bad")
+    check("and its name then runs nothing", not ok and lines == ["Unknown command: bad"], lines)
+    for line in ("program report", "else"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    still, again = x.cmd("report")
+    check("a program replaced by a faulty one stays as it was",
+          not ok and lines == ["else belongs to an if.", "Line 1 is not right: the program is not kept."] and still and again == report, (lines, again))
+    for line in ("if 1 = 1", "say 'ran'", "else", "else"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("a block with a fault of form runs nothing",
+          not ok and lines == ["After else comes nothing, or if and a condition; a plain else is last.", "Line 4 is not right: nothing was run."], lines)
+    # a loop reads a stored table row by row, however long
+    x.cmd("create table wide (n int)")
+    for start in range(0, 100, 8):
+        x.cmd("insert into wide values " + ", ".join("(%d)" % n for n in range(start, min(start + 8, 100))))
+    for line in ("let sum = 0", "for row in select n from wide", "let sum = sum + row.n", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("say sum")
+    check("a loop reads more than 32 rows", ok and lines == ["4950"], lines)
+    for line in ("program grow", "let seen = 0", "for row in select n from wide", "insert into wide values (0)", "let seen = seen + 1", "end", "say seen", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("grow")
+    count = x.table("select count(*) as n from wide")
+    check("a loop that adds to the table it reads ends", ok and lines == ["100"] and count == [{"n": "200"}], (lines, count))
+    for line in ("for row in select n from wide order by n", "say row.n"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("a loop over what is sorted still takes 32 rows at most",
+          not ok and lines == ["A loop takes 32 rows at most; this query has 200.", "Stopped at line 1."], lines)
+    x.cmd("drop program grow")
+    x.cmd("drop table wide")
     ok, lines = x.cmd("help l")
     check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 23, lines[:2])
     x.cmd("drop program broken")

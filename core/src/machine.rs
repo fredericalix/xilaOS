@@ -160,6 +160,10 @@ pub fn program(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
 /// Starts a program: its lines are read from the database and compiled
 /// into the next unit, which is then the one that runs. Programs are
 /// three deep at most, whoever started the first.
+///
+/// Never part of `step`: the lines it reads are 12 KB on the stack, and
+/// `step` is below every command a program runs.
+#[inline(never)]
 fn call(sys: &mut System, name: &[u8], out: &mut dyn Out) -> Result<(), Message> {
     if sys.vm.programs == MAX_LEVELS || sys.vm.depth == UNITS {
         return Err(Message::from_bytes(b"Programs run programs three deep at most."));
@@ -259,15 +263,43 @@ fn run(sys: &mut System, base: usize, out: &mut dyn Out) -> bool {
 
 /// Works out the value an instruction asks for.
 fn value(sys: &System, unit: usize, what: What, text: &[u8]) -> Result<Value, Message> {
-    let vars = &sys.vars[sys.session];
     match what {
-        What::Value(kept) => sys.vm.units[unit].pool().eval(kept, vars),
-        // a SELECT gives its first column of its first row
-        What::Select => {
-            let rows = sql::query(sys, vars, text)?;
-            Ok(if rows.count > 0 && rows.cols > 0 { rows.rows[0][0] } else { Value::Null })
-        }
+        What::Value(kept) => sys.vm.units[unit].pool().eval(kept, &sys.vars[sys.session]),
+        What::Select => selected(sys, text),
     }
+}
+
+// The three that follow hold a result or a cursor, 17 to 20 KB, while
+// they work. They are never part of `step`, which is below every command
+// a program runs: a SELECT typed at the screen needs the stack of its
+// task for itself.
+
+/// What a SELECT gives as a value: its first column of its first row.
+#[inline(never)]
+fn selected(sys: &System, text: &[u8]) -> Result<Value, Message> {
+    let rows = sql::query(sys, &sys.vars[sys.session], text)?;
+    Ok(if rows.count > 0 && rows.cols > 0 { rows.rows[0][0] } else { Value::Null })
+}
+
+/// Opens the cursor `at` on a SELECT. A cursor reads the tables of the
+/// system it is kept in: it is taken out of it for that time.
+#[inline(never)]
+fn open(sys: &mut System, at: usize, query: &[u8]) -> Result<(), Message> {
+    let mut cursor = Cursor::new();
+    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    let opened = cursor.open(&*sys, &sys.vars[sys.session], query);
+    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    opened
+}
+
+/// The next row of the cursor `at` when it must be read from the tables.
+#[inline(never)]
+fn read(sys: &mut System, at: usize, query: &[u8]) -> Result<Option<[Value; MAX_COLUMNS]>, Message> {
+    let mut cursor = Cursor::new();
+    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    let next = cursor.next(&*sys, query);
+    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    next
 }
 
 /// Runs one instruction of the unit `unit`, which is at the top.
@@ -316,12 +348,7 @@ fn step(sys: &mut System, unit: usize, instr: Instr, out: &mut dyn Out) -> Resul
                 return Err(Message::from_bytes(b"Loops over rows go four deep at most."));
             }
             let (_, query) = code::for_parts(text).unwrap_or((b"", b""));
-            // a cursor reads the tables of the system it is kept in: it is
-            // taken out for that time
-            let mut cursor = core::mem::take(&mut sys.vm.cursors[at]);
-            let opened = cursor.open(&*sys, &sys.vars[sys.session], query);
-            sys.vm.cursors[at] = cursor;
-            opened?;
+            open(sys, at, query)?;
             sys.vm.calls[unit].open = which as usize + 1;
         }
         Op::Next(which, done) => {
@@ -329,10 +356,7 @@ fn step(sys: &mut System, unit: usize, instr: Instr, out: &mut dyn Out) -> Resul
             let (name, query) = code::for_parts(text).unwrap_or((b"", b""));
             let mut row = sys.vm.cursors[at].ready();
             if row.is_none() && sys.vm.cursors[at].more() {
-                let mut cursor = core::mem::take(&mut sys.vm.cursors[at]);
-                let next = cursor.next(&*sys, query);
-                sys.vm.cursors[at] = cursor;
-                row = next?;
+                row = read(sys, at, query)?;
             }
             let Some(row) = row else {
                 sys.vm.calls[unit].next = done as usize;

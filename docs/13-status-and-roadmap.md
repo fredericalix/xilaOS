@@ -37,6 +37,7 @@ were also tried on the real machine.
 | `install` shows how far it is; dead keys of the `fr` layout; a quote inside a text | yes | yes, on 27 November 2026, but for the dead keys |
 | LISTEN / NOTIFY | yes | yes |
 | XilaScript: variables, blocks, stored programs, `on` and `every` programs | yes | yes |
+| XilaScript compiled for the virtual machine, which runs it; what is wrong with the form of a program told when it is kept; loops over the rows of a stored table without a limit | yes | not tried |
 | Clock, `now` and `today`, `every day at` | yes | yes |
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
@@ -58,8 +59,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 36,000 lines, 329
-unit tests, 506 system checks.
+about 300 system checks. On 27 November 2026: about 37,000 lines, 346
+unit tests, 513 system checks.
 
 ## Known limits of what is done
 
@@ -74,7 +75,8 @@ date type. Details in
 [The database and SQL](04-sql.md).
 
 **XilaScript.** No parameters, no editor (a program is retyped to be
-changed), no `insert ... select`, loops over 32 rows at most. A program
+changed), no `insert ... select`. A loop reads every row of a stored
+table, but 32 at most of what is sorted, grouped or joined. A program
 holds the whole system while it runs. Details in
 [XilaScript](05-xilascript.md).
 
@@ -137,8 +139,8 @@ choices that are visible in the code.
   ([below](#the-virtual-machine-and-the-jobs)).
 - **One language of the house.** XilaScript, for everything written
   on the machine itself: its words are English, one statement per
-  line, blocks closed by `end`. It is interpreted today and will be
-  compiled for the virtual machine. The first notes had a second
+  line, blocks closed by `end`. It was interpreted until 27 November
+  2026 and is compiled for the virtual machine since. The first notes had a second
   level, heavy programs (Doom, a spreadsheet engine) compiled from an
   existing language: with a machine of the house alone, that level is
   given up.
@@ -244,7 +246,7 @@ it. Its steps are [below](#the-companion).
 | 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Resumed on 27 November 2026 with what a column asks: `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`, kept in the catalog (format version 2; version 1 is read). Then indexes on one column, the same day (`CREATE INDEX ON t (c)`; format version 3), which `SELECT`, joins and `UNIQUE` use. Then `ALTER TABLE` (columns added, dropped, renamed; what they ask changed). Left: `BEGIN` / `COMMIT`; indexes for `UPDATE` and `DELETE`, on several columns, and a choice between two; a view of the log, which waits for texts longer than 48 characters | Under way |
 | 3. XilaScript | An editor; `insert ... select`, the values of before, more rhythms. Parameters, names of a program's own and a program that holds nothing went to phase 5 on 27 November 2026 | After 5 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
-| 5. The virtual machine | The machine, XilaScript compiled for it, and programs as jobs that hold nothing; with it what phase 3 had of parameters, names of a program's own and commands that wait | Designed on 27 November 2026 ([below](#the-virtual-machine-and-the-jobs)), put ahead by the author; then application screens, batch work and the scheduling of jobs, each with a design of its own |
+| 5. The virtual machine | The machine, XilaScript compiled for it, and programs as jobs that hold nothing; with it what phase 3 had of parameters, names of a program's own and commands that wait | Designed on 27 November 2026 ([below](#the-virtual-machine-and-the-jobs)), put ahead by the author. Its first step, the machine and the compiler, was built that day; jobs are next. Then application screens, batch work and the scheduling of jobs, each with a design of its own |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
 
 **Tried on the T430, and what still waits.** On 27 November 2026 the
@@ -447,7 +449,10 @@ What the author decided on 27 November 2026:
 - **XilaScript is compiled for it.** It is still typed line by line
   at the prompt; a program that is kept is translated once.
 
-The design, agreed in outline that day and not built:
+The design, agreed in outline that day. Its first step, the machine
+and the compiler, was built the same day (`core/src/code.rs`,
+`machine.rs`, [XilaScript](05-xilascript.md#how-it-is-implemented));
+the rest is not built:
 
 **What the machine works on.** The values of the database as they are
 (`Null`, a whole number, an exact decimal, a text), and three kinds of
@@ -458,13 +463,16 @@ of its own, and later the *format* of a screen.
 processor has. A program and what it becomes:
 
 ```
-program restock                     0  open   c1, select name, qty from stock where qty < 5
-  for item in select name, qty      1  next   c1 as item, else 4
+program restock                     0  open   c0
+  for item in select name, qty      1  next   c0, else 4
       from stock where qty < 5      2  say    item.name
     say item.name                   3  jump   1
-  end                               4  close  c1
-end                                 5  return
+  end                               4  close  c0
+end
 ```
+
+(As built, an instruction holds numbers only, and reads the texts it
+needs from its line: the SELECT of `open`, the name of the loop.)
 
 The set, to begin with: keep a value under a name; say one; jump,
 always or unless a condition holds; open a cursor, take its next row,
@@ -593,11 +601,15 @@ nine: where it shows there is decided before step 2.
 **The steps.** Each is merged when its unit tests and its checks
 pass.
 
-1. The machine and the compiler, for the XilaScript of today, run to
-   the end where the interpreter ran, with the limits of today.
-   Nothing changes for whoever types, but for faults of form told at
-   `end` and a `for` of more than 32 rows. Every test and check that
-   exists passes, changed only where a fault is now told earlier.
+1. Done on 27 November 2026: the machine and the compiler, for the
+   XilaScript of that day, run to the end where the interpreter ran,
+   with its limits. What it showed for the next step: the room of the
+   machine (four units, four cursors, 250 KB) is inside `System`,
+   which nine jobs could not be, so the rooms of jobs must come from
+   the kernel; and the stack of the interface task has little to
+   spare under a `SELECT`, so nothing large may stand on it while
+   instructions run (a `SELECT` typed at the screen froze the system
+   until that was seen to).
 2. Jobs: the kernel task and its slices, the prompts that wait, Esc
    and Alt+B, `submit`, `jobs`, `job`, the programs that run by
    themselves and the companion's lines as jobs, `job_log`. A loop
