@@ -88,7 +88,7 @@ const WORDS: [&[u8]; 14] =
     [b"let", b"say", b"if", b"else", b"end", b"for", b"in", b"while", b"program", b"run", b"return", b"cancel", b"on", b"every"];
 
 /// The first word of a line, in small letters, and what follows it.
-fn word_of(line: &[u8]) -> (FixedStr<12>, &[u8]) {
+pub(crate) fn word_of(line: &[u8]) -> (FixedStr<12>, &[u8]) {
     let (word, rest) = split_word(trim(line));
     let mut lower = FixedStr::<12>::new();
     // a word too long for this buffer is none of the words looked for
@@ -105,7 +105,7 @@ pub fn opens(line: &[u8]) -> bool {
 }
 
 /// Whether a name can be given to a value or to a program.
-fn free_name(name: &[u8]) -> bool {
+pub(crate) fn free_name(name: &[u8]) -> bool {
     let mut lower = FixedStr::<VAR_NAME>::from_bytes(name);
     lower.lower();
     xila_db::good_name(name) && !WORDS.contains(&lower.bytes()) && !shell::knows(lower.bytes())
@@ -160,7 +160,7 @@ fn said() -> Message {
 
 /// What to say when a calculation has a SELECT in it: a SELECT is a value
 /// only when it is the whole value.
-fn whole_select(text: &[u8]) -> Option<Message> {
+pub(crate) fn whole_select(text: &[u8]) -> Option<Message> {
     let mut lexer = Lexer::new(text);
     loop {
         match lexer.next() {

@@ -17,6 +17,7 @@ pub mod change;
 pub mod chars;
 pub mod city;
 pub mod clock;
+pub mod code;
 pub mod companion;
 pub mod dns;
 pub mod events;
