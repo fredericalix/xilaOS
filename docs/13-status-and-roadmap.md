@@ -262,8 +262,7 @@ router, and pages of three servers of the Internet through TLS. 48
 of its 49 checks passed. The one that failed was a fault of XilaOS,
 which no check had met: in a program that runs when something
 happens (`on insert`, `on notify`...), the names `now` and `today`
-were unknown. It was corrected that day; the system on the T430's
-disk is the one from before the correction until it is replaced.
+were unknown. It was corrected that day.
 
 The companion was tried there too, the same day. `key set` is refused
 to the network prompt, since the key would cross the network as it
@@ -288,8 +287,13 @@ Doing that showed two ways around what guards the key, both from the
 network prompt: a program written there may run `key set`, and the
 row of `companions`, which says where the key is sent, could be
 changed there. The author chose to close the second and keep the
-first: `companions` is now changed at the machine only. The system on
-the T430's disk is from before that too, until it is replaced.
+first: `companions` is now changed at the machine only.
+
+At the end of that day the system on the T430's disk was replaced
+once more (`install from`, `install system`) by the one that holds
+those two corrections and the accented letters. None of the three was
+tried there after that, nor whether the key was still there after the
+restart.
 
 What still waits for the T430, since it cannot be done over the
 network or was not tried: the key still there after a restart, `ask`
