@@ -38,7 +38,7 @@ const MAX_LEVELS: usize = 3;
 /// Times a `while` goes round before it is stopped.
 const MAX_ROUNDS: u32 = 10_000;
 /// Statements one line typed at the prompt may run in all.
-const MAX_STEPS: u32 = 100_000;
+const MAX_STEPS: u64 = 100_000;
 
 /// A unit that is running: where it is.
 #[derive(Clone, Copy)]
@@ -69,14 +69,67 @@ pub struct Machine {
     /// Programs running, one inside the other.
     programs: usize,
     /// Statements run since the first unit was taken.
-    steps: u32,
+    steps: u64,
+    /// Whether the limits of a program nobody watches are lifted: the
+    /// rounds of a `while`, the statements in all. They hold unless a
+    /// job that can be stopped says otherwise.
+    unbound: bool,
     /// The loops over rows that are open, in all the units together.
     cursors: [Cursor; LOOPS],
 }
 
 impl Machine {
     pub const fn new() -> Machine {
-        Machine { units: [const { Code::new() }; UNITS], calls: [Call::NONE; UNITS], depth: 0, programs: 0, steps: 0, cursors: [const { Cursor::new() }; LOOPS] }
+        Machine { units: [const { Code::new() }; UNITS], calls: [Call::NONE; UNITS], depth: 0, programs: 0, steps: 0, unbound: false, cursors: [const { Cursor::new() }; LOOPS] }
+    }
+}
+
+impl Machine {
+    /// Lifts the limits of a program nobody watches, or sets them again.
+    pub fn unbound(&mut self, lifted: bool) {
+        self.unbound = lifted;
+    }
+
+    /// Statements run since what runs here was started.
+    pub fn statements(&self) -> u64 {
+        self.steps
+    }
+
+    /// Whether something runs here.
+    pub fn busy(&self) -> bool {
+        self.depth > 0
+    }
+}
+
+/// Where a machine is: the one a system has of its own, in which what is
+/// typed runs at once, or one of the rooms it was given for its jobs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Room {
+    Own,
+    Given(usize),
+}
+
+/// What a turn came to.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Turn {
+    /// There is more to run.
+    More,
+    /// It ended, well or not: what failed was said.
+    Ended(bool),
+}
+
+/// The machine of a room. A room that was not given is the system's own.
+fn vm(sys: &System, room: Room) -> &Machine {
+    match (&sys.rooms, room) {
+        (Some(rooms), Room::Given(at)) if at < rooms.len() => &rooms[at],
+        _ => &sys.vm,
+    }
+}
+
+fn vm_mut(sys: &mut System, room: Room) -> &mut Machine {
+    match (&mut sys.rooms, room) {
+        (Some(rooms), Room::Given(at)) if at < rooms.len() => &mut rooms[at],
+        _ => &mut sys.vm,
     }
 }
 
@@ -114,29 +167,40 @@ impl Out for Quiet<'_> {
 /// them and with its names. Says what is wrong and returns false when
 /// their form is, or when one of them fails.
 pub fn lines(sys: &mut System, lines: &[Line], out: &mut dyn Out) -> bool {
-    let unit = sys.vm.depth;
+    match start_lines(sys, Room::Own, lines, out) {
+        Some(base) => turn(sys, Room::Own, base, out, &mut || false) == Turn::Ended(true),
+        None => false,
+    }
+}
+
+/// Compiles lines into a room and makes them what runs there. Returns
+/// the unit they are, to give to `turn`; None when they cannot start,
+/// with why said.
+pub fn start_lines(sys: &mut System, room: Room, lines: &[Line], out: &mut dyn Out) -> Option<usize> {
+    let unit = vm(sys, room).depth;
     if unit == UNITS {
         out.line(Style::Error, b"Programs run programs three deep at most.");
-        return false;
+        return None;
     }
-    if let Err(fault) = code::compile(lines, &mut sys.vm.units[unit]) {
+    if let Err(fault) = code::compile(lines, &mut vm_mut(sys, room).units[unit]) {
         out.line(Style::Error, fault.message.bytes());
         if lines.len() > 1 {
             let mut place = FixedStr::<COLS>::new();
             let _ = write!(place, "Line {} is not right: nothing was run.", fault.line);
             out.line(Style::Error, place.bytes());
         }
-        return false;
+        return None;
     }
-    enter(sys, Text::new(), lines.len());
-    run(sys, unit, out)
+    enter(sys, room, Text::new(), lines.len());
+    Some(unit)
 }
 
 /// Compiles lines without running them, to learn whether their form is
 /// right: what a program goes through before it is kept. The next unit
 /// is where it is done, and is left free.
 pub fn check(sys: &mut System, lines: &[Line]) -> Result<(), code::Fault> {
-    match sys.vm.units.get_mut(sys.vm.depth) {
+    let free = sys.vm.depth;
+    match sys.vm.units.get_mut(free) {
         Some(unit) => code::compile(lines, unit),
         // no unit is free to try them in: they are told when they run
         None => Ok(()),
@@ -147,16 +211,44 @@ pub fn check(sys: &mut System, lines: &[Line]) -> Result<(), code::Fault> {
 /// for one that runs by itself. Says what failed, and returns whether
 /// all went well.
 pub fn program(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
-    let base = sys.vm.depth;
-    match call(sys, name, out) {
-        Ok(()) => run(sys, base, out),
+    match start_program(sys, Room::Own, name, out) {
+        Some(base) => turn(sys, Room::Own, base, out, &mut || false) == Turn::Ended(true),
+        None => false,
+    }
+}
+
+/// Makes a program kept in the database what runs in a room. Returns the
+/// unit it is, to give to `turn`; None when it cannot start, with why
+/// said.
+pub fn start_program(sys: &mut System, room: Room, name: &[u8], out: &mut dyn Out) -> Option<usize> {
+    let base = vm(sys, room).depth;
+    match call(sys, room, name, out) {
+        Ok(()) => Some(base),
         Err(message) => {
             if !message.is_empty() {
                 out.line(Style::Error, message.bytes());
             }
-            false
+            None
         }
     }
+}
+
+/// Gives back every unit and every cursor of a room: what ran there is
+/// gone, and nothing is said.
+pub fn stop(sys: &mut System, room: Room) {
+    while vm(sys, room).depth > 0 {
+        leave(sys, room);
+    }
+}
+
+/// Where a room is: the program at the top (nothing for lines typed) and
+/// its line, from 1. None when nothing runs there.
+pub fn at(sys: &System, room: Room) -> Option<(Text, usize)> {
+    let machine = vm(sys, room);
+    let call = machine.calls[machine.depth.checked_sub(1)?];
+    let code = &machine.units[machine.depth - 1];
+    let line = if code.is_empty() { 1 } else { code.at(call.next.min(code.len() - 1)).line as usize + 1 };
+    Some((call.program, line))
 }
 
 /// Starts a program: its lines are read from the database and compiled
@@ -166,8 +258,8 @@ pub fn program(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
 /// Never part of `step`: the lines it reads are 12 KB on the stack, and
 /// `step` is below every command a program runs.
 #[inline(never)]
-fn call(sys: &mut System, name: &[u8], out: &mut dyn Out) -> Result<(), Message> {
-    if sys.vm.programs == MAX_LEVELS || sys.vm.depth == UNITS {
+fn call(sys: &mut System, room: Room, name: &[u8], out: &mut dyn Out) -> Result<(), Message> {
+    if vm(sys, room).programs == MAX_LEVELS || vm(sys, room).depth == UNITS {
         return Err(Message::from_bytes(b"Programs run programs three deep at most."));
     }
     // read here and given to the compiler, which keeps them: not held while the program runs
@@ -175,8 +267,8 @@ fn call(sys: &mut System, name: &[u8], out: &mut dyn Out) -> Result<(), Message>
     let Some(count) = lang::load(&sys.db, name, &mut lines)? else {
         return Err(crate::sql::error(b"Unknown program: ", name).also(b". Type programs to list them."));
     };
-    let unit = sys.vm.depth;
-    if let Err(fault) = code::compile(&lines[..count], &mut sys.vm.units[unit]) {
+    let unit = vm(sys, room).depth;
+    if let Err(fault) = code::compile(&lines[..count], &mut vm_mut(sys, room).units[unit]) {
         // kept by a system that did not compile what it kept: nothing of it runs
         out.line(Style::Error, fault.message.bytes());
         let mut place = FixedStr::<COLS>::new();
@@ -184,13 +276,13 @@ fn call(sys: &mut System, name: &[u8], out: &mut dyn Out) -> Result<(), Message>
         out.line(Style::Error, place.bytes());
         return Err(said());
     }
-    enter(sys, Text::from_bytes(name), count);
+    enter(sys, room, Text::from_bytes(name), count);
     Ok(())
 }
 
 /// Takes the next unit, whose code is ready, for a program or for lines.
-fn enter(sys: &mut System, program: Text, lines: usize) {
-    let machine = &mut sys.vm;
+fn enter(sys: &mut System, room: Room, program: Text, lines: usize) {
+    let machine = vm_mut(sys, room);
     if machine.depth == 0 {
         machine.steps = 0;
     }
@@ -204,8 +296,8 @@ fn enter(sys: &mut System, program: Text, lines: usize) {
 }
 
 /// Gives the unit at the top back, and the cursors it left open.
-fn leave(sys: &mut System) {
-    let machine = &mut sys.vm;
+fn leave(sys: &mut System, room: Room) {
+    let machine = vm_mut(sys, room);
     machine.depth -= 1;
     let call = machine.calls[machine.depth];
     if !call.program.is_empty() {
@@ -216,32 +308,40 @@ fn leave(sys: &mut System) {
     }
 }
 
-/// Runs the unit `base`, and those it calls, to the end. Returns whether
-/// all went well; what did not was said.
-fn run(sys: &mut System, base: usize, out: &mut dyn Out) -> bool {
+/// Runs the unit `base` of a room, and those it calls, until it ends or
+/// until `spent` says the time of this turn is over. `spent` is asked
+/// after each instruction, never inside one: an instruction is whole.
+/// What failed is said, with where each unit stopped.
+pub fn turn(sys: &mut System, room: Room, base: usize, out: &mut dyn Out, spent: &mut dyn FnMut() -> bool) -> Turn {
     loop {
-        let top = sys.vm.depth - 1;
-        let at = sys.vm.calls[top].next;
-        if at >= sys.vm.units[top].len() {
+        let Some(top) = vm(sys, room).depth.checked_sub(1).filter(|top| *top >= base) else {
+            // nothing of it is left to run
+            return Turn::Ended(true);
+        };
+        let at = vm(sys, room).calls[top].next;
+        if at >= vm(sys, room).units[top].len() {
             // the end of the unit: who called it goes on
-            leave(sys);
+            leave(sys, room);
             if top == base {
-                return true;
+                return Turn::Ended(true);
             }
             continue;
         }
-        let instr = sys.vm.units[top].at(at);
-        sys.vm.calls[top].next = at + 1;
-        let Err(mut message) = step(sys, top, instr, out) else {
+        let instr = vm(sys, room).units[top].at(at);
+        vm_mut(sys, room).calls[top].next = at + 1;
+        let Err(mut message) = step(sys, room, top, instr, out) else {
+            if spent() {
+                return Turn::More;
+            }
             continue;
         };
         // It failed: each unit that was running says where it stopped, down
         // to the one this run was for. A unit above may have been entered
         // by the instruction and have said its own.
         loop {
-            let top = sys.vm.depth - 1;
-            let call = sys.vm.calls[top];
-            let line = sys.vm.units[top].at(call.next.saturating_sub(1)).line as usize + 1;
+            let top = vm(sys, room).depth - 1;
+            let call = vm(sys, room).calls[top];
+            let line = vm(sys, room).units[top].at(call.next.saturating_sub(1)).line as usize + 1;
             if !message.is_empty() {
                 out.line(Style::Error, message.bytes());
             }
@@ -254,9 +354,9 @@ fn run(sys: &mut System, base: usize, out: &mut dyn Out) -> bool {
             if !place.is_empty() {
                 out.line(Style::Error, place.bytes());
             }
-            leave(sys);
+            leave(sys, room);
             if top == base {
-                return false;
+                return Turn::Ended(false);
             }
             message = said();
         }
@@ -264,9 +364,9 @@ fn run(sys: &mut System, base: usize, out: &mut dyn Out) -> bool {
 }
 
 /// Works out the value an instruction asks for.
-fn value(sys: &System, unit: usize, what: What, text: &[u8]) -> Result<Value, Message> {
+fn value(sys: &System, room: Room, unit: usize, what: What, text: &[u8]) -> Result<Value, Message> {
     match what {
-        What::Value(kept) => sys.vm.units[unit].pool().eval(kept, &sys.vars[sys.session]),
+        What::Value(kept) => vm(sys, room).units[unit].pool().eval(kept, &sys.vars[sys.session]),
         What::Select => selected(sys, text),
     }
 }
@@ -286,88 +386,90 @@ fn selected(sys: &System, text: &[u8]) -> Result<Value, Message> {
 /// Opens the cursor `at` on a SELECT. A cursor reads the tables of the
 /// system it is kept in: it is taken out of it for that time.
 #[inline(never)]
-fn open(sys: &mut System, at: usize, query: &[u8]) -> Result<(), Message> {
+fn open(sys: &mut System, room: Room, at: usize, query: &[u8]) -> Result<(), Message> {
     let mut cursor = Cursor::new();
-    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    core::mem::swap(&mut cursor, &mut vm_mut(sys, room).cursors[at]);
     let opened = cursor.open(&*sys, &sys.vars[sys.session], query);
-    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    core::mem::swap(&mut cursor, &mut vm_mut(sys, room).cursors[at]);
     opened
 }
 
 /// The next row of the cursor `at` when it must be read from the tables.
 #[inline(never)]
-fn read(sys: &mut System, at: usize, query: &[u8]) -> Result<Option<[Value; MAX_COLUMNS]>, Message> {
+fn read(sys: &mut System, room: Room, at: usize, query: &[u8]) -> Result<Option<[Value; MAX_COLUMNS]>, Message> {
     let mut cursor = Cursor::new();
-    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    core::mem::swap(&mut cursor, &mut vm_mut(sys, room).cursors[at]);
     let next = cursor.next(&*sys, query);
-    core::mem::swap(&mut cursor, &mut sys.vm.cursors[at]);
+    core::mem::swap(&mut cursor, &mut vm_mut(sys, room).cursors[at]);
     next
 }
 
 /// Runs one instruction of the unit `unit`, which is at the top.
-fn step(sys: &mut System, unit: usize, instr: Instr, out: &mut dyn Out) -> Result<(), Message> {
+fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn Out) -> Result<(), Message> {
     if instr.begins {
-        sys.vm.steps += 1;
-        if sys.vm.steps > MAX_STEPS {
+        let machine = vm_mut(sys, room);
+        machine.steps += 1;
+        if machine.steps > MAX_STEPS && !machine.unbound {
             return Err(Message::from_bytes(b"This ran 100000 statements and was stopped."));
         }
     }
     // the texts an instruction needs are those of its line
-    let line: Line = *sys.vm.units[unit].line(instr.line as usize);
+    let line: Line = *vm(sys, room).units[unit].line(instr.line as usize);
     let text = trim(line.bytes());
     match instr.op {
         Op::Let(what) => {
             let (name, written) = code::let_parts(text).unwrap_or((b"", b""));
-            let value = value(sys, unit, what, written)?;
+            let value = value(sys, room, unit, what, written)?;
             if !sys.vars[sys.session].set(name, value) {
                 return Err(Message::from_bytes(b"There is no room for one more name: 32 are kept at most."));
             }
         }
         Op::Say(what) => {
             let shown = match what {
-                Some(what) => value(sys, unit, what, code::rest(text))?,
+                Some(what) => value(sys, room, unit, what, code::rest(text))?,
                 None => Value::Null,
             };
             out.line(Style::Out, shown.shown().bytes());
         }
-        Op::Jump(to) => sys.vm.calls[unit].next = to as usize,
+        Op::Jump(to) => vm_mut(sys, room).calls[unit].next = to as usize,
         Op::JumpUnless(condition, to) => {
-            if !sys.vm.units[unit].pool().holds(condition, &sys.vars[sys.session])? {
-                sys.vm.calls[unit].next = to as usize;
+            if !vm(sys, room).units[unit].pool().holds(condition, &sys.vars[sys.session])? {
+                vm_mut(sys, room).calls[unit].next = to as usize;
             }
         }
-        Op::Enter(which) => sys.vm.calls[unit].rounds[which as usize] = 0,
+        Op::Enter(which) => vm_mut(sys, room).calls[unit].rounds[which as usize] = 0,
         Op::Round(which) => {
-            let rounds = &mut sys.vm.calls[unit].rounds[which as usize];
+            let machine = vm_mut(sys, room);
+            let rounds = &mut machine.calls[unit].rounds[which as usize];
             *rounds += 1;
-            if *rounds > MAX_ROUNDS {
+            if *rounds > MAX_ROUNDS && !machine.unbound {
                 return Err(Message::from_bytes(b"This loop went round 10000 times and was stopped."));
             }
         }
         Op::Open(which) => {
-            let at = sys.vm.calls[unit].cursors + which as usize;
+            let at = vm(sys, room).calls[unit].cursors + which as usize;
             if at >= LOOPS {
                 return Err(Message::from_bytes(b"Loops over rows go four deep at most."));
             }
             let (_, query) = code::for_parts(text).unwrap_or((b"", b""));
-            open(sys, at, query)?;
-            sys.vm.calls[unit].open = which as usize + 1;
+            open(sys, room, at, query)?;
+            vm_mut(sys, room).calls[unit].open = which as usize + 1;
         }
         Op::Next(which, done) => {
-            let at = sys.vm.calls[unit].cursors + which as usize;
+            let at = vm(sys, room).calls[unit].cursors + which as usize;
             let (name, query) = code::for_parts(text).unwrap_or((b"", b""));
-            let mut row = sys.vm.cursors[at].ready();
-            if row.is_none() && sys.vm.cursors[at].more() {
-                row = read(sys, at, query)?;
+            let mut row = vm_mut(sys, room).cursors[at].ready();
+            if row.is_none() && vm(sys, room).cursors[at].more() {
+                row = read(sys, room, at, query)?;
             }
             let Some(row) = row else {
-                sys.vm.calls[unit].next = done as usize;
+                vm_mut(sys, room).calls[unit].next = done as usize;
                 return Ok(());
             };
             // the columns of the row, as name.column
             let mut headers = [sql::Name::new(); MAX_COLUMNS];
-            let columns = sys.vm.cursors[at].headers().len();
-            headers[..columns].copy_from_slice(sys.vm.cursors[at].headers());
+            let columns = vm(sys, room).cursors[at].headers().len();
+            headers[..columns].copy_from_slice(vm(sys, room).cursors[at].headers());
             for (header, value) in headers[..columns].iter().zip(row) {
                 let mut column = FixedStr::<VAR_NAME>::from_bytes(name);
                 if column.len() + 1 + header.len() > VAR_NAME {
@@ -381,31 +483,31 @@ fn step(sys: &mut System, unit: usize, instr: Instr, out: &mut dyn Out) -> Resul
             }
         }
         Op::Close(which) => {
-            let call = &mut sys.vm.calls[unit];
-            call.open = which as usize;
-            let at = call.cursors + which as usize;
-            sys.vm.cursors[at].close();
+            let machine = vm_mut(sys, room);
+            machine.calls[unit].open = which as usize;
+            let at = machine.calls[unit].cursors + which as usize;
+            machine.cursors[at].close();
         }
-        Op::Call => call(sys, code::rest(text), out)?,
+        Op::Call => call(sys, room, code::rest(text), out)?,
         Op::Command => {
             let (name, arguments) = split_word(text);
             let mut lower = Text::from_bytes(name);
             lower.lower();
             if !shell::knows(lower.bytes()) && arguments.is_empty() && lang::exists(&sys.db, name) {
                 // the name of a program is a command
-                call(sys, name, out)?;
+                call(sys, room, name, out)?;
             } else {
                 // In a program, what a command did is not announced. Lines
                 // typed say it, those included that a command of a program
                 // types (`qr`), which are a unit of their own.
-                let quiet = !sys.vm.calls[unit].program.is_empty();
+                let quiet = !vm(sys, room).calls[unit].program.is_empty();
                 let done = if quiet { shell::command(sys, text, &mut Quiet(out)) } else { shell::command(sys, text, out) };
                 if !done {
                     return Err(said());
                 }
             }
         }
-        Op::Return => sys.vm.calls[unit].next = usize::MAX,
+        Op::Return => vm_mut(sys, room).calls[unit].next = usize::MAX,
     }
     Ok(())
 }
@@ -666,5 +768,149 @@ mod tests {
         typed(&mut sys, &["program quiet", "insert into expenses values ('y', 2)", "say 'done'", "end", "program outer", "qr quiet", "end"]);
         assert!(block(&mut sys, &["outer"]).0);
         assert_eq!(String::from_utf8_lossy(sys.note.bytes()), "done\n");
+    }
+
+    /// Gives a system rooms for jobs, as the kernel does.
+    pub(crate) fn rooms(sys: &mut System, count: usize) {
+        let made: Vec<Machine> = (0..count).map(|_| Machine::new()).collect();
+        sys.rooms = Some(Box::leak(made.into_boxed_slice()));
+    }
+
+    /// A system with a table of 100 rows, programs three deep whose last fails, and a name.
+    fn stocked() -> Box<System> {
+        let mut sys = Box::new(System::new());
+        typed(&mut sys, &["create table hundred (n int)"]);
+        for start in (0..100).step_by(8) {
+            let values: Vec<String> = (start..(start + 8).min(100)).map(|n| format!("({n})")).collect();
+            typed(&mut sys, &[&format!("insert into hundred values {}", values.join(", "))]);
+        }
+        typed(&mut sys, &["program top", "say 'top'", "middle", "say 'not here'", "end"]);
+        typed(&mut sys, &["program middle", "say 'middle'", "run bottom", "end"]);
+        typed(&mut sys, &["program bottom", "say 'bottom'", "let x = 1 / zero", "end", "let zero = 0"]);
+        sys
+    }
+
+    /// Runs lines in a room it was given, one instruction a turn. Returns how it went, what it said, and how many turns it took.
+    fn in_turns(sys: &mut System, room: Room, text: &[&str]) -> (bool, Vec<String>, usize) {
+        let given: Vec<Line> = text.iter().map(|line| Line::from_bytes(line.as_bytes())).collect();
+        let mut out = Lines::default();
+        let Some(base) = start_lines(sys, room, &given, &mut out) else {
+            return (false, out.lines, 0);
+        };
+        let mut turns = 0;
+        loop {
+            turns += 1;
+            match turn(sys, room, base, &mut out, &mut || true) {
+                Turn::More => assert!(turns < 1_000_000, "it never ends"),
+                Turn::Ended(ok) => return (ok, out.lines, turns),
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_run_in_turns_says_what_it_says_at_once() {
+        let blocks: [&[&str]; 6] = [
+            &["let n = 0", "while n < 50", "let n = n + 1", "end", "say n"],
+            &["let sum = 0", "for row in select n from hundred", "let sum = sum + row.n", "end", "say sum"],
+            &["say 'first'", "top", "say 'not here'"],
+            &["say 'ran'", "else"],
+            &["for a in select n from hundred where n < 3", "for b in select n from hundred where n < 3", "if b.n = 1", "return", "end", "say a.n + b.n", "end", "end"],
+            &["run nowhere"],
+        ];
+        for block_lines in blocks {
+            let (mut at_once, mut by_turns) = (stocked(), stocked());
+            rooms(&mut by_turns, 2);
+            let once = block(&mut at_once, block_lines);
+            let (ok, out, turns) = in_turns(&mut by_turns, Room::Given(1), block_lines);
+            assert_eq!((ok, &out), (once.0, &once.1), "{block_lines:?}");
+            assert_eq!(each(&mut at_once, &["vars"]), each(&mut by_turns, &["vars"]), "{block_lines:?}");
+            // one instruction a turn: the first block alone is more than a hundred of them
+            assert!(turns >= 1 || !ok);
+            // and the room is free again, as is the machine's own
+            assert!(at(&by_turns, Room::Given(1)).is_none() && at(&by_turns, Room::Own).is_none());
+        }
+        let mut sys = stocked();
+        rooms(&mut sys, 1);
+        assert!(in_turns(&mut sys, Room::Given(0), blocks[0]).2 > 100);
+    }
+
+    #[test]
+    fn two_rooms_take_turns_without_touching_each_other() {
+        let mut sys = stocked();
+        rooms(&mut sys, 2);
+        // the two run in two sessions, each with its names
+        let adds = [Line::from_bytes(b"for row in select id from hundred"), Line::from_bytes(b"update hundred set n = n + 1 where id = row.id"), Line::from_bytes(b"end")];
+        let doubles = [Line::from_bytes(b"for row in select id from hundred"), Line::from_bytes(b"update hundred set n = n * 2 where id = row.id"), Line::from_bytes(b"end")];
+        let mut out = Lines::default();
+        sys.session = crate::events::SCREEN;
+        let first = start_lines(&mut sys, Room::Given(0), &adds, &mut out).unwrap();
+        sys.session = crate::events::SERIAL;
+        let second = start_lines(&mut sys, Room::Given(1), &doubles, &mut out).unwrap();
+        let (mut one, mut two) = (Turn::More, Turn::More);
+        while one == Turn::More || two == Turn::More {
+            if one == Turn::More {
+                sys.session = crate::events::SCREEN;
+                one = turn(&mut sys, Room::Given(0), first, &mut out, &mut || true);
+            }
+            if two == Turn::More {
+                sys.session = crate::events::SERIAL;
+                two = turn(&mut sys, Room::Given(1), second, &mut out, &mut || true);
+            }
+        }
+        assert_eq!((one, two), (Turn::Ended(true), Turn::Ended(true)), "{:?}", out.lines);
+        // every row was changed by both, in one order or the other: no change is lost
+        sys.session = crate::events::SCREEN;
+        assert_eq!(each(&mut sys, &["say select count(*) from hundred"]), ["100"]);
+        for id in [1, 37, 100] {
+            let n = id - 1;
+            let now: i64 = each(&mut sys, &[&format!("say select n from hundred where id = {id}")])[0].parse().unwrap();
+            assert!(now == (n + 1) * 2 || now == n * 2 + 1, "{id}: {now}");
+        }
+    }
+
+    #[test]
+    fn a_room_that_is_stopped_is_free_again() {
+        let mut sys = stocked();
+        rooms(&mut sys, 1);
+        typed(&mut sys, &["program deep", "for a in select n from hundred", "for b in select n from hundred", "let seen = b.n", "end", "end", "end"]);
+        typed(&mut sys, &["program outer", "say 'out'", "deep", "end"]);
+        let mut out = Lines::default();
+        let base = start_program(&mut sys, Room::Given(0), b"outer", &mut out).unwrap();
+        for _ in 0..40 {
+            assert_eq!(turn(&mut sys, Room::Given(0), base, &mut out, &mut || true), Turn::More);
+        }
+        // where it is: the program at the top, and its line
+        let (program, line) = at(&sys, Room::Given(0)).unwrap();
+        assert_eq!(program.bytes(), b"deep");
+        assert!((1..=5).contains(&line));
+        stop(&mut sys, Room::Given(0));
+        assert!(at(&sys, Room::Given(0)).is_none());
+        assert_eq!(out.lines, ["out"]);
+        // the room runs something else at once, with all its cursors
+        let four = ["for a in select 1", "for b in select 1", "for c in select 1", "for d in select 1", "say 'four deep'", "end", "end", "end", "end"];
+        assert_eq!(in_turns(&mut sys, Room::Given(0), &four).1, ["four deep"]);
+        // a program that is not there starts nothing, and says so
+        let mut out = Lines::default();
+        assert!(start_program(&mut sys, Room::Given(0), b"nowhere", &mut out).is_none());
+        assert_eq!(out.lines, ["Unknown program: nowhere. Type programs to list them."]);
+    }
+
+    #[test]
+    fn without_limits_a_loop_goes_on() {
+        let mut sys = Box::new(System::new());
+        rooms(&mut sys, 1);
+        let long = ["let n = 0", "while n < 20001", "let n = n + 1", "end", "say n"];
+        // with them, as in the machine's own room
+        let (ok, out, _) = in_turns(&mut sys, Room::Given(0), &long);
+        assert!(!ok && out[0] == "This loop went round 10000 times and was stopped.");
+        sys.rooms.as_mut().unwrap()[0].unbound(true);
+        assert_eq!(in_turns(&mut sys, Room::Given(0), &long).1, ["20001"]);
+        let longer = ["let n = 0", "while n < 9", "let m = 0", "while m < 9000", "let m = m + 1", "end", "let n = n + 1", "end", "say n"];
+        assert_eq!(in_turns(&mut sys, Room::Given(0), &longer).1, ["9"]);
+        // a turn that is given no end runs to the end
+        let given: Vec<Line> = long.iter().map(|line| Line::from_bytes(line.as_bytes())).collect();
+        let mut out = Lines::default();
+        let base = start_lines(&mut sys, Room::Given(0), &given, &mut out).unwrap();
+        assert_eq!(turn(&mut sys, Room::Given(0), base, &mut out, &mut || false), Turn::Ended(true));
     }
 }

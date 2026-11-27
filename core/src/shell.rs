@@ -908,6 +908,9 @@ pub struct System {
     /// where each is, its cursors. See `machine.rs`. (`machine` is the
     /// computer.)
     pub vm: crate::machine::Machine,
+    /// The rooms the kernel gave for jobs: a machine each. None on a system
+    /// that was given none, where everything runs at once in `vm`.
+    pub rooms: Option<&'static mut [crate::machine::Machine]>,
     pub display: Display,
     /// The kernel's answer to `Request::Measure`.
     pub measured: Option<Measure>,
@@ -1052,6 +1055,7 @@ impl System {
             queried: [0; crate::catalog::TABLES.len()],
             request: None,
             vm: crate::machine::Machine::new(),
+            rooms: None,
             display: Display { shown: Pictures::Direct, every: 0, sweeps: 0, light: None, direct: false, combining: false, whole_us: 0, firmware_us: 0, pictures: 0, longest_us: 0, city_us: 0, skipped: 0 },
             measured: None,
             note: Note::new(),
