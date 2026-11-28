@@ -184,6 +184,10 @@ impl Panel {
                     if !rest.is_empty() && (next.bytes() != b"among" || after.is_empty()) {
                         return Err(fault(b"After the label of a field: shown, or among and what it may hold."));
                     }
+                    // values written there are read now; a select is read when they are asked for
+                    if !rest.is_empty() && word_of(after).0.bytes() != b"select" && !literals(after, &mut |_| {}) {
+                        return Err(fault(b"After among: values with commas between them ('a', 'b', 3), or a select."));
+                    }
                     // a table has seven columns but its id, and each has one field at most
                     panel.fields[panel.count] = Field { column: found, label, shown, line: at, among: !rest.is_empty() };
                     panel.count += 1;
@@ -521,8 +525,13 @@ pub struct Open {
     /// find; and what was typed before a row, if something was.
     row: Option<usize>,
     option: Option<u8>,
-    /// What each field of the form holds.
+    /// The id of the row the keys are on: a list that is read again
+    /// keeps them on that row, wherever it is then.
+    on: Option<u64>,
+    /// What each field of the form holds, and what it held when the row
+    /// was read: a change writes the fields that differ, and no other.
     inputs: [Input; COLUMNS],
+    was: [Text; COLUMNS],
     /// What the field that was asked about may hold.
     choices: [Text; ROWS],
     choice_count: usize,
@@ -655,7 +664,9 @@ pub fn open(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
         refused: false,
         row: None,
         option: None,
+        on: None,
         inputs: [Input::NONE; COLUMNS],
+        was: [Text::new(); COLUMNS],
         choices: [Text::new(); ROWS],
         choice_count: 0,
     });
@@ -786,6 +797,8 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
     if let Err(message) = fetched {
         open.message = FixedStr::from_bytes(message.bytes());
         open.failed = true;
+        // no row is shown: the keys are on none
+        (open.row, open.on, open.option) = (None, None, None);
         return;
     }
     // what was wrong the last time is no longer so
@@ -824,9 +837,15 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
         }
         (open.ids[row], open.lines[row]) = (room.ids[row], line);
     }
-    // the keys stay on a row that is there
-    open.row = open.row.filter(|_| open.count > 0).map(|row| row.min(open.count - 1));
-    open.option = open.option.filter(|_| open.row.is_some());
+    // The keys stay on the row they were on, wherever it is now, with
+    // what was typed before it. If it is gone they are on the row that
+    // took its place, and what was typed is dropped: it was for another.
+    let followed = open.on.and_then(|id| room.ids[..open.count].iter().position(|listed| *listed == id));
+    if followed.is_none() {
+        open.option = None;
+    }
+    open.row = followed.or(open.row.filter(|_| open.count > 0).map(|row| row.min(open.count - 1)));
+    open.on = open.row.map(|row| room.ids[row]);
     if said && nowhere {
         open.message = FixedStr::from_bytes(b"No listed column is a text: there is nothing to look in.");
     } else if said && open.count == 0 && !open.found.is_empty() {
@@ -908,10 +927,13 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
                     Some(row) => row + 1,
                 };
                 if next < open.count {
-                    (open.row, open.option) = (Some(next), None);
+                    (open.row, open.on, open.option) = (Some(next), Some(open.ids[next]), None);
                 }
             }
-            Key::Up => (open.row, open.option) = (open.row.and_then(|row| row.checked_sub(1)), None),
+            Key::Up => {
+                let row = open.row.and_then(|row| row.checked_sub(1));
+                (open.row, open.on, open.option) = (row, row.map(|row| open.ids[row]), None);
+            }
             // (a letter beyond ASCII is one as any other: tables hold them)
             Key::Char(typed) if typed >= 0x20 && typed != 0x7f => match open.row {
                 None => {
@@ -927,17 +949,18 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
             }
             Key::Enter => match open.row {
                 None => (open.found, open.after, open.back, open.page, open.said, open.stale) = (open.find, 0, 0, 0, true, true),
-                Some(row) => {
+                Some(row) if row < open.count => {
                     let id = open.ids[row];
                     match open.option.take() {
                         Some(b'2') => open.todo = Todo::Row(id, true),
                         Some(b'4') => {
                             open.mode = Mode::Sure(id);
-                            say(open, b"Remove this row? [Enter] removes it, [F12] keeps it.");
+                            open.message = sure(id);
                         }
                         _ => open.todo = Todo::Row(id, false),
                     }
                 }
+                Some(_) => {}
             },
             _ => {}
         },
@@ -947,7 +970,7 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
                 open.mode = Mode::List;
                 say(open, b"Nothing was removed.");
             }
-            _ => say(open, b"Remove this row? [Enter] removes it, [F12] keeps it."),
+            _ => open.message = sure(id),
         },
         Mode::Form { shown, at } => {
             let field = open.panel.fields[at.min(COLUMNS - 1)];
@@ -961,7 +984,8 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
                 }
                 Key::Enter if shown => open.mode = Mode::List,
                 Key::Enter => open.todo = Todo::Save,
-                _ if shown => {}
+                // nothing is typed in what is only shown
+                _ if shown || field.shown => {}
                 Key::F(4) if field.among => open.todo = Todo::Among(at),
                 Key::F(4) => say(open, b"This field has no list of values to pick from."),
                 Key::Tab | Key::Down => open.mode = Mode::Form { shown, at: beside(&open.panel, at, true) },
@@ -992,6 +1016,13 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
             _ => {}
         },
     }
+}
+
+/// What is asked before a row is removed, with the id of that row.
+fn sure(id: u64) -> FixedStr<COLS> {
+    let mut question = FixedStr::new();
+    let _ = write!(question, "Remove row {id}? [Enter] removes it, [F12] keeps it.");
+    question
 }
 
 /// What a line of a panel says a field may hold: what follows `among`.
@@ -1060,7 +1091,7 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
         return;
     };
     let (todo, panel, id) = (core::mem::replace(&mut open.todo, Todo::Nothing), open.panel, open.id);
-    let inputs = open.inputs;
+    let (inputs, was) = (open.inputs, open.was);
     let mut statement = FixedStr::<1024>::new();
     let text_of = |schema: &Schema, column: &Name| schema.columns[..schema.count].iter().zip(&schema.kinds).any(|(name, kind)| name == column && *kind == xila_db::Kind::Text);
     match todo {
@@ -1080,7 +1111,8 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
             match read {
                 Ok(Some(values)) => {
                     for at in 0..panel.count {
-                        open.inputs[at] = Input::of(values[at + 1].shown().bytes());
+                        open.was[at] = values[at + 1].shown();
+                        open.inputs[at] = Input::of(open.was[at].bytes());
                     }
                     (open.id, open.mode) = (Some(row), Mode::Form { shown: !change, at: beside(&panel, panel.count.max(1) - 1, true) });
                 }
@@ -1099,7 +1131,7 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
                 }
             };
             let typed = || panel.fields[..panel.count].iter().zip(&inputs).filter(|(field, _)| !field.shown);
-            let mut nothing = false;
+            let (mut nothing, mut same) = (false, false);
             // the first field that holds what is no value, if one does
             let mut wrong: Option<Label> = None;
             match (todo, id) {
@@ -1107,8 +1139,16 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
                     let _ = write!(statement, "delete from {} where id = {row}", panel.table);
                 }
                 (_, Some(row)) => {
+                    // The fields that no longer hold what was read, and no
+                    // other: a field that was not touched is not written
+                    // back from what the form shows of it, which may be
+                    // less than it holds (a text is shown by its first 48
+                    // characters, an empty one as nothing), nor over what
+                    // another wrote there meanwhile.
+                    let changed = || panel.fields[..panel.count].iter().zip(&inputs).zip(&was).filter(|((field, input), was)| !field.shown && input.text.bytes() != was.bytes()).map(|(pair, _)| pair);
+                    same = changed().next().is_none();
                     let _ = write!(statement, "update {} set ", panel.table);
-                    for (at, (field, input)) in typed().enumerate() {
+                    for (at, (field, input)) in changed().enumerate() {
                         statement.push_bytes(if at > 0 { b", " } else { b"" });
                         statement.push_bytes(field.column.bytes());
                         statement.push_bytes(b" = ");
@@ -1141,6 +1181,8 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
             let mut heard = Heard { text: FixedStr::new(), refused: false };
             if typed().next().is_none() && !matches!(todo, Todo::Remove(_)) {
                 (heard.text, heard.refused) = (FixedStr::from_bytes(b"This panel has no field that is typed."), true);
+            } else if same {
+                heard.text = FixedStr::from_bytes(b"Nothing was changed.");
             } else if nothing {
                 (heard.text, heard.refused) = (FixedStr::from_bytes(b"Nothing was typed: there is no row to add."), true);
             } else if let Some(label) = wrong {
@@ -1169,7 +1211,7 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
         Todo::Among(at) => {
             let field = panel.fields[at.min(COLUMNS - 1)];
             let mut choices = [Text::new(); ROWS];
-            let mut count = 0;
+            let (mut count, mut more) = (0, false);
             let found = (|| -> Result<(), Message> {
                 let loaded = lang::load_from(&sys.db, PANELS, panel.name.bytes(), &mut room.lines)?.ok_or_else(|| unknown(panel.name.bytes()))?;
                 let line = room.lines.get(field.line).filter(|_| field.line < loaded.count).copied().unwrap_or(Line::new());
@@ -1177,31 +1219,31 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
                     return Ok(());
                 };
                 if word_of(values).0.bytes() == b"select" {
-                    // the first column of what it selects
+                    // the first column of what it selects; a select that sorts is
+                    // worked out whole, and has no room for more than 32 rows
+                    if room.cursor.open(&*sys, &NO_VARS, values).is_err_and(|message| message.bytes().starts_with(b"A loop takes")) {
+                        return Err(Message::from_bytes(b"A list that is sorted proposes 32 values at most: this one has more."));
+                    }
                     room.cursor.open(&*sys, &NO_VARS, values)?;
-                    while count < ROWS {
-                        let Some(row) = room.cursor.next(&*sys, values)? else {
+                    while let Some(row) = room.cursor.next(&*sys, values)? {
+                        if count == ROWS {
+                            more = true;
                             break;
-                        };
+                        }
                         choices[count] = row[0].shown();
                         count += 1;
                     }
                     return Ok(());
                 }
-                // values written there: texts between quotes, numbers, commas between them
-                let mut rest = values;
-                while !rest.is_empty() && count < ROWS {
-                    let (value, after) = match text_then(rest) {
-                        Some((text, after)) => (unquoted(text), after),
-                        None => {
-                            let end = rest.iter().position(|byte| *byte == b',').unwrap_or(rest.len());
-                            (Text::from_bytes(trim(&rest[..end])), trim(&rest[end..]))
-                        }
-                    };
-                    choices[count] = value;
-                    count += 1;
-                    rest = trim(after.strip_prefix(b",").unwrap_or(after));
-                }
+                // values written there: read as they were when the panel was kept
+                literals(values, &mut |value| {
+                    if count < ROWS {
+                        choices[count] = value;
+                        count += 1;
+                    } else {
+                        more = true;
+                    }
+                });
                 Ok(())
             })();
             room.cursor.close();
@@ -1212,12 +1254,41 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
                 Err(message) => (open.message, open.refused) = (FixedStr::from_bytes(message.bytes()), true),
                 Ok(()) if count == 0 => open.message = FixedStr::from_bytes(b"There is nothing to pick from."),
                 Ok(()) => {
+                    if more {
+                        open.message = FixedStr::from_bytes(b"The first 40 values are proposed: there are more.");
+                    }
                     (open.choices, open.choice_count) = (choices, count);
                     // on the value the field holds, if it is one of them
                     let held = choices[..count].iter().position(|choice| choice.bytes() == trim(inputs[at.min(COLUMNS - 1)].text.bytes())).unwrap_or(0);
                     open.mode = Mode::Among { field: at, at: held };
                 }
             }
+        }
+    }
+}
+
+/// Reads the values written after `among`: texts between quotes and
+/// numbers, with commas between them. Hands each to `each`, and says
+/// false when they are not written so.
+fn literals(values: &[u8], each: &mut dyn FnMut(Text)) -> bool {
+    let mut rest = trim(values);
+    loop {
+        let (value, after) = match text_then(rest) {
+            Some((text, after)) => (unquoted(text), after),
+            None => {
+                let end = rest.iter().position(|byte| *byte == b',').unwrap_or(rest.len());
+                let number = trim(&rest[..end]);
+                if number.is_empty() || !number.iter().all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'.')) {
+                    return false;
+                }
+                (Text::from_bytes(number), trim(&rest[end..]))
+            }
+        };
+        each(value);
+        match after.strip_prefix(b",") {
+            Some(more) if !trim(more).is_empty() => rest = trim(more),
+            Some(_) => return false,
+            None => return after.is_empty(),
         }
     }
 }
@@ -1248,19 +1319,21 @@ fn unquoted(written: &[u8]) -> Text {
 /// cursor, the page and the SELECT stood on top of frames that were
 /// deep already.)
 pub fn refresh(sys: &mut System, room: &mut Page) -> bool {
+    // what a key asked of the tables is done, whichever screen is shown
+    // by now: a row that was to be written is written
+    let mut asked = false;
+    for place in 0..OPEN {
+        if sys.panels.open[place].as_ref().is_some_and(|open| open.todo != Todo::Nothing) {
+            work(sys, place, room);
+            asked = true;
+        }
+    }
+    // then the list of the panel that is shown, if it is to be read
     let Some(place) = place_of(sys, sys.screen) else {
-        return false;
+        return asked;
     };
     let now = sys.ticks;
     let stored = sys.stored_at;
-    let Some(open) = sys.panels.open[place].as_mut() else {
-        return false;
-    };
-    // what a key asked of the tables, then the list if it is to be read
-    let asked = open.todo != Todo::Nothing;
-    if asked {
-        work(sys, place, room);
-    }
     let Some(open) = sys.panels.open[place].as_mut() else {
         return asked;
     };
@@ -1336,13 +1409,14 @@ pub fn draw(sys: &System, place: usize, grid: &mut Grid, top: usize) {
             };
             right(grid, what.bytes());
             // the labels, then dots up to the values, which start in one column
-            let width = open.panel.fields[..open.panel.count].iter().map(|field| field.label.len()).max().unwrap_or(0) + 3;
+            // (a label longer than 26 characters is cut there: a value has 48)
+            let width = open.panel.fields[..open.panel.count].iter().map(|field| field.label.len()).max().unwrap_or(0).min(26) + 3;
             for (index, (field, input)) in open.panel.fields[..open.panel.count].iter().zip(&open.inputs).enumerate() {
                 let row = top + 3 + index;
                 if row + FOOT > last {
                     break;
                 }
-                let end = grid.text(1, row, field.label.bytes(), role::TERM_OUT, bg);
+                let end = grid.text(1, row, &field.label.bytes()[..field.label.len().min(26)], role::TERM_OUT, bg);
                 grid.fill(row, end + 1, 1 + width, Cell::new(b'.', role::TERM_OUT, bg));
                 let typed = !shown && !field.shown;
                 let from = grid.text(1 + width, row, b" : ", role::TERM_OUT, bg);
@@ -1466,6 +1540,11 @@ pub(crate) mod tests {
             assert_eq!(said(&mut sys, &typed), [message.to_string(), not_kept(2)], "{lines:?}");
         }
         assert_eq!(said(&mut sys, &["panel stock on items", "field place 'Where'", "field PLACE 'Again'", "end"]), ["The column place has a field already.".to_string(), not_kept(2)]);
+        // what a field may hold: values with commas between them, or a select
+        let among = "After among: values with commas between them ('a', 'b', 3), or a select.";
+        for values in ["'a',, 'b'", "'a', 'b',", "'unclosed", "a word", "1 2"] {
+            assert_eq!(said(&mut sys, &["panel stock on items", &format!("field place 'Where' among {values}"), "end"]), [among.to_string(), not_kept(1)], "{values}");
+        }
         let listing = "A list names columns, with commas between them: list label, place";
         assert_eq!(said(&mut sys, &["panel stock on items", "list", "end"]), [listing.to_string(), not_kept(1)]);
         assert_eq!(said(&mut sys, &["panel stock on items", "list label,, place", "end"]), [listing.to_string(), not_kept(1)]);

@@ -778,8 +778,38 @@ with Xila(disk=disk) as x:
     time.sleep(0.3)
     gone, said = len(x.table("select id from shelf where label = 'thing new'")), body(x)[-3].strip()
     check("4 asks before it removes a row: F12 keeps it, Enter removes it",
-          asked == "Remove this row? [Enter] removes it, [F12] keeps it." and (kept, gone) == (1, 0) and said == "1 row removed from shelf.", (asked, kept, gone, said))
+          re.fullmatch(r"Remove row \d+\? \[Enter\] removes it, \[F12\] keeps it\.", asked) and (kept, gone) == (1, 0) and said == "1 row removed from shelf.", (asked, kept, gone, said))
     x.key("f3")
+    # 5 displays a row, and F4 proposes what a field may hold: read at the tick, as a page is
+    for line in ("panel pick on shelf", "field label 'Label'", "field place 'Place' among 'door', 'window', 'roof'", "field qty 'In stock' among select qty from shelf where id < 4"):
+        x.cmd(line)
+    x.cmd("end")
+    x.type("pick")
+    x.key("ret")
+    x.key("down")
+    x.type("5")
+    x.key("ret")
+    time.sleep(0.3)
+    shown = [" ".join(row.replace(".", " ").split()) for row in body(x)]
+    x.key("ret")
+    x.key("f6")
+    x.key("tab")
+    x.key("f4")
+    time.sleep(0.3)
+    proposed = [row.strip() for row in body(x)[1:4]]
+    x.key("down")
+    x.key("ret")
+    x.key("tab")
+    x.key("f4")
+    time.sleep(0.3)
+    numbers = [row.strip() for row in body(x)[1:4]]
+    x.key("f12")
+    picked = [" ".join(row.replace(".", " ").split()) for row in body(x)[1:4]]
+    check("5 before a row displays it", shown[0].endswith("row 1") and shown[1:4] == ["Label : thing 0", "Place : shelf 0", "In stock : 0"] and shown[-1].startswith("Enter=Back"), shown)
+    check("F4 proposes what a field may hold, written in the panel or read from a table",
+          proposed == ["door", "window", "roof"] and numbers == ["0", "10", "20"] and picked == ["Label :", "Place : window", "In stock :"], (proposed, numbers, picked))
+    x.key("f3")
+    x.cmd("drop panel pick")
     x.cmd("drop panel stock")
     x.cmd("drop panel edit")
     x.cmd("drop table shelf")

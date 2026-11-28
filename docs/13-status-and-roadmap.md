@@ -63,8 +63,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 28 November 2026: about 43,000 lines, 422
-unit tests, 573 system checks.
+about 300 system checks. On 28 November 2026: about 45,000 lines, 428
+unit tests, 580 system checks.
 
 ## Known limits of what is done
 
@@ -847,7 +847,12 @@ In four steps, each merged when its unit tests and its checks pass:
    whoever wrote the panel, the prompt over the network included.
 2. Done on 28 November 2026: the form: display, add, change, remove;
    `F4` and `among`. What is written goes through the statements of
-   SQL, at the tick of the interface.
+   SQL, at the tick of the interface. What it showed: what is typed
+   in a field must be made one value by the form itself before it is
+   put in a statement (a number written as it was typed changed
+   another column, and with an unclosed quote every row), and a
+   change must write only what was changed, since a form shows less
+   of a row than the row holds.
 3. Panels opened from a row, and programs on a key or an option.
 4. The stock: its text in the repository, the tool that sends it, its
    chapter of the documentation.

@@ -1573,7 +1573,7 @@ mod tests {
         type_text(&mut ui, &mut sys, "Oscilloscope");
         keys(&mut ui, &mut sys, &[Key::Enter]);
         let (fields, message) = form(&mut ui, &mut sys);
-        assert_eq!((fields[0].as_str(), message.contains("label") || message.contains("twice") || message.contains("already")), ("Label: Oscilloscope", true), "{message}");
+        assert_eq!((fields[0].as_str(), message.as_str()), ("Label: Oscilloscope", "Column label takes no value twice: row 1 has that one."));
         for _ in 0..12 {
             keys(&mut ui, &mut sys, &[Key::Backspace]);
         }
@@ -1582,7 +1582,7 @@ mod tests {
         keys(&mut ui, &mut sys, &[Key::Tab]);
         type_text(&mut ui, &mut sys, "tools");
         keys(&mut ui, &mut sys, &[Key::Enter]);
-        assert!(!form(&mut ui, &mut sys).1.is_empty(), "a label is asked for");
+        assert_eq!(form(&mut ui, &mut sys).1, "Column label must have a value.");
         keys(&mut ui, &mut sys, &[Key::Up]);
         type_text(&mut ui, &mut sys, "Tape");
         keys(&mut ui, &mut sys, &[Key::Tab, Key::Tab]);
@@ -1630,7 +1630,7 @@ mod tests {
         // 4 asks before it removes; F12 keeps the row
         type_text(&mut ui, &mut sys, "4");
         keys(&mut ui, &mut sys, &[Key::Enter]);
-        assert_eq!(listed(&mut ui, &mut sys).1, "Remove this row? [Enter] removes it, [F12] keeps it.");
+        assert_eq!(listed(&mut ui, &mut sys).1, "Remove row 2? [Enter] removes it, [F12] keeps it.");
         assert_eq!(row(&ui, ui.grid.rows - 1), " Enter=Remove  F12=Keep");
         keys(&mut ui, &mut sys, &[Key::F(12)]);
         assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["Oscilloscope measure good 1".to_string(), "Soldering iron tools worn 7".into()], "Nothing was removed.".to_string()));
@@ -1712,6 +1712,95 @@ mod tests {
     }
 
     #[test]
+    fn a_change_writes_what_was_changed_and_nothing_else() {
+        let (mut ui, mut sys) = start();
+        for line in ["create table notes (label text, note text, lead text, qty int)", "insert into notes values ('one', '', '  lead', 1), ('two', '', 'x', 2), ('three', '', 'x', 3)", "panel notes on notes", "end", "notes"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        listed(&mut ui, &mut sys);
+        let held = |ui: &mut Ui, sys: &mut System| typed(ui, sys, "select note = '', length(lead), qty from notes where id = 1")[1].split_whitespace().map(String::from).collect::<Vec<_>>();
+        // Enter with nothing typed writes nothing, and says so
+        keys(&mut ui, &mut sys, &[Key::Down]);
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Enter, Key::Enter]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Nothing was changed.");
+        // one field is changed: an empty text stays one, spaces stay, and so does what another wrote meanwhile
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        form(&mut ui, &mut sys);
+        typed(&mut ui, &mut sys, "update notes set label = 'ONE' where id = 1");
+        keys(&mut ui, &mut sys, &[Key::Up]);
+        type_text(&mut ui, &mut sys, "0");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "1 row changed in notes.");
+        assert_eq!(held(&mut ui, &mut sys), ["1", "6", "10"]);
+        assert_eq!(typed(&mut ui, &mut sys, "select label from notes where id = 1")[1].trim(), "ONE");
+        // a field that is emptied is emptied
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Enter, Key::Tab, Key::Tab]);
+        for _ in 0..6 {
+            keys(&mut ui, &mut sys, &[Key::Backspace]);
+        }
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(typed(&mut ui, &mut sys, "select lead is null from notes where id = 1")[1].trim(), "1");
+        // what is typed before a row stays with that row when the rows above it go
+        keys(&mut ui, &mut sys, &[Key::Down]);
+        type_text(&mut ui, &mut sys, "4");
+        typed(&mut ui, &mut sys, "delete from notes where id = 1");
+        ui.tick(&mut sys, 150);
+        ui.render(&mut sys);
+        assert_eq!((row(&ui, BODY_TOP + 5)[..4].to_string(), squeezed(listed(&mut ui, &mut sys)).0), ("  4 ".to_string(), vec!["two x 2".to_string(), "three x 3".into()]));
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Remove row 2? [Enter] removes it, [F12] keeps it.");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["three x 3".to_string()], "1 row removed from notes.".to_string()));
+        // ...and goes when that row does
+        type_text(&mut ui, &mut sys, "4");
+        typed(&mut ui, &mut sys, "delete from notes");
+        ui.tick(&mut sys, 150);
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(typed(&mut ui, &mut sys, "insert into notes values ('four', '', '', 4)").len(), 1);
+        ui.tick(&mut sys, 150);
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(typed(&mut ui, &mut sys, "select count(*) from notes")[1].trim(), "1");
+        // a save that was asked for is done though another screen is shown before the tick
+        keys(&mut ui, &mut sys, &[Key::F(12), Key::F(6)]);
+        type_text(&mut ui, &mut sys, "five");
+        ui.key(&mut sys, key(Key::Enter));
+        ui.key(&mut sys, key(Key::Esc));
+        ui.tick(&mut sys, 0);
+        assert_eq!((sys.screen, typed(&mut ui, &mut sys, "select count(*) from notes where label = 'five'")[1].trim().to_string()), (0, "1".to_string()));
+        // a table that cannot be read leaves the keys on no row
+        ui.key(&mut sys, alt_digit(3));
+        keys(&mut ui, &mut sys, &[Key::Down]);
+        typed(&mut ui, &mut sys, "drop table notes");
+        keys(&mut ui, &mut sys, &[Key::F(5)]);
+        type_text(&mut ui, &mut sys, "4");
+        ui.render(&mut sys);
+        assert_eq!(row(&ui, BODY_TOP + 2), " Find: 4");
+    }
+
+    #[test]
+    fn a_panel_that_only_shows_takes_nothing_typed() {
+        let (mut ui, mut sys) = start();
+        for line in ["create table seen (label text, qty int)", "insert into seen values ('one', 1)", "panel seen on seen", "field label 'A label of thirty-two characters' shown", "field qty 'N' shown", "end", "seen"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        listed(&mut ui, &mut sys);
+        keys(&mut ui, &mut sys, &[Key::Down]);
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        type_text(&mut ui, &mut sys, "zz");
+        keys(&mut ui, &mut sys, &[Key::F(4)]);
+        let (fields, message) = form(&mut ui, &mut sys);
+        assert_eq!((fields[1].as_str(), message.as_str()), ("N: 1", ""));
+        // a long label leaves the value its room on the row
+        assert!(row(&ui, BODY_TOP + 3).ends_with(" : one") && row(&ui, BODY_TOP + 3).len() <= 40);
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(form(&mut ui, &mut sys).1, "This panel has no field that is typed.");
+    }
+
+    #[test]
     fn what_a_field_may_hold_is_picked_with_f4() {
         let (mut ui, mut sys) = with_form();
         keys(&mut ui, &mut sys, &[Key::F(6), Key::F(4)]);
@@ -1738,6 +1827,24 @@ mod tests {
         keys(&mut ui, &mut sys, &[Key::Enter]);
         assert_eq!(listed(&mut ui, &mut sys).1, "1 row added to things, with id 3.");
         assert_eq!(typed(&mut ui, &mut sys, "select kind, state from things where id = 3")[1].split_whitespace().collect::<Vec<_>>(), ["tools", "worn"]);
+        // more values than are proposed: said, sorted or not
+        keys(&mut ui, &mut sys, &[Key::F(12)]);
+        for first in (0..48).step_by(8) {
+            let values: Vec<String> = (first..first + 8).map(|n| format!("('kind {n:02}')")).collect();
+            typed(&mut ui, &mut sys, &format!("insert into kinds values {}", values.join(", ")));
+        }
+        keys(&mut ui, &mut sys, &[Key::F(6), Key::Tab, Key::F(4)]);
+        assert_eq!(form(&mut ui, &mut sys).1, "The first 40 values are proposed: there are more.");
+        keys(&mut ui, &mut sys, &[Key::F(12), Key::F(12)]);
+        for line in ["panel sorted on things", "field kind 'Kind' among select name from kinds order by name", "end"] {
+            typed(&mut ui, &mut sys, line);
+        }
+        ui.run(&mut sys, b"sorted");
+        listed(&mut ui, &mut sys);
+        keys(&mut ui, &mut sys, &[Key::F(6), Key::F(4)]);
+        assert_eq!(form(&mut ui, &mut sys).1, "A list that is sorted proposes 32 values at most: this one has more.");
+        keys(&mut ui, &mut sys, &[Key::F(3)]);
+        ui.key(&mut sys, alt_digit(3));
         // a list of values that is gone says so
         typed(&mut ui, &mut sys, "drop table kinds");
         keys(&mut ui, &mut sys, &[Key::F(6), Key::Tab, Key::F(4)]);

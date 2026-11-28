@@ -17,10 +17,11 @@ XilaOS|all:/>create table items (label text, place text, qty int)
 XilaOS|all:/>panel stock on items
 ..>title 'The stock'
 ..>list label, place, qty
+..>field label 'Label'
 ..>field place 'Where it is'
 ..>field qty 'In stock'
 ..>end
-Panel stock kept: 4 lines.
+Panel stock kept: 5 lines.
 XilaOS|all:/>stock
 ```
 
@@ -30,7 +31,7 @@ The last line opens it:
  The stock                                                              page 1
  Find: _
 
- Opt label           Where it is  In stock
+ Opt Label           Where it is  In stock
   _  Oscilloscope    bench 2             1
   _  Soldering iron  bench 1             2
   _  Cat6 cable 5m   shelf B            12
@@ -45,7 +46,7 @@ The last line opens it:
 ```
  The stock                                                      row 3, changed
 
- label .......... : Cat6 cable 5m
+ Label .......... : Cat6 cable 5m
  Where it is .... : shelf B
  In stock ....... : 12_
 
@@ -124,6 +125,8 @@ In the form:
 | `F4` | What the field may hold, when its line says so (`among`): `Up`, `Down`, then `Enter` picks, `F12` goes back. |
 | `Enter` | Writes the row, and goes back to the list. |
 | `F12` | Goes back to the list; nothing is written. |
+| `F3` | Leaves the panel, and what was typed with it, without asking. |
+| `Esc` | Shows the overview; the form stays as it is typed. |
 
 - **What is written goes through the statements of SQL**, as if it were
   typed at the prompt of the screen: `insert`, `update ... where id =`,
@@ -140,11 +143,23 @@ In the form:
   is written (`In stock takes a number, or a calculation.`). A field of
   a text is written as it is typed, quotes and all. Whatever is typed
   in a field is one value of its column, and nothing more.
+- **A change writes the fields that were changed, and no other.** A
+  field that was not touched is not written back: not a text longer
+  than the 48 characters the form shows of it (the lines of programs
+  are), not an empty text, not what another prompt or a job wrote there
+  while the form was open. With nothing changed, `Enter` says `Nothing
+  was changed.`
 - **A field where nothing is typed** is left to the table when a row is
-  added (its value by default, or none), and is emptied when a row is
-  changed.
-- **`4` asks before it removes**: `Remove this row? [Enter] removes it,
-  [F12] keeps it.`
+  added (its value by default, or none), and is emptied when it held
+  something and a row is changed.
+- **A field that has some `field` lines has only those in its form**: a
+  column is given a label for the list by a `field` line, and that line
+  also puts it in the form. A column left out is not typed, and takes
+  its value by default in a row that is added.
+- **`4` asks before it removes**, naming the row by its `id`: `Remove
+  row 12? [Enter] removes it, [F12] keeps it.` What is typed before a
+  row stays with that row when the list is read again, wherever the
+  row is then, and is dropped if the row is gone.
 - **`F4` proposes, the table decides.** What `among` lists is there to
   pick from; anything else may still be typed, and it is a `check` of
   the table that refuses a value.
@@ -190,7 +205,8 @@ In the form:
 | Columns of a list | 8 (a table has no more) |
 | Rows of a page | What the screen has under the head of the panel: 37 on a screen of 50 rows |
 | Fields of a form | 7 (a table has eight columns, `id` among them), of 48 characters |
-| Values `F4` proposes | 40 |
+| Values `F4` proposes | 40; 32 when its `select` sorts them, and it says so when there are more |
+| A label in the form | Its first 26 characters |
 | The line to find | 40 characters, in three text columns |
 | A title, a label | 32 characters |
 
@@ -216,7 +232,7 @@ or ...)` when something is looked for: the cursor walks the table by
 its `id` from `N`, so a page deep in a large table costs no more than
 the first. One row more than the page shows is asked for, which tells
 whether a page follows. The page is kept as text already laid out, with
-the `id` of each row: 6 KB a panel.
+the `id` of each row; with its form, a panel that is open is 8 KB.
 
 The form keeps what is typed in each field (`Input`) and the `id` of
 its row. `Enter` builds the statement and gives it to `shell::change`,
