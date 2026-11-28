@@ -751,7 +751,94 @@ pass.
    a second each); and a job must wait until its answer is said, not
    only until it has come.
 
-Then the screens, and the stock of equipment.
+Then the screens, and the stock of equipment: [below](#application-screens-panels).
+
+### Application screens: panels
+
+What the author decided on 28 November 2026, the virtual machine
+being built:
+
+- **A screen of an application is described on a table**, and
+  programs are hooked to it where something of its own is to happen.
+  The system gives the list, the search, the form to add and change,
+  the removal. Not a format that a program drives line by line, as
+  RPG does: that may come later, for what a table does not describe.
+- **The word is `panel`** (`screen` is the command of the virtual
+  screens, and `screens` their view): `panel NAME on TABLE ... end`,
+  kept in the stored table `panels`; `panels` lists them, `show panel
+  NAME` gives one back, `drop panel NAME` removes it, and its name
+  opens it.
+- **A panel that is open is a virtual screen of its own**, beside the
+  overview, the log and the companion's: `Alt` and its digit, and the
+  menu, lead to it. Four may be open at one time.
+- **Function keys, as on a 5250**, recalled on the last rows: `F3`
+  leaves, `F6` adds, `F12` cancels, `Enter` goes, `PgUp` and `PgDn`
+  turn the pages; in a list a digit typed before a row acts on it
+  (`2` change, `4` delete, `5` display). `F4` shows the values a
+  field may take.
+- **A list is in the order its rows were made**, page by page, with
+  no limit, and a line to find: what is typed there keeps the rows
+  that hold it. Sorting waits for batch work.
+- **The first application is a stock**: things followed one by one
+  (`items`: label, category, serial, place, state, since, note) and
+  articles followed by their quantity (`articles`: label, category,
+  place, qty, least, note), whose entries and exits are rows of
+  `movements` (article, day, qty, why) typed in a panel opened from
+  the article; a program `on insert into movements` keeps the
+  quantity. `categories` (name) says what a category may be.
+- **The application is a text of the repository**, statements that
+  make its tables, panels and programs, sent to a machine through its
+  prompt over the network and played by `tools/check.py`. Nothing of
+  it is in the kernel.
+
+The design:
+
+```
+panel articles on articles
+    title 'Articles'
+    list label, category, qty, place
+    field label    'Label'
+    field category 'Category' among select name from categories
+    field qty      'In stock' shown
+    field place    'Where it is'
+    option 8 'Moves' open moves where article = id
+    key f8 'Count' run recount(id)
+end
+```
+
+- **A panel is an object of the system as a program is**: lines kept
+  in a table, typed at a prompt as a block, checked when its `end`
+  comes and not kept when its form is wrong. The companion may not
+  change the table `panels`, no more than `programs`. A panel opens
+  at the screen of the machine only: not at the serial port, not at
+  the prompt over the network.
+- **`list`** names the columns of the list; **`field`** a column of
+  the form, with its label; `shown` makes it one that is not typed;
+  `among` says what it may hold, values written there or a `select`
+  of one column. Without any `field`, every column is one, under its
+  name.
+- **What is written goes through the statements of SQL**
+  (`change.rs`): values by default, checks and what a column asks
+  hold, those who listen to the table hear of it and the programs
+  `on insert` run. What the table refuses is said on the message
+  line, in its own words.
+- **`option N 'label' open PANEL where COLUMN = id`** opens another
+  panel on the rows that belong to this one, where a row that is
+  added gets that value; **`option N 'label' run PROGRAM(values)`**
+  and **`key fN 'label' run PROGRAM(values)`** run a program as a job
+  the panel waits for, with values of the row; the last line it says
+  is the message.
+- **Limits said beforehand**: seven fields (a table has eight
+  columns), 48 characters a text, no sorting, four panels open.
+
+In four steps, each merged when its unit tests and its checks pass:
+
+1. The panel as an object, the function keys, the list in its
+   virtual screen, the line to find.
+2. The form: display, add, change, remove; `F4` and `among`.
+3. Panels opened from a row, and programs on a key or an option.
+4. The stock: its text in the repository, the tool that sends it, its
+   chapter of the documentation.
 
 ### Loose ends of what exists
 
