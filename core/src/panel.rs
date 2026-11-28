@@ -430,6 +430,36 @@ pub struct Open {
     /// tables changed since.
     read: u64,
     looked: u64,
+    /// The page is to be read: by the interface at its next tick, not
+    /// by the key or the command that asked, which are deep in the
+    /// stack of their task already.
+    stale: bool,
+    /// Something was looked for with `Enter`: the reading that follows
+    /// says so when no row holds it.
+    said: bool,
+}
+
+/// What reading a page needs room for: the cursor that walks the table,
+/// and the rows as values until their columns are laid out. It is the
+/// interface's to keep (`Ui::page`), in memory that is no stack: 40 KB
+/// that the stack of a task has not got to spare under a key or a
+/// command.
+pub struct Page {
+    cursor: sql::Cursor,
+    cells: [[Text; sql::MAX_COLUMNS]; ROWS + 1],
+    ids: [u64; ROWS + 1],
+}
+
+impl Page {
+    pub const fn new() -> Page {
+        Page { cursor: sql::Cursor::new(), cells: [[Text::new(); sql::MAX_COLUMNS]; ROWS + 1], ids: [0; ROWS + 1] }
+    }
+}
+
+impl Default for Page {
+    fn default() -> Page {
+        Page::new()
+    }
 }
 
 /// The panels that are open, each at its place: the virtual screen
@@ -526,8 +556,9 @@ pub fn open(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
         failed: false,
         read: 0,
         looked: 0,
+        stale: true,
+        said: false,
     });
-    read(sys, place);
     sys.screen = SCREENS.len() + place;
     true
 }
@@ -551,9 +582,8 @@ fn kept_again(sys: &mut System, name: &[u8]) {
     match load(sys, name, &mut lines) {
         Ok(Some((panel, _))) => {
             if let Some(open) = sys.panels.open[place].as_mut() {
-                (open.panel, open.after, open.back, open.page) = (panel, 0, 0, 0);
+                (open.panel, open.after, open.back, open.page, open.stale) = (panel, 0, 0, 0, true);
             }
-            read(sys, place);
         }
         _ => close(sys, place),
     }
@@ -578,40 +608,37 @@ fn cell(line: &mut FixedStr<COLS>, value: &[u8], width: usize, number: bool) {
 /// screen shows. What cannot be read is the panel's message, and its
 /// list is then empty.
 ///
-/// Never part of who calls it: it holds a cursor, 20 KB, for the time
-/// it reads.
+/// It keeps nothing large on the stack: the cursor and the rows are in
+/// `room`. And it is called from the tick of the interface only
+/// (`refresh`), never from under a key or a command.
 #[inline(never)]
-fn read(sys: &mut System, place: usize) {
-    let Some(mut open) = sys.panels.open[place].take() else {
+fn read(sys: &mut System, place: usize, room: &mut Page) {
+    let Some(open) = sys.panels.open[place].as_ref() else {
         return;
     };
+    let (panel, found, after) = (open.panel, open.found, open.after);
     let wanted = sys.panels.rows.clamp(1, ROWS);
-    let listed = open.panel.listed;
-    (open.count, open.more, open.read) = (0, false, sys.ticks);
-    open.header.clear();
-    // one row more than the page shows, to know whether a page follows
-    let mut cells = [[Text::new(); sql::MAX_COLUMNS]; ROWS + 1];
+    let listed = panel.listed;
     let mut numbers = [false; sql::MAX_COLUMNS];
-    let mut ids = [0u64; ROWS + 1];
     let mut count = 0;
     let fetched = (|| -> Result<(), Message> {
-        let schema = described_on(sys, open.panel.table.bytes())?;
+        let schema = described_on(sys, panel.table.bytes())?;
         let mut query = FixedStr::<512>::from_bytes(b"select id");
-        for column in &open.panel.list[..listed] {
+        for column in &panel.list[..listed] {
             query.push_bytes(b", ");
             query.push_bytes(column.bytes());
         }
-        let _ = write!(query, " from {} where id > {}", open.panel.table, open.after);
+        let _ = write!(query, " from {} where id > {}", panel.table, after);
         // what is looked for: in the first text columns of the list, a quote written twice
         let mut looked = 0;
-        for column in open.panel.list[..listed].iter().filter(|column| schema.columns[..schema.count].iter().zip(&schema.kinds).any(|(name, kind)| name == *column && *kind == xila_db::Kind::Text)) {
-            if open.found.is_empty() || looked == LOOKED {
+        for column in panel.list[..listed].iter().filter(|column| schema.columns[..schema.count].iter().zip(&schema.kinds).any(|(name, kind)| name == *column && *kind == xila_db::Kind::Text)) {
+            if found.is_empty() || looked == LOOKED {
                 break;
             }
             query.push_bytes(if looked == 0 { b" and (" } else { b" or " });
             query.push_bytes(column.bytes());
             query.push_bytes(b" like '%");
-            for byte in open.found.bytes() {
+            for byte in found.bytes() {
                 query.push_bytes(if *byte == b'\'' { b"''" } else { core::slice::from_ref(byte) });
             }
             query.push_bytes(b"%'");
@@ -620,58 +647,65 @@ fn read(sys: &mut System, place: usize) {
         if looked > 0 {
             query.push(b')');
         }
-        let mut cursor = sql::Cursor::new();
-        cursor.open(&*sys, &NO_VARS, query.bytes())?;
+        room.cursor.open(&*sys, &NO_VARS, query.bytes())?;
+        // one row more than the page shows, to know whether a page follows
         while count <= wanted {
-            let Some(row) = cursor.next(&*sys, query.bytes())? else {
+            let Some(row) = room.cursor.next(&*sys, query.bytes())? else {
                 break;
             };
-            ids[count] = if let Value::Int(id) = row[0] { id as u64 } else { 0 };
+            room.ids[count] = if let Value::Int(id) = row[0] { id as u64 } else { 0 };
             for at in 0..listed {
-                cells[count][at] = row[at + 1].shown();
+                room.cells[count][at] = row[at + 1].shown();
                 numbers[at] |= matches!(row[at + 1], Value::Int(_) | Value::Dec(..));
             }
             count += 1;
         }
         Ok(())
     })();
-    match fetched {
-        Err(message) => {
-            open.message = FixedStr::from_bytes(message.bytes());
-            open.failed = true;
-        }
-        Ok(()) => {
-            (open.more, open.count) = (count > wanted, count.min(wanted));
-            // each column as wide as what it holds on this page and as its
-            // name; the widest give way until the row fits
-            let mut labels = [Label::new(); sql::MAX_COLUMNS];
-            let mut widths = [0usize; sql::MAX_COLUMNS];
-            for at in 0..listed {
-                labels[at] = open.panel.label(&open.panel.list[at]);
-                widths[at] = cells[..open.count].iter().map(|row| row[at].len()).max().unwrap_or(0).max(labels[at].len()).max(1);
-            }
-            let room = COLS - 2 - 2 * listed.saturating_sub(1);
-            while widths[..listed].iter().sum::<usize>() > room {
-                if let Some(widest) = widths[..listed].iter_mut().max() {
-                    *widest -= 1;
-                }
-            }
-            open.header.push(b' ');
-            for at in 0..listed {
-                open.header.push_bytes(if at > 0 { b"  " } else { b"" });
-                cell(&mut open.header, labels[at].bytes(), widths[at], numbers[at]);
-            }
-            for row in 0..open.count {
-                let mut line = FixedStr::from_bytes(b" ");
-                for at in 0..listed {
-                    line.push_bytes(if at > 0 { b"  " } else { b"" });
-                    cell(&mut line, cells[row][at].bytes(), widths[at], numbers[at]);
-                }
-                (open.ids[row], open.lines[row]) = (ids[row], line);
-            }
+    room.cursor.close();
+    let now = sys.ticks;
+    let Some(open) = sys.panels.open[place].as_mut() else {
+        return;
+    };
+    (open.count, open.more, open.read, open.stale) = (0, false, now, false);
+    open.header.clear();
+    if let Err(message) = fetched {
+        open.message = FixedStr::from_bytes(message.bytes());
+        open.failed = true;
+        return;
+    }
+    (open.more, open.count) = (count > wanted, count.min(wanted));
+    // each column as wide as what it holds on this page and as its
+    // name; the widest give way until the row fits
+    let mut labels = [Label::new(); sql::MAX_COLUMNS];
+    let mut widths = [0usize; sql::MAX_COLUMNS];
+    for at in 0..listed {
+        labels[at] = panel.label(&panel.list[at]);
+        widths[at] = room.cells[..open.count].iter().map(|row| row[at].len()).max().unwrap_or(0).max(labels[at].len()).max(1);
+    }
+    let space = COLS - 2 - 2 * listed.saturating_sub(1);
+    while widths[..listed].iter().sum::<usize>() > space {
+        if let Some(widest) = widths[..listed].iter_mut().max() {
+            *widest -= 1;
         }
     }
-    sys.panels.open[place] = Some(open);
+    open.header.push(b' ');
+    for at in 0..listed {
+        open.header.push_bytes(if at > 0 { b"  " } else { b"" });
+        cell(&mut open.header, labels[at].bytes(), widths[at], numbers[at]);
+    }
+    for row in 0..open.count {
+        let mut line = FixedStr::from_bytes(b" ");
+        for at in 0..listed {
+            line.push_bytes(if at > 0 { b"  " } else { b"" });
+            cell(&mut line, room.cells[row][at].bytes(), widths[at], numbers[at]);
+        }
+        (open.ids[row], open.lines[row]) = (room.ids[row], line);
+    }
+    if open.count == 0 && open.said && !open.found.is_empty() {
+        open.message = FixedStr::from_bytes(b"No row holds: ").also(open.found.bytes());
+    }
+    open.said = false;
 }
 
 /// Handles a key on the screen of a panel.
@@ -719,22 +753,24 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
             open.find = FixedStr::from_bytes(&open.find.bytes()[..shorter]);
             return;
         }
-        Key::Enter => (open.found, open.after, open.back, open.page) = (open.find, 0, 0, 0),
+        Key::Enter => (open.found, open.after, open.back, open.page, open.said) = (open.find, 0, 0, 0, true),
         _ => return,
     }
-    read(sys, place);
-    if let Some(open) = sys.panels.open[place].as_mut() {
-        if !open.failed && open.count == 0 && event.key == Key::Enter && !open.found.is_empty() {
-            open.message = FixedStr::from_bytes(b"No row holds: ").also(open.found.bytes());
-        }
-    }
+    // read at the next tick of the interface, not from under this key
+    open.stale = true;
 }
 
-/// Reads again the list of the panel that is shown, when something was
-/// stored since it was read: a second apart at most, so that a job that
-/// writes many rows does not have it read as many times. Returns
-/// whether it was read.
-pub fn refresh(sys: &mut System) -> bool {
+/// Reads the list of the panel that is shown when it is to be read: it
+/// was just opened, or something was stored since it was read. A second
+/// apart at most for the second reason, so that a job that writes many
+/// rows does not have it read as many times. Returns whether it was
+/// read. The interface calls this at each of its ticks: the page of a
+/// panel is read from there, where the stack of the task is shallow,
+/// and never from under a key or a command. (A panel opened by its name
+/// froze the system in QEMU, then one whose line to find was used: the
+/// cursor, the page and the SELECT stood on top of frames that were
+/// deep already.)
+pub fn refresh(sys: &mut System, room: &mut Page) -> bool {
     let Some(place) = place_of(sys, sys.screen) else {
         return false;
     };
@@ -743,11 +779,11 @@ pub fn refresh(sys: &mut System) -> bool {
     let Some(open) = sys.panels.open[place].as_mut() else {
         return false;
     };
-    if stored < open.read || now < open.looked + AGAIN {
+    if !open.stale && (stored < open.read || now < open.looked + AGAIN) {
         return false;
     }
     open.looked = now;
-    read(sys, place);
+    read(sys, place, room);
     true
 }
 
@@ -776,7 +812,7 @@ pub fn draw(sys: &System, place: usize, grid: &mut Grid, top: usize) {
         }
         grid.text(0, top + HEAD + at, line.bytes(), role::TERM_OUT, bg);
     }
-    if open.count == 0 && !open.failed && open.message.is_empty() {
+    if open.count == 0 && !open.failed && open.message.is_empty() && !open.stale {
         grid.text(1, top + HEAD, b"(no rows)", role::TERM_OUT, bg);
     }
     grid.text(1, last.saturating_sub(1), open.message.bytes(), if open.failed { role::ERROR } else { role::TERM_CMD }, bg);

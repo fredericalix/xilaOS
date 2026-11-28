@@ -124,6 +124,8 @@ pub struct Ui {
     /// What the title bar last said of the doors to the network, the
     /// prompt and the pages: open or not, and who asked last.
     shown_remote: (bool, Option<crate::net::Ip>, bool, Option<crate::net::Ip>),
+    /// The room a page of a panel is read in: kept here, not on a stack.
+    page: crate::panel::Page,
 }
 
 /// Writes what is said on the companion's screen, as a conversation is
@@ -213,6 +215,7 @@ impl Ui {
             dirty: true,
             shown_meter: 0,
             shown_remote: (false, None, false, None),
+            page: crate::panel::Page::new(),
         }
     }
 
@@ -528,7 +531,7 @@ impl Ui {
             self.dirty = true;
         }
         // The list of the panel that is shown follows its table.
-        if crate::panel::refresh(sys) {
+        if crate::panel::refresh(sys, &mut self.page) {
             self.dirty = true;
         }
         // What this prompt listens to is shown as it happens.
@@ -1255,8 +1258,10 @@ mod tests {
         (ui, sys)
     }
 
-    /// The rows of the list a panel shows, and what it has to say.
+    /// The rows of the list a panel shows, and what it has to say, once
+    /// the interface had a tick to read what is to be read.
     fn listed(ui: &mut Ui, sys: &mut System) -> (Vec<String>, String) {
+        ui.tick(sys, 0);
         ui.render(sys);
         let last = ui.grid.rows - 1;
         ((BODY_TOP + 5..last - 1).map(|at| row(ui, at)).filter(|text| !text.is_empty()).collect(), row(ui, last - 1).trim().to_string())
@@ -1275,8 +1280,11 @@ mod tests {
         let (mut ui, mut sys) = with_panel(3);
         ui.run(&mut sys, b"stock");
         assert_eq!(sys.screen, 3);
+        // the screen is the panel's at once; its rows are read at the next tick of the interface
         ui.render(&mut sys);
-        assert!(row(&ui, BAR_ROW).contains("STOCK"));
+        assert!(row(&ui, BAR_ROW).contains("STOCK") && row(&ui, BODY_TOP + 4).is_empty());
+        ui.tick(&mut sys, 0);
+        ui.render(&mut sys);
         let title = row(&ui, BODY_TOP + 1);
         assert!(title.starts_with(" The stock") && title.ends_with("page 1"), "{title}");
         assert_eq!(row(&ui, BODY_TOP + 2), " Find:");
@@ -1304,6 +1312,7 @@ mod tests {
         ui.run(&mut sys, b"panel plain on items");
         ui.run(&mut sys, b"end");
         ui.run(&mut sys, b"plain");
+        ui.tick(&mut sys, 0);
         ui.render(&mut sys);
         assert_eq!((row(&ui, BODY_TOP + 1).split_whitespace().next(), row(&ui, BODY_TOP + 4).as_str()), (Some("plain"), " label  place  qty"));
         assert_eq!(listed(&mut ui, &mut sys), (vec![" (no rows)".to_string()], String::new()));

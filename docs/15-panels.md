@@ -140,6 +140,14 @@ or ...)` when something is looked for: the cursor walks the table by
 its `id` from `N`, so a page deep in a large table costs no more than
 the first. One row more than the page shows is asked for, which tells
 whether a page follows. The page is kept as text already laid out, with
-the `id` of each row: 4 KB a panel. `panel::refresh`, called at every
-tick of the interface, reads the page again when `System::stored_at`
-says something was stored since, a second apart at most.
+the `id` of each row: 4 KB a panel.
+
+A page is read at the tick of the interface, and nowhere else. A key or
+the command that opens a panel only says that the page is to be read;
+`panel::refresh`, called at every tick, reads it then, and reads it
+again when `System::stored_at` says something was stored since, a
+second apart at most. The cursor and the rows as values, 40 KB, are in
+memory the interface keeps for that (`Ui::page`), not on a stack. It
+was not so at first: read by the command that opened the panel, then by
+the key that used the line to find, the page stood on a stack that was
+deep already, and the system froze in QEMU both times.
