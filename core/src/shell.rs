@@ -1269,7 +1269,7 @@ const HELP_LANGUAGE: [&[u8]; 31] = [
     b"   every 5 minutes ... end    - Runs again and again: seconds, hours, days.",
     b"   every day at 8:00 ... end  - Runs once a day, by the clock of the machine.",
     b"   panel name on table ... end - Keeps a screen of an application, on a table:",
-    b"                                title 'Stock', list a, b, field a 'Label'.",
+    b"                                title, list, field, option, key (docs: Panels).",
     b"   panels                     - Lists the panels. show panel x, drop panel x.",
     b"   programs                   - Lists the programs.",
     b"   show name                  - Shows a program; show table t, a table.",

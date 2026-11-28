@@ -113,7 +113,8 @@ fn does(written: &[u8]) -> Option<Does<'_>> {
     let (word, rest) = word_of(written);
     match word.bytes() {
         b"run" => {
-            let (_, given) = lang::call_of(rest).filter(|(name, _)| xila_db::good_name(name))?;
+            // a program by its name: not a command, nor a word of the language
+            let (_, given) = lang::call_of(rest).filter(|(name, _)| lang::free_name(name))?;
             crate::code::arguments(given, &mut |_| Ok(())).ok()?;
             Some(Does::Run(rest))
         }
@@ -281,6 +282,10 @@ impl Panel {
                     }
                     panel.actions[panel.acts] = Action { trigger, label: FixedStr::from_bytes(label.bytes()), line: at };
                     panel.acts += 1;
+                    // each must be shown on the row of the options: one that is not is a key nobody knows of
+                    if panel.options().len() > COLS - 2 {
+                        return Err(fault(b"Its options and keys do not fit on their row: shorten labels, or have fewer."));
+                    }
                 }
                 _ => return Err(fault(b"A line of a panel starts with title, list, field, option or key.")),
             }
@@ -300,6 +305,19 @@ impl Panel {
             }
         }
         Ok(panel)
+    }
+
+    /// The row that says what is typed before a row and what its keys
+    /// do: the system's options, then the panel's own.
+    fn options(&self) -> FixedStr<128> {
+        let mut options = FixedStr::from_bytes(b"2=Change  4=Remove  5=Display");
+        for action in &self.actions[..self.acts] {
+            let _ = match action.trigger {
+                Trigger::Option(digit) => write!(options, "  {}={}", digit as char, action.label),
+                Trigger::Key(number) => write!(options, "  F{number}={}", action.label),
+            };
+        }
+        options
     }
 
     /// What a column is called on this panel: the label of its field, or
@@ -1074,6 +1092,8 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
                 Some(_) => say(open, b"Before a row: one of the digits of the line below."),
             },
             // a key of the panel's own: for the row the keys are on, if they are on one
+            // (one program at a time: a key pressed again, or held, is not a program run twice)
+            Key::F(number) if open.job.is_some() && open.panel.actions[..open.panel.acts].iter().any(|action| action.trigger == Trigger::Key(number)) => open.message = runs(open.job),
             Key::F(number) if open.panel.actions[..open.panel.acts].iter().any(|action| action.trigger == Trigger::Key(number)) => {
                 let action = open.panel.actions[..open.panel.acts].iter().position(|action| action.trigger == Trigger::Key(number)).unwrap_or(0);
                 open.todo = Todo::Act(action, open.row.filter(|row| *row < open.count).map_or(0, |row| open.ids[row]));
@@ -1096,6 +1116,7 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
                         Some(b'5') | None => open.todo = Todo::Row(id, false),
                         // an option of the panel's own
                         Some(digit) => match open.panel.actions[..open.panel.acts].iter().position(|action| action.trigger == Trigger::Option(digit)) {
+                            Some(_) if open.job.is_some() => open.message = runs(open.job),
                             Some(action) => open.todo = Todo::Act(action, id),
                             None => open.todo = Todo::Row(id, false),
                         },
@@ -1125,12 +1146,14 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
                 }
                 Key::Enter if shown => open.mode = Mode::List,
                 Key::Enter => open.todo = Todo::Save,
-                // nothing is typed in what is only shown
-                _ if shown || field.shown => {}
-                Key::F(4) if field.among => open.todo = Todo::Among(at),
-                Key::F(4) => say(open, b"This field has no list of values to pick from."),
+                _ if shown => {}
                 Key::Tab | Key::Down => open.mode = Mode::Form { shown, at: beside(&open.panel, at, true) },
                 Key::Up => open.mode = Mode::Form { shown, at: beside(&open.panel, at, false) },
+                // nothing is typed in what is only shown, nor in the column
+                // a row to add is given by the panel it is added in
+                _ if field.shown || (open.id.is_none() && open.only.is_some_and(|(column, _)| column == field.column)) => {}
+                Key::F(4) if field.among => open.todo = Todo::Among(at),
+                Key::F(4) => say(open, b"This field has no list of values to pick from."),
                 Key::Char(typed) if typed >= 0x20 && typed != 0x7f => input.insert(typed),
                 Key::Backspace if input.at > 0 => {
                     input.at -= 1;
@@ -1157,6 +1180,14 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
             _ => {}
         },
     }
+}
+
+/// What is said of a key of a panel while the program of the one before runs.
+fn runs(job: Option<u32>) -> FixedStr<COLS> {
+    let mut message = FixedStr::new();
+    let number = job.unwrap_or(0);
+    let _ = write!(message, "Job {number} still runs: wait for it, or type job {number} end at the prompt.");
+    message
 }
 
 /// What is asked before a row is removed, with the id of that row.
@@ -1466,13 +1497,22 @@ fn opened(sys: &mut System, place: usize, name: Name, column: Name, row: u64, ro
     }
     let (panel, _) = load(sys, name.bytes(), &mut room.lines)?.ok_or_else(|| unknown(name.bytes()))?;
     let schema = described_on(sys, panel.table.bytes())?;
-    let Some(column) = Panel::column(&schema, column.bytes()) else {
+    let Some(found) = schema.columns[..schema.count].iter().position(|known| known.bytes().eq_ignore_ascii_case(column.bytes())) else {
         return Err(sql::error(b"The panel ", name.bytes()).also(b" is on a table with no column ").also(column.bytes()).also(b"."));
     };
+    // the id of a row is a whole number, and no row is given its own id
+    if found == 0 || schema.kinds[found] != xila_db::Kind::Int {
+        return Err(sql::error(b"The column ", column.bytes()).also(b" of ").also(name.bytes()).also(b" holds no whole number: it cannot hold the id of a row."));
+    }
+    let column = schema.columns[found];
     // the one that is open under that name is opened on these rows; else a place that is free
     let known = sys.panels.open.iter().position(|open| open.as_ref().is_some_and(|open| open.panel.name == panel.name));
     if known == Some(place) {
         return Err(Message::from_bytes(b"A panel does not open itself."));
+    }
+    // opened on other rows, the one that is open is made new: not under what is being typed or done there
+    if known.and_then(|at| sys.panels.open[at].as_ref()).is_some_and(|open| open.mode != Mode::List || open.todo != Todo::Nothing || open.job.is_some()) {
+        return Err(sql::error(name.bytes(), b" is open on a form: finish it there, or leave it, first."));
     }
     let Some(at) = known.or_else(|| sys.panels.open.iter().position(|open| open.is_none())) else {
         return Err(Message::from_bytes(b"Four panels are open: leave one with [F3]."));
@@ -1524,9 +1564,19 @@ fn ran(sys: &mut System, place: usize, panel: &Panel, call: &[u8], row: u64, roo
     };
     core::mem::swap(&mut sys.vars[crate::events::SCREEN], &mut names);
     sys.session = session;
+    // with the keys on no row, a value that is a column of the rows has no name: said as what is missing
+    let named = |said: &[u8]| said.strip_prefix(b"Unknown name: ").map(Name::from_bytes);
+    let missing = match (row, named(heard.text.bytes()).or(started.as_ref().err().and_then(|message| named(message.bytes())))) {
+        (0, Some(name)) => sys.schema(panel.table.bytes()).is_some_and(|schema| schema.columns[..schema.count].contains(&name)),
+        _ => false,
+    };
     let Some(open) = sys.panels.open[place].as_mut() else {
         return Ok(());
     };
+    if missing {
+        (open.message, open.refused, open.stale) = (FixedStr::from_bytes(b"This key is for a row: go down to one first."), true, true);
+        return Ok(());
+    }
     match started {
         Ok(Some(number)) => {
             open.job = Some(number);
@@ -1580,26 +1630,44 @@ pub fn refresh(sys: &mut System, room: &mut Page) -> bool {
         let Some(number) = sys.panels.open[place].as_ref().and_then(|open| open.job) else {
             continue;
         };
+        // what the panel says meanwhile (a question, a form) is not written over: it waits for the list
+        if sys.panels.open[place].as_ref().is_some_and(|open| open.mode != Mode::List) {
+            continue;
+        }
         let ended = match crate::jobs::find(sys, number) {
             Ok(at) => {
                 let job = &sys.jobs.list()[at];
                 job.ended().then(|| {
+                    let failed = job.state != crate::jobs::State::Done;
                     let mut last = FixedStr::<COLS>::new();
-                    match job.said.lines().last() {
-                        Some(line) => last.push_bytes(&line[..line.len().min(COLS - 1)]),
-                        None => {
-                            let _ = write!(last, "{}", crate::jobs::about(number, crate::jobs::told(job.state)));
-                            last.push(b'.');
+                    // its last line; with the one before when it failed, which says why
+                    let (mut before, mut end): (&[u8], &[u8]) = (b"", b"");
+                    for line in job.said.lines() {
+                        (before, end) = (end, line);
+                    }
+                    for line in [before, end].iter().filter(|line| !line.is_empty()).skip(if failed { 0 } else { 1 }.min([before, end].iter().filter(|line| !line.is_empty()).count().saturating_sub(1))) {
+                        last.push_bytes(if last.is_empty() { b"" } else { b" " });
+                        // (the cells of a table it showed were kept apart by tabs)
+                        for byte in line.iter().take(COLS - 2 - last.len().min(COLS - 2)) {
+                            last.push(if *byte == b'\t' { b' ' } else { *byte });
                         }
                     }
-                    (last, job.state != crate::jobs::State::Done)
+                    if last.is_empty() {
+                        let _ = write!(last, "{}", crate::jobs::about(number, crate::jobs::told(job.state)));
+                        last.push(b'.');
+                    }
+                    (last, failed)
                 })
             }
-            // no longer listed: nothing is known of it
-            Err(_) => Some((FixedStr::new(), false)),
+            // no longer listed: eight others began since
+            Err(_) => {
+                let mut gone = FixedStr::<COLS>::new();
+                let _ = write!(gone, "Job {number} is no longer listed: job_log says how it went.");
+                Some((gone, false))
+            }
         };
         if let (Some((last, failed)), Some(open)) = (ended, sys.panels.open[place].as_mut()) {
-            (open.job, open.message, open.refused, open.stale) = (None, last, failed, open.mode == Mode::List);
+            (open.job, open.message, open.refused, open.stale) = (None, last, failed, true);
             asked = true;
         }
     }
@@ -1677,14 +1745,7 @@ pub fn draw(sys: &System, place: usize, grid: &mut Grid, top: usize) {
                 grid.text(1, last, b"Enter=Remove  F12=Keep", role::TERM_PROMPT, bg);
             } else {
                 // the system's options, then the panel's own, and its keys
-                let mut options = FixedStr::<{ COLS - 2 }>::from_bytes(b"2=Change  4=Remove  5=Display");
-                for action in &open.panel.actions[..open.panel.acts] {
-                    let _ = match action.trigger {
-                        Trigger::Option(digit) => write!(options, "  {}={}", digit as char, action.label),
-                        Trigger::Key(number) => write!(options, "  F{number}={}", action.label),
-                    };
-                }
-                grid.text(1, last - 1, options.bytes(), role::TERM_PROMPT, bg);
+                grid.text(1, last - 1, open.panel.options().bytes(), role::TERM_PROMPT, bg);
                 grid.text(1, last, b"F3=Exit  F5=Refresh  F6=Add  PgUp/PgDn=Pages  Enter=Go  Esc=Overview", role::TERM_PROMPT, bg);
             }
         }
@@ -1706,7 +1767,8 @@ pub fn draw(sys: &System, place: usize, grid: &mut Grid, top: usize) {
                 }
                 let end = grid.text(1, row, &field.label.bytes()[..field.label.len().min(26)], role::TERM_OUT, bg);
                 grid.fill(row, end + 1, 1 + width, Cell::new(b'.', role::TERM_OUT, bg));
-                let typed = !shown && !field.shown;
+                let given = open.id.is_none() && open.only.is_some_and(|(column, _)| column == field.column);
+                let typed = !shown && !field.shown && !given;
                 let from = grid.text(1 + width, row, b" : ", role::TERM_OUT, bg);
                 grid.text(from, row, input.text.bytes(), if typed { role::TERM_CMD } else { role::TERM_OUT }, bg);
                 if typed && index == at {
@@ -1891,6 +1953,16 @@ pub(crate) mod tests {
         for (line, message) in faults {
             assert_eq!(said(&mut sys, &["panel wrong on items", line, "end"]), [message, not_kept], "{line}");
         }
+        // a command or a word of the language is no program a panel runs
+        for line in ["key f8 'Boom' run reboot", "option 8 'Say' run say", "option 8 'Tables' run tables"] {
+            assert_eq!(said(&mut sys, &["panel wrong on items", line, "end"])[0], "What it does: open moves where article = id, or run count(id)", "{line}");
+        }
+        // what would not be shown on its row is not kept: a key nobody sees is not one to press
+        let wide: Vec<String> = [1, 3, 6, 7].iter().map(|digit| format!("option {digit} 'Twelve chars' run x")).collect();
+        let mut typed = vec!["panel wrong on items"];
+        typed.extend(wide.iter().map(|line| line.as_str()));
+        typed.push("end");
+        assert_eq!(said(&mut sys, &typed), ["Its options and keys do not fit on their row: shorten labels, or have fewer.", "Line 4 is not right: the panel is not kept."]);
         assert_eq!(said(&mut sys, &["panel wrong on items", "option 8 'A' run x", "option 8 'B' run y", "end"])[0], "This digit has an option already.");
         assert_eq!(said(&mut sys, &["panel wrong on items", "key f8 'A' run x", "key F8 'B' run y", "end"])[0], "This key is taken already.");
         let mut many = vec!["panel wrong on items".to_string()];

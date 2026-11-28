@@ -1873,12 +1873,14 @@ mod tests {
             "title 'Moves'",
             "end",
             "panel articles on articles",
-            "option 8 'Moves' open moves where article = id",
-            "option 9 'Nowhere' open nothing where article = id",
-            "option 7 'Wrong' open moves where colour = id",
-            "option 6 'Itself' open articles where qty = id",
+            "option 8 'Mov' open moves where article = id",
+            "option 9 'N' open nothing where article = id",
+            "option 7 'B' open moves where colour = id",
+            "option 6 'S' open articles where qty = id",
+            "option 3 'T' open moves where why = id",
+            "option 1 'R' run recount(id, qty)",
             "key f8 'Count' run recount(id, qty)",
-            "key f9 'Break' run broken(id)",
+            "key f9 'Br' run broken(id)",
             "end",
             "let id = 'the prompt''s'",
             "articles",
@@ -1893,7 +1895,7 @@ mod tests {
     fn an_option_opens_another_panel_on_the_rows_of_a_row() {
         let (mut ui, mut sys) = with_stock();
         ui.render(&mut sys);
-        assert_eq!(row(&ui, ui.grid.rows - 2), " 2=Change  4=Remove  5=Display  8=Moves  9=Nowhere  7=Wrong  6=Itself  F8=Count");
+        assert_eq!(row(&ui, ui.grid.rows - 2), " 2=Change  4=Remove  5=Display  8=Mov  9=N  7=B  6=S  3=T  1=R  F8=Count  F9=Br");
         // it is for a row: typed before one, as the system's own
         type_text(&mut ui, &mut sys, "8");
         assert_eq!(listed(&mut ui, &mut sys).0.len(), 2, "on the line to find it is a character to look for");
@@ -1940,11 +1942,29 @@ mod tests {
         assert_eq!(crate::panel::place_of(&sys, 5), None);
         // what cannot be opened says why, on the panel that asked
         ui.key(&mut sys, alt_digit(3));
-        for (digit, message) in [("9", "Unknown panel: nothing. Type panels to list them."), ("7", "The panel moves is on a table with no column colour."), ("6", "A panel does not open itself.")] {
+        let refused = [
+            ("9", "Unknown panel: nothing. Type panels to list them."),
+            ("7", "The panel moves is on a table with no column colour."),
+            ("6", "A panel does not open itself."),
+            ("3", "The column why of moves holds no whole number: it cannot hold the id of a row."),
+        ];
+        for (digit, message) in refused {
             type_text(&mut ui, &mut sys, digit);
             keys(&mut ui, &mut sys, &[Key::Enter]);
             assert_eq!((sys.screen, listed(&mut ui, &mut sys).1.as_str()), (3, message));
         }
+        // the panel that is open is not opened on other rows while a form is typed there: nothing typed is lost unsaid
+        ui.key(&mut sys, alt_digit(4));
+        keys(&mut ui, &mut sys, &[Key::F(6), Key::Tab]);
+        type_text(&mut ui, &mut sys, "77");
+        ui.key(&mut sys, alt_digit(3));
+        keys(&mut ui, &mut sys, &[Key::Up]);
+        type_text(&mut ui, &mut sys, "8");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!((sys.screen, listed(&mut ui, &mut sys).1.as_str()), (3, "moves is open on a form: finish it there, or leave it, first."));
+        ui.key(&mut sys, alt_digit(4));
+        // (the column it is opened on is shown there and not typed)
+        assert_eq!(form(&mut ui, &mut sys).0, ["article: 2", "qty: 77", "why:"]);
     }
 
     #[test]
@@ -1955,9 +1975,9 @@ mod tests {
         assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["cable 4".to_string(), "screw 200".into()], "recounted 2".to_string()));
         // the names of the prompt of the screen are its own again
         assert_eq!(typed(&mut ui, &mut sys, "say id"), ["the prompt's"]);
-        // with no row the keys are on, the columns of a row are no names
+        // with no row the keys are on, the columns of a row are no names: the panel says what is missing
         keys(&mut ui, &mut sys, &[Key::Up, Key::Up, Key::F(8)]);
-        assert_eq!(listed(&mut ui, &mut sys).1, "Unknown name: id");
+        assert_eq!(listed(&mut ui, &mut sys).1, "This key is for a row: go down to one first.");
         // a program that fails says where
         keys(&mut ui, &mut sys, &[Key::Down, Key::F(9)]);
         assert_eq!(listed(&mut ui, &mut sys).1, "Stopped at line 1 of broken.");
@@ -1978,13 +1998,34 @@ mod tests {
         ui.tick(&mut sys, 1);
         assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["screw 400".to_string()], "recounted 2".to_string()));
         assert_eq!(typed(&mut ui, &mut sys, "say id"), ["the prompt's"]);
-        // one that fails is said in its last words too
+        // one that fails is said in its last words too, with why
         keys(&mut ui, &mut sys, &[Key::F(9)]);
         for _ in 0..50 {
             crate::jobs::work(&mut sys, &mut shell::tests::Lines::default(), &mut || true);
         }
         ui.tick(&mut sys, 1);
-        assert_eq!(listed(&mut ui, &mut sys).1, "Stopped at line 1 of broken.");
+        assert_eq!(listed(&mut ui, &mut sys).1, "Division by zero. Stopped at line 1 of broken.");
+        // an option runs one as a key does: typed before the row, then Enter
+        type_text(&mut ui, &mut sys, "1");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Job 3 runs: its last line will be said here.");
+        // while it runs, the panel starts no other: a key pressed again, or held, is not a program run twice
+        keys(&mut ui, &mut sys, &[Key::F(8), Key::F(9)]);
+        type_text(&mut ui, &mut sys, "1");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Job 3 still runs: wait for it, or type job 3 end at the prompt.");
+        assert_eq!(sys.jobs.list().iter().filter(|job| job.number != 0).count(), 3);
+        // it ends while something is asked on the panel: its line waits for the list to be back
+        type_text(&mut ui, &mut sys, "4");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        for _ in 0..50 {
+            crate::jobs::work(&mut sys, &mut shell::tests::Lines::default(), &mut || true);
+        }
+        ui.tick(&mut sys, 1);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Remove row 2? [Enter] removes it, [F12] keeps it.");
+        keys(&mut ui, &mut sys, &[Key::F(12)]);
+        ui.tick(&mut sys, 1);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["screw 800".to_string()], "recounted 2".to_string()));
     }
 
     #[test]

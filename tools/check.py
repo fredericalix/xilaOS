@@ -840,12 +840,42 @@ with Xila(disk=disk) as x:
     x.key("f8")
     time.sleep(1.5)
     said, doubled = body(x)[-3].strip(), x.table("select qty from shelf where id = 1")
-    ran = [row for row in x.table("select program, by, state from jobs") if row["program"].startswith("double")]
+    ran = [row for row in x.table("select program, by, state from jobs") if row["program"].startswith("double(")]
     check("a key of a panel runs a program with the values of the row, as a job, and says its last line",
           said == "doubled 1" and doubled == [{"qty": "1"}] and ran == [{"program": "double(1, 0)", "by": "screen", "state": "done"}], (said, doubled, ran))
+    # while its job runs, a panel starts no other: a key that is held is one run
+    for line in ("program long(which)", "let n = 0", "while n < 3000000", "let n = n + 1", "end", "end",
+                 "panel busy on shelf", "key f8 'Long' run long(id)", "end"):
+        x.cmd(line)
     x.key("f3")
-    for name in ("notes", "linked"):
+    x.type("busy")
+    x.key("ret")
+    x.key("f8")
+    time.sleep(0.5)
+    check("a key of a panel that needs the values of a row says so when the keys are on none", body(x)[-3].strip() == "This key is for a row: go down to one first.", body(x)[-3])
+    x.key("down")
+    x.key("f8")
+    time.sleep(0.5)
+    x.key("f8")
+    time.sleep(0.5)
+    again = body(x)[-3].strip()
+    runs = [row for row in x.table("select job, program, state from jobs") if row["program"].startswith("long(")]
+    check("a panel whose program still runs does not start it again",
+          len(runs) == 1 and runs[0]["state"] != "done" and again == "Job %s still runs: wait for it, or type job %s end at the prompt." % (runs[0]["job"], runs[0]["job"]), (again, runs))
+    for row in runs:
+        x.cmd("job %s end" % row["job"])
+    time.sleep(0.5)
+    x.key("f3")
+    # options that would not all be shown: the panel is not kept
+    for line in ("panel wide on shelf", "option 1 'Abcdefghijkl' run double(id, qty)", "option 3 'Abcdefghijkl' run double(id, qty)",
+                 "option 6 'Abcdefghijkl' run double(id, qty)", "option 7 'Abcdefghijkl' run double(id, qty)"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("a panel whose options would not all be shown is not kept",
+          not ok and lines[:1] == ["Its options and keys do not fit on their row: shorten labels, or have fewer."] and "wide" not in [row["name"] for row in x.table("panels")], lines)
+    for name in ("notes", "linked", "busy"):
         x.cmd("drop panel " + name)
+    x.cmd("drop program long")
     x.cmd("drop program double")
     x.cmd("drop table notes_of")
     x.cmd("drop table job_log")

@@ -63,8 +63,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 28 November 2026: about 44,000 lines, 428
-unit tests, 580 system checks.
+about 300 system checks. On 28 November 2026: about 45,000 lines, 431
+unit tests, 586 system checks.
 
 ## Known limits of what is done
 
@@ -828,8 +828,8 @@ end
   panel on the rows that belong to this one, where a row that is
   added gets that value; **`option N 'label' run PROGRAM(values)`**
   and **`key fN 'label' run PROGRAM(values)`** run a program as a job
-  the panel waits for, with values of the row; the last line it says
-  is the message.
+  nobody waits for, with values of the row; the last line it says
+  is the message of the panel when it has ended.
 - **Limits said beforehand**: seven fields (a table has eight
   columns), 48 characters a text, no sorting, four panels open.
 
@@ -855,6 +855,10 @@ In four steps, each merged when its unit tests and its checks pass:
    of a row than the row holds.
 3. Done on 28 November 2026: panels opened from a row, and programs
    on a key or an option, run as jobs for who sits at the machine.
+   What its review showed: a key that is held started its program at
+   every repeat (a panel now runs one at a time), and options that
+   did not fit their row acted without being shown (such a panel is
+   no longer kept).
 4. The stock: its text in the repository, the tool that sends it, its
    chapter of the documentation.
 

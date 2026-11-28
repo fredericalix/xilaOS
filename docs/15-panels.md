@@ -93,7 +93,10 @@ closes it. The table is a stored one, and must be there.
 - **Options and keys of its own**, eight in all: the digits 1, 3, 6, 7,
   8 and 9 (2, 4 and 5 are the system's), the keys F1, F2 and F7 to F11.
   Their labels, 12 characters at most, are shown with the system's on
-  the row before last.
+  the row before last, and all of them must fit there: a panel whose
+  options would not all be shown is not kept, so that no key does
+  something the screen does not say. A program it runs is named as a
+  program is: not as a command.
 - **A panel is read again each time it opens**, on its table as it is
   then. If a listed column is gone, or the table, it says so and does
   not open.
@@ -187,11 +190,15 @@ opened on beside its title:
 - **Only the rows of that row are listed**, and the line to find
   narrows them further.
 - **A row that is added there belongs to that row**: its column takes
-  that value, whatever the form holds in its place.
+  that value, which the form shows and does not let type.
+- **The column is one of whole numbers**, since it holds the `id` of a
+  row: anything else is refused on the panel that asked.
 - **`F3` goes back to the panel it was opened from**, if that one is
   still open.
 - **Opened again from another row**, the panel that is open under that
-  name is opened on those rows: there is one of each name.
+  name is opened on those rows: there is one of each name. Not while a
+  form is typed there, or a program of it runs: `moves is open on a
+  form: finish it there, or leave it, first.`
 - What cannot be opened says why on the panel that asked: a panel that
   is not kept, a table with no such column, four panels open.
 
@@ -201,11 +208,17 @@ when `9` is typed before a row and `Enter` pressed.
 
 - **The values are worked out with the columns of the row as names**:
   `id`, and each column of the table. A key pressed with the keys on no
-  row has no such names: `Unknown name: id`.
+  row has no such names: `This key is for a row: go down to one first.`
+  A program that takes no value of a row runs from anywhere.
 - **It runs as a job nobody waits for**, started by the screen: the
   message says `Job 7 runs: its last line will be said here.`, the keys
-  stay free, and when it has ended its last line is the message, in red
-  if it failed, and the list is read again. `jobs` and `job 7` show it,
+  stay free, and when it has ended its last line is the message, and
+  the list is read again. If it failed, the message is red and says
+  why and where: `Division by zero. Stopped at line 1 of recount.`
+- **One at a time**: while it runs, a key or an option of the panel
+  that runs a program answers `Job 7 still runs: wait for it, or type
+  job 7 end at the prompt.` A key that is held is not a program run
+  several times. `jobs` and `job 7` show it,
   and it is written in `job_log`, as any such job.
 - **A program gives nothing back**: what it has to say to the panel is
   its last `say`.
