@@ -692,9 +692,18 @@ impl Ui {
                 let mut running = FixedStr::<COLS>::new();
                 if let Some(job) = crate::jobs::watched(sys, crate::jobs::Watch::Screen).map(|at| &sys.jobs.list()[at]).filter(|job| !job.ended()) {
                     const HOW: &[u8] = b". [Esc] stops it, [Alt]+[B] sends it to the background.";
-                    let name = job.program.bytes();
+                    let (name, room) = (job.program.bytes(), COLS - 1 - 8 - HOW.len());
                     running.push_bytes(b"Running ");
-                    running.push_bytes(&name[..name.len().min(COLS - 1 - 8 - HOW.len())]);
+                    // a call too long for the row is shown by its name, its values left out
+                    let bare = name.split(|byte| *byte == b'(').next().unwrap_or(name);
+                    if name.len() <= room {
+                        running.push_bytes(name);
+                    } else if bare.len() < name.len() && bare.len() + 5 <= room {
+                        running.push_bytes(bare);
+                        running.push_bytes(b"(...)");
+                    } else {
+                        running.push_bytes(&name[..room]);
+                    }
                     running.push_bytes(HOW);
                 }
                 let (mark, editor): (&[u8], &LineEditor) = match sys.screen {
@@ -1324,6 +1333,18 @@ mod tests {
         type_text(&mut ui, &mut sys, "say n");
         ui.key(&mut sys, key(Key::Enter));
         assert_eq!(rows(&mut ui, &mut sys).iter().rev().nth(1).unwrap().trim(), "400");
+    }
+
+    #[test]
+    fn a_call_too_long_for_the_edit_row_is_shown_by_its_name() {
+        let (mut ui, mut sys) = with_jobs();
+        type_text(&mut ui, &mut sys, "count(1000000000000)");
+        ui.key(&mut sys, key(Key::Enter));
+        let shown = rows(&mut ui, &mut sys);
+        assert_eq!(shown.last().unwrap().trim_end(), "Running count(...). [Esc] stops it, [Alt]+[B] sends it to the background.");
+        ui.key(&mut sys, key(Key::Esc));
+        ui.work(&mut sys, &mut || true);
+        assert!(rows(&mut ui, &mut sys).last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
     }
 
     #[test]

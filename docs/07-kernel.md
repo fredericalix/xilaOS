@@ -351,7 +351,7 @@ keeps its lines and its rows in the room of the virtual machine
 | `spin` | Started by the `spin` command: a loop that never rests, there to show that the others keep running. `stop N` ends it. |
 
 A job is not a task: the eight jobs people may run and the one of the
-system are nine virtual machines, 270 KB each, that the kernel makes in
+system are nine virtual machines, 278 KB each, that the kernel makes in
 its memory at start from one kept in its file (`rooms` in `main.rs`),
 and the `jobs` task gives them the processor in turn. The job a prompt
 waits for is given its turns by the task of that prompt: the interface

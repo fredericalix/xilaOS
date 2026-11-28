@@ -116,9 +116,9 @@ storage engine allocates.
 | Module | Lines | What it is |
 |---|---|---|
 | `shell.rs` | 3,167 | `System`, `exec`, every command, `Table`, the help texts. |
-| `lang.rs` | 1,499 | XilaScript: blocks, the table of programs, `on` and `every`. |
+| `lang.rs` | 1,499 | XilaScript: blocks, the table of programs and the values each takes, `on` and `every`. |
 | `code.rs` | 431 | XilaScript compiled: the instructions, the compiler, the faults of form. |
-| `machine.rs` | 921 | The virtual machine that runs them: units, programs three deep, loops over rows; turns, and the rooms it runs in. |
+| `machine.rs` | 921 | The virtual machine that runs them: units, programs three deep with names of their own, loops over rows; turns, and the rooms it runs in. |
 | `jobs.rs` | 897 | Jobs: programs that run turn by turn as who started them, what they said, `job_log`. |
 | `tcp.rs` | 1,305 | TCP as a state machine with no hardware. |
 | `net.rs` | 1,015 | Ethernet, ARP, IPv4, ICMP, UDP, the DHCP client. |
@@ -188,10 +188,13 @@ statements that write: one statement is one transaction. See
 **The language.** Every line goes to `lang` first. A line that opens a
 block is collected until its `end`. Lines are then compiled (`code.rs`)
 and run by the virtual machine (`machine.rs`, whose room is `System::vm`):
-`let`, `say`, the blocks, `run` and `return` are instructions of their
-own; everything else is the instruction `command`, which goes to
-`shell::command`, so every command is a statement. Programs are rows of
-the stored table `programs`. A program runs as a job (`jobs.rs`): the
+`let`, `say`, the blocks, a call (`run name`, `name(values)`) and
+`return` are instructions of their own; everything else is the
+instruction `command`, which goes to `shell::command`, so every command
+is a statement. Programs are rows of the stored table `programs`. A
+program takes values and has names of its own: the names in use
+(`System::names`) are its own while it runs, and those of who called it
+wait in the room of the machine. A program runs as a job (`jobs.rs`): the
 machine gives it turns in a room of its own, so that it holds nothing.
 See [XilaScript](05-xilascript.md).
 

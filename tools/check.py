@@ -595,6 +595,86 @@ with Xila(disk=disk) as x:
         x.cmd("drop program " + name)
     x.cmd("drop table shared")
     x.cmd("drop table job_log")
+    # a program takes values, and has names of its own
+    x.cmd("create table stocked (label text, qty int)")
+    x.cmd("insert into stocked values ('cable', 1), ('screw', 10)")
+    for line in ("program restock(item, count)", "update stocked set qty = qty + count where label = item", "let now_there = select qty from stocked where label = item", "say item + ' ' + now_there"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("a program is kept with the values it takes", ok and lines == ["Program restock kept: 3 lines."], lines)
+    ok, lines = x.cmd("show restock")
+    listed = [row["name"] for row in x.table("programs")]
+    check("show and programs give them back", ok and lines[0] == "program restock(item, count)" and "restock(item, count)" in listed, (lines, listed))
+    x.cmd("let n = 4")
+    ok, lines = x.cmd("restock('cable', n + 1)")
+    check("a call gives it values worked out with the names of the prompt", ok and lines == ["cable 6"], lines)
+    ok, lines = x.cmd("run restock('cable', 0)")
+    check("run does the same", ok and lines == ["cable 6"], lines)
+    inside = [x.cmd("say now_there"), x.cmd("say item"), x.cmd("say n")]
+    check("its names are gone when it ends, and the prompt has its own",
+          inside == [(False, ["Unknown name: now_there"]), (False, ["Unknown name: item"]), (True, ["4"])], inside)
+    for line in ("program peeks", "say n", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("peeks")
+    check("a program does not see the names of the prompt", not ok and lines == ["Unknown name: n", "Stopped at line 1 of peeks."], lines)
+    few = [x.cmd("restock('cable')"), x.cmd("run restock"), x.cmd("restock('cable', 1, 2)")]
+    check("a call that gives too few values or too many is refused", all(answer == (False, ["restock takes 2 values: item, count."]) for answer in few), few)
+    still = x.table("select qty from stocked where label = 'cable'")
+    check("and nothing of the program ran", still == [{"qty": "6"}], still)
+    for line in ("program wrong", "say 'one'", "restock('cable', )"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("a call that is written wrong is told when the program is kept",
+          not ok and lines == ["A value is missing between the parentheses.", "Line 2 is not right: the program is not kept."], lines)
+    ok, lines = x.cmd("submit restock('screw', n * 10)")
+    began = re.fullmatch(r"Job (\d+) submitted: restock\('screw', 40\)\.", lines[0]) if lines else None
+    check("submit gives a job its values, and says them", ok and began, lines)
+    x.cmd("let n = 0")
+    number = began.group(1) if began else "0"
+    for _ in range(50):
+        shown = x.cmd("job " + number)[1]
+        if shown and " is done" in shown[0]:
+            break
+        time.sleep(0.1)
+    logged = x.table("select program, went from job_log where job = " + number)
+    check("the job ran with the values it left with, and is recorded with them",
+          shown[0] == "Job %s is done: restock('screw', 40)" % number and shown[-1] == "screw 50" and logged == [{"program": "restock('screw', 40)", "went": "done"}], (shown, logged))
+    # a program that runs by itself gives what it knows to the one it calls
+    x.cmd("create table arrivals (label text, qty int)")
+    for line in ("on insert into arrivals", "restock(new.label, new.qty)", "end"):
+        x.cmd(line)
+    x.cmd("insert into arrivals values ('cable', 3)")
+    for _ in range(30):
+        there = x.table("select qty from stocked where label = 'cable'")
+        if there == [{"qty": "9"}]:
+            break
+        time.sleep(0.1)
+    check("a program that hears of a row gives its values to another", there == [{"qty": "9"}], there)
+    # stopped two programs deep, the prompt has its names
+    for line in ("program spins(to)", "let n = 0", "while n < to", "let n = n + 1", "end", "end", "program outer(to)", "let n = 'outer'", "spins(to)", "end"):
+        x.cmd(line)
+    x.cmd("let n = 4")
+    x.begin("outer(100000000)")
+    time.sleep(0.5)
+    ok, lines = x.stop()
+    after = x.cmd("say n")
+    check("Ctrl+C in a program called by a program leaves the prompt its names",
+          not ok and len(lines) == 1 and re.fullmatch(r"Stopped at line \d of spins\.", lines[0]) and after == (True, ["4"]), (lines, after))
+    # at the screen: the row says what runs with its values, Esc stops it, and the names there are the screen's
+    x.type("spins(100000000)")
+    x.key("ret")
+    time.sleep(0.3)
+    running = body(x)[-1].strip()
+    x.key("esc")
+    time.sleep(0.3)
+    x.type("say 'floor is ' + floor")
+    x.key("ret")
+    check("the screen says what runs with its values, and has its names after Esc",
+          running.startswith("Running spins(100000000). [Esc] stops it") and body(x)[-2].strip().startswith("floor is "), (running, body(x)[-3:]))
+    for name in ("peeks", "spins", "outer", "on_insert_arrivals"):
+        x.cmd("drop program " + name)
+    for table in ("stocked", "arrivals", "job_log"):
+        x.cmd("drop table " + table)
     # what is wrong with the form of a program is told when it is kept
     for line in ("program bad", "say 'one'", "say 2 +"):
         x.cmd(line)
@@ -654,7 +734,7 @@ with Xila(disk=disk) as x:
           ok and lines == ["alive"] and not any("Read this code" in row for row in seen) and any("qr is typed at a prompt" in row for row in logged), (lines, logged))
     x.cmd("drop program on_notify_typed")
     ok, lines = x.cmd("help l")
-    check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 26, lines[:2])
+    check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 28, lines[:2])
     x.cmd("drop program broken")
 
     # programs that run by themselves
@@ -735,6 +815,9 @@ with Xila(disk=disk) as x:
     check("and the table is as it was", x.table("select * from kept") == kept, x.table("select * from kept"))
     ok, lines = x.cmd("show report")
     check("and the program is still there", ok and len(lines) == 10 and lines[0] == "program report", lines)
+    shown, called = x.cmd("show restock")[1], x.cmd("restock('cable')")
+    check("and so is one that takes values, with their names",
+          shown[:1] == ["program restock(item, count)"] and called == (False, ["restock takes 2 values: item, count."]), (shown, called))
     x.cmd("notify ping")
     time.sleep(0.3)
     ok, lines = x.cmd("mood")

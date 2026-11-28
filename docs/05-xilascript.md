@@ -46,6 +46,12 @@ end
 
 report
 
+program spend(what, cost)
+    insert into expenses values (today, what, cost)
+end
+
+spend('coffee', 3.5)
+
 on insert into expenses
     if new.amount > 50
         notify alerts, 'big expense: ' + new.label
@@ -103,8 +109,9 @@ end
 | `while condition` ... `end` | Runs the lines again and again while the condition holds. |
 | `for row in select ...` ... `end` | Runs the lines for each row of the result; `row.column` gives its values. Any name can stand in place of `row`. |
 | `program name` ... `end` | Keeps the lines under a name, in the database. |
-| `run name`, or `name` alone | Runs a program. At the screen and at the serial port the prompt waits for it while the rest of the system lives ([jobs](#jobs)). |
-| `submit name` | Runs a program as a job nobody waits for: the prompt answers at once. |
+| `program name(item, count)` ... `end` | The same, for a program that takes values: `item` and `count` are the names it finds them under ([values](#the-values-a-program-takes)). |
+| `name`, `name('cable', 5)`, or the same after `run` | Runs a program, with the values it takes if it takes some. At the screen and at the serial port the prompt waits for it while the rest of the system lives ([jobs](#jobs)). |
+| `submit name`, `submit name('cable', 5)` | Runs a program as a job nobody waits for: the prompt answers at once. |
 | `jobs` | Lists the jobs: those that run, and those that ended and are still listed. |
 | `job 3` | Shows a job, and the last lines it said. `job 3 end` stops it, `job 3 hold` keeps it from running, `job 3 release` lets it go on. |
 | `return` | Leaves the program that is running. |
@@ -156,11 +163,13 @@ A name is a letter, then letters, digits or `_`, 24 characters at most. It
 cannot be a word of the language or a command: `let mood = 3` is refused,
 since `mood` is a command.
 
-Names belong to the *session*: the screen, the serial port and the prompt
-for the network each have their own, 32 at most. They are kept in memory
-only: a restart forgets them. The columns of the row of a `for` are names like the others
-(`row.label`, `row.amount`): they count among the 32, and keep the values of
-the last row after the loop.
+Names made at a prompt belong to its *session*: the screen, the serial
+port and the prompt for the network each have their own, 32 at most. They
+are kept in memory only: a restart forgets them. A program has its own,
+which no prompt and no other program sees
+([below](#the-values-a-program-takes)). The columns of the row of a `for`
+are names like the others (`row.label`, `row.amount`): they count among
+the 32, and keep the values of the last row after the loop.
 
 Two names exist everywhere, in a calculation as in a query, as long as no
 name of yours hides them:
@@ -212,9 +221,8 @@ coffee 3.50
 
 - **Typing a program again replaces it.** There is no editor: `show name`
   gives the lines back, to be typed again with the change.
-- **A program has no parameters and no names of its own.** It sees and
-  changes the names of the session that runs it. Its name is typed alone:
-  `report now` is an unknown command.
+- **A program may take values**, and sees its own names only: see
+  [the values a program takes](#the-values-a-program-takes).
 - **Programs run programs**, three deep at most.
 - **A program is made at the prompt**: `program`, `on` and `every` inside a
   block or a program are refused.
@@ -239,6 +247,53 @@ Stopped at line 2 of broken.
 characters a text takes in a result; the lines themselves are kept whole.
 The system refuses to keep programs in a table named `programs` that was
 made by hand with other columns.
+
+### The values a program takes
+
+```
+XilaOS|all:/>program restock(item, count)
+..>update stock set qty = qty + count where label = item
+..>say item + ': ' + count + ' more'
+..>end
+Program restock kept: 2 lines.
+XilaOS|all:/>let n = 4
+XilaOS|all:/>restock('cable', n + 1)
+cable: 5 more
+```
+
+- **Their names come between parentheses** after the name of the program,
+  eight at most. A program that takes none is written and typed as before:
+  `program report`, then `report`; `report()` says the same.
+- **A call gives a value for each**, in their order, with commas between
+  them: `restock('cable', 5)`, `run restock('cable', 5)`,
+  `submit restock('cable', 5)`. Too few or too many, and nothing of the
+  program runs: `restock takes 2 values: item, count.` There is no value
+  by default.
+- **A value given is a calculation**, worked out when the call is made,
+  with the names of who calls: `restock(row.label, row.missing + 1)`. A
+  `select` is kept with `let` first, as in any calculation. A call that is
+  written wrong (`restock('cable', )`) is a fault of form: the block or
+  the program that holds it is refused before anything runs.
+- **A program sees its own names only**: the values it was given, and what
+  it makes with `let` and `for`. It neither reads nor changes the names of
+  the prompt, nor those of the program that called it, and its own are
+  gone when it ends. `let floor = 10` at the prompt, then a program that
+  says `floor`, stops with `Unknown name: floor`: it is given `floor` as a
+  value, or reads it from a table. So a program does the same whoever
+  starts it: a prompt, `submit`, another program, the system.
+- **It gives nothing back.** What a program makes goes into a table, or is
+  said; `return` takes no value.
+- **In a statement of SQL a column still wins over a name**
+  ([above](#names-in-sql)): in `where label = item`, `item` is the value
+  given only if the table has no column `item`. A parameter is best named
+  unlike the columns it is compared with.
+- **The lines of a block typed at a prompt** (`if`, `while`, `for` outside
+  a program) are not a program: they use the names of that prompt.
+- `programs` lists a program with the names of its values,
+  `restock(item, count)`, and `show restock` gives its first line back
+  whole. They are kept as line 0 of the program in the table `programs`.
+- A program kept before 28 November 2026 that read a name of the prompt
+  now stops with `Unknown name`: it is typed again with a parameter.
 
 ## Programs that run by themselves
 
@@ -274,6 +329,10 @@ of the program:
 | `id` | The `id` of the row that was added, changed or removed. |
 | `new.column` | The values of the row, for `on insert` and `on update`. |
 | `text` | The text that was sent, for `on notify`. |
+
+Those names are the program's own, as the values of a call are: a program
+it runs does not see them, and is given what it needs
+(`audit(new.label, id)`).
 
 `on insert`, `on update` and `on delete` take a stored table that exists. A
 system view is refused: it does not say when it changes. What happens to
@@ -349,7 +408,8 @@ model that can change the tables ([what holds it](14-the-companion.md#what-holds
 |---|---|
 | A line | 240 characters; the edit line of the screen takes 160 |
 | A block typed at the prompt | 48 lines, its first line and its last `end` included |
-| Names with a value, per session | 32 |
+| Names with a value | 32 for each prompt, and 32 for each program that runs, the values it takes among them |
+| Values a program takes | 8 |
 | A name | 24 characters; with its `row.` in front, 32 |
 | A text | 48 characters, as in the tables |
 | Rows a `for` goes through | Any number, for a `select` of one stored table that neither sorts, groups nor limits; 32 for any other (a join, a view, `order by`, `group by`, a function over the rows): with more, it refuses to start rather than forget some |
@@ -367,7 +427,8 @@ What is not there:
 
 - `insert into t select ...`: a value that was read is kept with `let`
   first, as in the `every 1 hour` example above.
-- Parameters, and names that belong to one program.
+- A value given back by a program; a value by default for a parameter; a
+  `select` as a value given to a program.
 - A `select` inside a calculation; texts longer than 48 characters.
 - The values from before the change in `on update` and `on delete`.
 - Other rhythms by the clock (`every monday at 9:00`).
@@ -393,9 +454,9 @@ there, become a job that prompt waits for. What it says is shown as it
 runs. At the screen the edit row says so, and how to have the prompt back:
 
 ```
-XilaOS|all:/>inventory
+XilaOS|all:/>inventory('north')
 Counting shelves...
-Running inventory. [Esc] stops it, [Alt]+[B] sends it to the background.
+Running inventory('north'). [Esc] stops it, [Alt]+[B] sends it to the background.
 ```
 
 A line that a command of the program types (`qr about`) runs at once,
@@ -414,26 +475,27 @@ so `jobs` and `job 3 end` can always be typed.
 **`submit name` runs a program that nobody waits for.**
 
 ```
-XilaOS|all:/>submit inventory
-Job 7 submitted: inventory.
+XilaOS|all:/>submit inventory('north')
+Job 7 submitted: inventory('north').
 XilaOS|all:/>jobs
-     job  program    state    by      since     statements
- [1] 7    inventory  running  screen  14:02:10  4310
+     job  program             state    by      since     statements
+ [1] 7    inventory('north')  running  screen  14:02:10  4310
 XilaOS|all:/>1
-Job 7 is running: inventory
+Job 7 is running: inventory('north')
 Started at the screen at 14:02:10. 4310 statements run.
 Counting shelves...
 ```
 
 - **What it says is kept with it**, its last lines (two thousand
   characters), for as long as it is listed. `job 7` shows them.
-- **It has names of its own.** A job nobody waits for does not see the
-  names of the prompt that started it, and its own are gone when it ends.
-  A program that counts on a name made at the prompt (`let floor = 3`,
-  then `submit report`) stops with `Unknown name: floor`. Programs have no
-  parameters yet: what a submitted program needs, it reads from a table.
-  A job the prompt waits for sees and changes the names of that prompt,
-  as a program always did; sent to the background, it leaves with a copy.
+- **It leaves with its values.** What `submit restock('cable', n + 1)`
+  gives is worked out when it is typed, with the names of that prompt,
+  and the job is listed with it: `restock('cable', 5)`, cut when it is
+  longer than 48 characters. Changing `n` afterwards changes nothing of
+  the job, and the job changes no name of the prompt: a program has its
+  own, here as anywhere. A block typed at a prompt, which uses the names
+  of that prompt, goes on with a copy of them when it is sent to the
+  background.
 - **It is who started it.** A job submitted from the prompt over the
   network runs as that prompt: `web on` in it is refused, as it is there.
 - **Eight jobs** may run or be held at one time, beside the programs that
@@ -454,7 +516,7 @@ Counting shelves...
 - **When it ends, it is written in the stored table `job_log`**: `job`,
   `program`, `by` (`screen`, `serial`, `network`, `program`), `began`,
   `ended`, `went` (`done`, `failed at line 3 of name`, `stopped`),
-  `statements`. Only the jobs nobody waited for. Nobody is told of those
+  `statements`. `program` is the call with its values, as in `jobs`. Only the jobs nobody waited for. Nobody is told of those
   rows (no `on insert into job_log` starts), and nothing trims the table:
   `delete from job_log where ended < '2026-12-01'` does.
 - **`select * from jobs`** reads the same list as a view: `job`, `program`,
@@ -514,10 +576,12 @@ the table of programs, the programs that run by themselves), `code.rs`
   hold numbers only (the line each came from, where to jump, where its
   calculation is kept), beside the lines themselves, from which an
   instruction reads the texts it needs (the name of a `let`, a `select`, a
-  command). `let`, `say`, `if`, `while`, `for`, `return` and `run` have
-  instructions of their own; any other line is the instruction `command`,
-  which is the name of a program or goes to `shell::command` when it runs:
-  that is how every command is a statement. The jumps of a block are
+  command). `let`, `say`, `if`, `while`, `for`, `return` and a call (`run name`,
+  `name(values)`) have instructions of their own; any other line is the
+  instruction `command`, which is the name of a program alone or goes to
+  `shell::command` when it runs: that is how every command is a
+  statement. The values of a call are checked when the line is compiled
+  and read again when it runs. The jumps of a block are
   settled once, when it is compiled.
 
   ```
@@ -539,12 +603,20 @@ the table of programs, the programs that run by themselves), `code.rs`
   prompt from inside a program (`qr`) enters the machine again on the next
   unit.
 - **Values** are worked out by the expression code of SQL (`expr.rs`), with
-  the variables of the session (`System::vars[session]`, an `expr::Vars`:
-  two fixed arrays of 32 names and 32 values). A calculation is read once,
+  the names in use (`System::names`, an `expr::Vars`: two fixed arrays of
+  32 names and 32 values). A calculation is read once,
   when its line is compiled (`expr::Names::late`), and kept in the pool of
   its unit (`expr::Pool`); the value of a name in it is looked up each time
   it is worked out. A line that starts with `select` goes to `sql::query`
   when it runs.
+- **Names.** The names in use are those of the session
+  (`System::vars[session]`). When a program is entered (`machine::call`),
+  the values of the call are worked out with them and become the names of
+  the program, which take their place; those of who called wait in the
+  room of the machine (`Machine::aside`) and come back when the program
+  leaves, by its end, by `return`, by a failure or because it is stopped.
+  A job nobody waits for keeps its names with it, not in the place of a
+  session (`Jobs::names`): it never touches those of a prompt.
 - **A `for`** reads its rows through a `sql::Cursor`, which walks a stored
   table by `id` or takes a result whole (see above).
 - **Jobs** (`jobs.rs`). The machine runs in *turns* (`machine::turn`):
@@ -584,6 +656,7 @@ the table of programs, the programs that run by themselves), `code.rs`
   event of depth four starts nothing.
 - **Room.** A running program keeps nothing on the stack of its task but
   what one instruction needs: its lines, its instructions and its rows are
-  in `System::vm`, about 270 KB (four units of 46 KB, four cursors of
-  20 KB), which makes a `System` about 440 KB with the list of the jobs. The lines of a program are
+  in `System::vm`, about 278 KB (four units of 46 KB, four cursors of
+  20 KB, the names put aside for four programs), which makes a `System`
+  about 454 KB with the list of the jobs. The lines of a program are
   on the stack, 12 KB, only while it is loaded and compiled.

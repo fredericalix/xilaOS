@@ -1242,7 +1242,7 @@ const HELP_COMMANDS: [&[u8]; 38] = [
     b"   reboot                     - Restarts the machine.",
 ];
 
-const HELP_LANGUAGE: [&[u8]; 26] = [
+const HELP_LANGUAGE: [&[u8]; 28] = [
     b"XilaScript: one statement per line, at the prompt or in a program.",
     b"   let name = value           - Keeps a value: let total = select sum(n) from t",
     b"   say value                  - Shows a value: say 'Total: ' + total",
@@ -1252,8 +1252,9 @@ const HELP_LANGUAGE: [&[u8]; 26] = [
     b"   else                       - In an if: the lines for when it does not hold.",
     b"   end                        - Closes if, while, for or program.",
     b"   program name ... end       - Keeps lines under a name, in the database.",
-    b"   run name                   - Runs a program. Its name alone does too.",
-    b"   submit name                - Runs it as a job: the prompt does not wait.",
+    b"   program name(a, b) ... end - It takes two values, under the names a and b.",
+    b"   run name(1, 'x')           - Runs a program. name(1, 'x') alone does too.",
+    b"   submit name(1, 'x')        - Runs it as a job: the prompt does not wait.",
     b"   jobs                       - Lists the jobs. job 3 shows one, what it said.",
     b"   job 3 end                  - Stops a job. Also: job 3 hold, job 3 release.",
     b"   on insert into t ... end   - Runs when a row is added. Also: on update t,",
@@ -1269,6 +1270,7 @@ const HELP_LANGUAGE: [&[u8]; 26] = [
     b"   today, now                 - The date, and the date with the time, as texts.",
     b"   A value is a number, a 'text', a name, a calculation or a select. Every",
     b"   command is a statement, SQL too. A line that starts with # is a note.",
+    b"   A program sees its own names only: its values, and what let and for make.",
 ];
 
 const HELP_KEYS: [&[u8]; 10] = [

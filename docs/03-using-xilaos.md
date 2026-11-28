@@ -610,7 +610,8 @@ See [XilaScript](05-xilascript.md).
 |---|---|
 | `let`, `say` | Keeps a value under a name; shows a value. |
 | `if`, `else`, `while`, `for`, `end` | The blocks: conditions and loops, closed by `end`. |
-| `program`, `run`, `return` | Keeps lines under a name in the database; runs a program; leaves it. |
+| `program`, `run`, `return` | Keeps lines under a name in the database, with the names of the values it takes (`program restock(item, count)`); runs a program (`run restock('cable', 5)`, or without `run`); leaves it. |
+| `submit`, `jobs`, `job 3` | Runs a program as a job nobody waits for; lists the jobs; shows one (`job 3 end`, `hold`, `release`). |
 | `on`, `every` | Programs that run by themselves: when a table changes, or at a regular pace. |
 | `programs`, `show name`, `drop program name` | Lists the programs, shows one, removes one. |
 | `vars` | Lists the names that have a value. |
