@@ -152,6 +152,9 @@ impl Panel {
                 b"list" => {
                     panel.listed = 0;
                     for column in rest.split(|byte| *byte == b',').map(trim) {
+                        if column.is_empty() {
+                            return Err(fault(b"A list names columns, with commas between them: list label, place"));
+                        }
                         let column = Self::column(schema, column).ok_or_else(|| unknown(column))?;
                         if panel.listed == panel.list.len() {
                             return Err(fault(b"A list shows eight columns at most."));
@@ -161,7 +164,7 @@ impl Panel {
                     }
                 }
                 b"field" => {
-                    let wrong = || fault(b"A field is a column and its label: field place 'Where it is'");
+                    let wrong = || fault(b"A field is a column and its label, 32 characters at most: field place 'Where'");
                     let (column, rest) = split_word(rest);
                     let found = Self::column(schema, column).ok_or_else(|| if column.is_empty() { wrong() } else { unknown(column) })?;
                     if found.bytes() == b"id" {
@@ -621,10 +624,14 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
     let listed = panel.listed;
     let mut numbers = [false; sql::MAX_COLUMNS];
     let mut count = 0;
+    // something is looked for, and no listed column is a text to look in
+    let mut nowhere = false;
     let fetched = (|| -> Result<(), Message> {
         let schema = described_on(sys, panel.table.bytes())?;
-        let mut query = FixedStr::<512>::from_bytes(b"select id");
-        for column in &panel.list[..listed] {
+        // (room for names of 24 characters and a line to find made of quotes)
+        let mut query = FixedStr::<720>::from_bytes(b"select id");
+        // the id is asked for once, wherever the list shows it
+        for column in panel.list[..listed].iter().filter(|column| column.bytes() != b"id") {
             query.push_bytes(b", ");
             query.push_bytes(column.bytes());
         }
@@ -647,6 +654,7 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
         if looked > 0 {
             query.push(b')');
         }
+        nowhere = !found.is_empty() && looked == 0;
         room.cursor.open(&*sys, &NO_VARS, query.bytes())?;
         // one row more than the page shows, to know whether a page follows
         while count <= wanted {
@@ -654,9 +662,16 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
                 break;
             };
             room.ids[count] = if let Value::Int(id) = row[0] { id as u64 } else { 0 };
+            let mut next = 1;
             for at in 0..listed {
-                room.cells[count][at] = row[at + 1].shown();
-                numbers[at] |= matches!(row[at + 1], Value::Int(_) | Value::Dec(..));
+                let value = if panel.list[at].bytes() == b"id" {
+                    row[0]
+                } else {
+                    next += 1;
+                    row[next - 1]
+                };
+                room.cells[count][at] = value.shown();
+                numbers[at] |= matches!(value, Value::Int(_) | Value::Dec(..));
             }
             count += 1;
         }
@@ -668,11 +683,17 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
         return;
     };
     (open.count, open.more, open.read, open.stale) = (0, false, now, false);
+    let said = core::mem::take(&mut open.said);
     open.header.clear();
     if let Err(message) = fetched {
         open.message = FixedStr::from_bytes(message.bytes());
         open.failed = true;
         return;
+    }
+    // what was wrong the last time is no longer so
+    if open.failed {
+        open.message.clear();
+        open.failed = false;
     }
     (open.more, open.count) = (count > wanted, count.min(wanted));
     // each column as wide as what it holds on this page and as its
@@ -683,11 +704,14 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
         labels[at] = panel.label(&panel.list[at]);
         widths[at] = room.cells[..open.count].iter().map(|row| row[at].len()).max().unwrap_or(0).max(labels[at].len()).max(1);
     }
+    // the widest texts give way first: a number that is cut is another number
     let space = COLS - 2 - 2 * listed.saturating_sub(1);
     while widths[..listed].iter().sum::<usize>() > space {
-        if let Some(widest) = widths[..listed].iter_mut().max() {
-            *widest -= 1;
-        }
+        let texts = (0..listed).filter(|at| !numbers[*at] && widths[*at] > 1).max_by_key(|at| widths[*at]);
+        let Some(widest) = texts.or_else(|| (0..listed).filter(|at| widths[*at] > 1).max_by_key(|at| widths[*at])) else {
+            break;
+        };
+        widths[widest] -= 1;
     }
     open.header.push(b' ');
     for at in 0..listed {
@@ -702,10 +726,11 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
         }
         (open.ids[row], open.lines[row]) = (room.ids[row], line);
     }
-    if open.count == 0 && open.said && !open.found.is_empty() {
+    if said && nowhere {
+        open.message = FixedStr::from_bytes(b"No listed column is a text: there is nothing to look in.");
+    } else if said && open.count == 0 && !open.found.is_empty() {
         open.message = FixedStr::from_bytes(b"No row holds: ").also(open.found.bytes());
     }
-    open.said = false;
 }
 
 /// Handles a key on the screen of a panel.
@@ -713,8 +738,10 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
     let Some(open) = sys.panels.open[place].as_mut() else {
         return;
     };
-    open.message.clear();
-    open.failed = false;
+    // what could not be read stays said until it is read again
+    if !open.failed {
+        open.message.clear();
+    }
     let say = |open: &mut Open, text: &[u8]| open.message = FixedStr::from_bytes(text);
     match event.key {
         Key::F(3) => return close(sys, place),
@@ -723,6 +750,9 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
             sys.screen = 0;
             return;
         }
+        // the page that was asked for is not read yet: what these keys
+        // do depends on it, and they wait for it
+        Key::F(5) | Key::PageDown | Key::PageUp | Key::Enter if open.stale => return,
         Key::F(5) => {}
         Key::PageDown if !open.more => return say(open, b"This is the last page."),
         Key::PageDown => {
@@ -744,7 +774,8 @@ pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
             (open.back, open.page) = (open.back - 1, open.page - 1);
             open.after = open.starts[open.back];
         }
-        Key::Char(typed) if (0x20..0x7f).contains(&typed) => {
+        // (a letter beyond ASCII is one as any other: tables hold them)
+        Key::Char(typed) if typed >= 0x20 && typed != 0x7f => {
             open.find.push(typed);
             return;
         }
@@ -898,9 +929,9 @@ pub(crate) mod tests {
             (&["title 'a title that is far too long to be the title of a panel'"], "A title is a text between quotes, 32 characters at most: title 'Stock'"),
             (&["title ''"], "A title is a text between quotes, 32 characters at most: title 'Stock'"),
             (&["list label, colour"], "Unknown column: colour. The table items has no such column."),
-            (&["list label,"], "Unknown column: . The table items has no such column."),
-            (&["field"], "A field is a column and its label: field place 'Where it is'"),
-            (&["field place"], "A field is a column and its label: field place 'Where it is'"),
+            (&["list label,"], "A list names columns, with commas between them: list label, place"),
+            (&["field"], "A field is a column and its label, 32 characters at most: field place 'Where'"),
+            (&["field place"], "A field is a column and its label, 32 characters at most: field place 'Where'"),
             (&["field colour 'Colour'"], "Unknown column: colour. The table items has no such column."),
             (&["field id 'Number'"], "The id of a row is given by the system: it is no field."),
             (&["field place 'Where' hidden"], "After the label of a field: shown, or among and what it may hold."),
@@ -913,6 +944,16 @@ pub(crate) mod tests {
             assert_eq!(said(&mut sys, &typed), [message.to_string(), not_kept(2)], "{lines:?}");
         }
         assert_eq!(said(&mut sys, &["panel stock on items", "field place 'Where'", "field PLACE 'Again'", "end"]), ["The column place has a field already.".to_string(), not_kept(2)]);
+        let listing = "A list names columns, with commas between them: list label, place";
+        assert_eq!(said(&mut sys, &["panel stock on items", "list", "end"]), [listing.to_string(), not_kept(1)]);
+        assert_eq!(said(&mut sys, &["panel stock on items", "list label,, place", "end"]), [listing.to_string(), not_kept(1)]);
+        // what is asked for without its name
+        assert_eq!(said(&mut sys, &["show panel"]), ["Type show panel and its name: show panel stock"]);
+        assert_eq!(said(&mut sys, &["drop panel"]), ["Type drop panel and its name: drop panel stock"]);
+        // a program that runs by itself is named after what starts it: not as a panel
+        said(&mut sys, &["panel on_insert_items on items", "end"]);
+        assert_eq!(said(&mut sys, &["on insert into items", "say 1", "end"]), ["on_insert_items is a panel: a program cannot have its name."]);
+        said(&mut sys, &["drop panel on_insert_items"]);
         assert_eq!(said(&mut sys, &["show panel stock"]), ["Unknown panel: stock. Type panels to list them."]);
         // one that was kept stays as it was when it is typed again wrong
         said(&mut sys, &["panel stock on items", "title 'Good'", "end"]);

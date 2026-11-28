@@ -230,7 +230,7 @@ with an error the model reads, when it is:
 | `key` (every form) | Keys are shown to nothing, and it is not for it to set or forget one. |
 | `reboot` | |
 | `ask`, `companion on` | It does not ask itself, nor turn itself on again. |
-| A block: `if`, `while`, `for`, `program`, `on`, `every` | One line at a time. |
+| A block: `if`, `while`, `for`, `program`, `on`, `every`, `panel` | One line at a time. |
 | `qr` | Its code takes the screen of who asked for it, and the companion is nobody at a prompt. Refused to any program that runs by itself. |
 | `submit`, `job n end`, `job n hold`, `job n release` | Nothing it starts may outlive its answer, and the user's jobs are not its own to stop. It may read them: `jobs`, `job n`, `select ... from jobs`. |
 | A change to the tables `programs`, `panels`, `acts` or `companions`, or another table given one of those names; `drop program`, `drop panel` | See below. |

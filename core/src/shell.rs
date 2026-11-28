@@ -860,7 +860,8 @@ pub struct System {
     pub layout: Layout,
     pub mood: MoodMode,
     pub energy: u16,
-    /// The screen shown: an index into `SCREENS`.
+    /// The screen shown: one of `SCREENS` by its number, or after them
+    /// the panel that is open at a place (`panel::place_of`).
     pub screen: usize,
     /// Timer ticks since start, 100 per second.
     pub ticks: u64,
@@ -1379,7 +1380,15 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
             out.line(Style::Error, b"Panels are not the companion's to change.");
             false
         }
+        b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"panel") && trim(split_word(arg).1).is_empty() => {
+            out.line(Style::Error, b"Type drop panel and its name: drop panel stock");
+            false
+        }
         b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"panel") => crate::panel::remove(sys, trim(split_word(arg).1), out),
+        b"show" if arg.eq_ignore_ascii_case(b"panel") => {
+            out.line(Style::Error, b"Type show panel and its name: show panel stock");
+            false
+        }
         b"panels" => crate::panel::list(sys, out),
         b"show" if split_word(arg).0.eq_ignore_ascii_case(b"panel") && !trim(split_word(arg).1).is_empty() => crate::panel::show(sys, trim(split_word(arg).1), out),
         b"alter" | b"create" | b"drop" | b"insert" | b"update" | b"delete" => change(sys, line, out),
@@ -3679,6 +3688,18 @@ pub mod tests {
         assert!(ok);
         assert_eq!(out.lines, ["The key openrouter is kept. It is never shown."]);
         assert_eq!(run_line(&mut sys, "key set OpenRouter sk-or-v1-secret-two").1.lines, ["The key OpenRouter is replaced. It is never shown."]);
+        // a panel is described on a table by its name: not on that one
+        for line in ["panel spy on kept_keys", "end", "create table other (n int)", "panel made on other", "end", "insert into panels values ('spy', 0, 'on kept_keys')", "spy", "show panel spy", "panels"] {
+            let said = run_line(&mut sys, line).1.lines.join("\n");
+            assert!(!said.contains("sk-or-v1") && !said.contains("openrouter"), "{line}: {said}");
+        }
+        assert_eq!(run_line(&mut sys, "panel spy on kept_keys").1.lines.len(), 0);
+        assert_eq!(run_line(&mut sys, "end").1.lines, ["Unknown table: kept_keys. Type tables to list them."]);
+        // one whose row was written by hand does not open on it either
+        assert_eq!(run_line(&mut sys, "spy").1.lines, ["Unknown table: kept_keys. Type tables to list them."]);
+        assert_eq!(sys.screen, 0);
+        run_line(&mut sys, "drop table panels");
+        run_line(&mut sys, "drop table other");
         run_line(&mut sys, "create table notes (label text)");
         assert_eq!(run_line(&mut sys, "key").1.lines, ["   name        key", "   OpenRouter  kept, never shown"]);
         // SQL does not know where keys are kept: nothing lists the table, reads it or changes it

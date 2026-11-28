@@ -161,7 +161,9 @@ A condition is a value that holds (a number that is not zero) or does not
 
 A name is a letter, then letters, digits or `_`, 24 characters at most. It
 cannot be a word of the language or a command: `let mood = 3` is refused,
-since `mood` is a command.
+since `mood` is a command. (`panel`, which opens the description of a
+screen of an application, is such a word since 28 November 2026: see
+[Panels](15-panels.md).)
 
 Names made at a prompt belong to its *session*: the screen, the serial
 port and the prompt for the network each have their own, 32 at most. They
@@ -675,5 +677,5 @@ the table of programs, the programs that run by themselves), `code.rs`
   what one instruction needs: its lines, its instructions and its rows are
   in `System::vm`, about 278 KB (four units of 46 KB, four cursors of
   20 KB, the names put aside for four programs), which makes a `System`
-  about 482 KB with the list of the jobs and what they wait for. The lines of a program are
+  about 505 KB with the list of the jobs, what they wait for and the panels that are open. The lines of a program are
   on the stack, 12 KB, only while it is loaded and compiled.

@@ -1078,6 +1078,22 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_opens_for_a_job_the_screen_waits_for_and_no_other() {
+        let mut sys = ready();
+        typed(&mut sys, &["create table items (label text)", "panel stock on items", "end", "program opener", "say 'opening'", "stock", "say 'opened'", "end"]);
+        // nobody waits for it: it would take the screen from who sits there
+        let number = begin(&mut sys, What::Program(b"opener"), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        assert_eq!(finish(&mut sys, place), ["opening", "A panel opens at the screen of the machine: stock.", "Stopped at line 2 of opener."]);
+        assert_eq!((sys.screen, crate::panel::place_of(&sys, 3)), (0, None));
+        // the screen waits for it: the panel opens, and the program goes on
+        let number = begin(&mut sys, What::Program(b"opener"), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        assert_eq!(finish(&mut sys, place), ["opening", "opened"]);
+        assert_eq!((sys.screen, crate::panel::place_of(&sys, 3)), (3, Some(0)));
+    }
+
+    #[test]
     fn places_are_taken_and_given_back() {
         let mut sys = ready();
         let forever = lines(&["while 1 = 1", "end"]);

@@ -422,7 +422,7 @@ fn act(sys: &mut System, command: &[u8], into: &mut FixedStr<LINE>) {
     sys.vars[crate::events::BACKGROUND].clock = sys.now();
     sys.acting = true;
     let mut ok = if command.iter().any(|byte| *byte == b'\n') || crate::lang::opens(command) {
-        into.push_bytes(b"One line at a time, and no block: if, for, while and program are not for you.");
+        into.push_bytes(b"One line at a time, and no block: if, for, while, program, panel are not for you.");
         false
     } else {
         crate::lang::line(sys, command, &mut Said(into))
@@ -1246,7 +1246,7 @@ mod tests {
         // what needs the kernel is not run for it; no block, one line
         heard(&mut sys, Ok((200, &answer(None, &["run:net ping 10.0.2.2", "run:display test", "run:for n in select 1", "run:mood calm\nreboot"]))));
         assert_eq!(results(&sys)[..2], ["error: That command needs the machine itself: it was not run."; 2]);
-        assert_eq!(results(&sys)[2..], ["error: One line at a time, and no block: if, for, while and program are not for you."; 2]);
+        assert_eq!(results(&sys)[2..], ["error: One line at a time, and no block: if, for, while, program, panel are not for you."; 2]);
         assert!(sys.request.is_none() && sys.mood.name() == b"auto" && !sys.reboot);
         // jobs are not its own to start or stop: nothing it starts may outlive its answer
         crate::machine::tests::rooms(&mut sys, 3);

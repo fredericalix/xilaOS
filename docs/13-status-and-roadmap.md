@@ -63,8 +63,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 28 November 2026: about 42,000 lines, 410
-unit tests, 559 system checks.
+about 300 system checks. On 28 November 2026: about 43,000 lines, 422
+unit tests, 573 system checks.
 
 ## Known limits of what is done
 
@@ -836,7 +836,14 @@ In four steps, each merged when its unit tests and its checks pass:
 
 1. Done on 28 November 2026: the panel as an object, the function
    keys, the list in its virtual screen, the line to find
-   ([Panels](15-panels.md)).
+   ([Panels](15-panels.md)). What it showed for the steps to come:
+   the stack of the interface task has nothing to spare under a key
+   or a command (a page read from there froze the system in QEMU,
+   twice, and no unit test saw it), so what a panel reads or writes
+   is asked for by a key and done at the tick of the interface, with
+   what is large kept in the interface's own memory; and a panel that
+   will run programs at a key runs them for who sits at the machine,
+   whoever wrote the panel, the prompt over the network included.
 2. The form: display, add, change, remove; `F4` and `among`.
 3. Panels opened from a row, and programs on a key or an option.
 4. The stock: its text in the repository, the tool that sends it, its

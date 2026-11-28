@@ -1335,7 +1335,8 @@ mod tests {
         }
         assert_eq!(labels(&listed(&mut ui, &mut sys).0), things((pages - 1) * page..100));
         ui.key(&mut sys, key(Key::PageDown));
-        assert_eq!(listed(&mut ui, &mut sys), (labels(&things((pages - 1) * page..100)).iter().map(|_| String::new()).zip(listed(&mut ui, &mut sys).0).map(|(_, text)| text).collect(), "This is the last page.".to_string()));
+        let (rows, message) = listed(&mut ui, &mut sys);
+        assert_eq!((labels(&rows), message.as_str()), (things((pages - 1) * page..100), "This is the last page."));
         // and back, page by page, to the first
         for back in (0..pages - 1).rev() {
             ui.key(&mut sys, key(Key::PageUp));
@@ -1347,6 +1348,41 @@ mod tests {
         // the message goes at the next key
         ui.key(&mut sys, key(Key::F(5)));
         assert_eq!(listed(&mut ui, &mut sys).1, "");
+        // keys that turn pages wait for the page to be read: two at once are one page
+        ui.key(&mut sys, key(Key::PageDown));
+        ui.key(&mut sys, key(Key::PageDown));
+        ui.key(&mut sys, key(Key::PageUp));
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), things(page..2 * page));
+        assert!(row(&ui, BODY_TOP + 1).ends_with("page 2"));
+    }
+
+    #[test]
+    fn a_list_shows_every_column_of_its_table_and_keeps_numbers_whole() {
+        let (mut ui, mut sys) = start();
+        ui.run(&mut sys, b"create table wide (a text, b text, c text, d text, e int, f int, g int)");
+        let long = "a text of forty-eight characters, as long as one";
+        ui.run(&mut sys, format!("insert into wide values ('{long}', '{long}', '{long}', 'short', 123456789012, -7, 0)").as_bytes());
+        // the id and the seven others: eight columns, the id read once
+        for line in ["panel wide on wide", "list id, a, b, c, d, e, f, g", "end", "wide"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        let (rows, message) = listed(&mut ui, &mut sys);
+        assert_eq!((rows.len(), message.as_str()), (1, ""));
+        // texts give way, numbers are never cut
+        let cells: Vec<&str> = rows[0].split_whitespace().collect();
+        assert_eq!((cells[0], &cells[cells.len() - 3..]), ("1", &["123456789012", "-7", "0"][..]));
+        assert!(rows[0].len() <= COLS - 1);
+        // a list of numbers has nothing for the line to find to look in, and says so
+        for line in ["panel sums on wide", "list e, f, g", "end"] {
+            ui.key(&mut sys, key(Key::Esc));
+            ui.run(&mut sys, line.as_bytes());
+        }
+        ui.run(&mut sys, b"sums");
+        listed(&mut ui, &mut sys);
+        type_text(&mut ui, &mut sys, "5");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(listed(&mut ui, &mut sys), (vec!["            e   f  g".to_string(), " 123456789012  -7  0".to_string()][1..].to_vec(), "No listed column is a text: there is nothing to look in.".to_string()));
     }
 
     #[test]
@@ -1370,6 +1406,20 @@ mod tests {
         type_text(&mut ui, &mut sys, "shelf 3");
         ui.key(&mut sys, key(Key::Enter));
         assert_eq!(labels(&listed(&mut ui, &mut sys).0), ["thing 3", "thing 7", "thing 11"].iter().map(|text| text.to_string()).chain((15..100).step_by(4).map(|n| format!("thing {n}"))).take(ui.grid.rows - BODY_TOP - 7).collect::<Vec<_>>());
+        // letters beyond ASCII are typed and found as any other
+        for _ in 0..7 {
+            ui.key(&mut sys, key(Key::Backspace));
+        }
+        shell::exec(&mut sys, b"insert into items values ('C\x83ble', 'door', 1)", &mut shell::tests::Lines::default());
+        type_text(&mut ui, &mut sys, "c");
+        ui.key(&mut sys, key(Key::Char(0x83)));
+        type_text(&mut ui, &mut sys, "b");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(listed(&mut ui, &mut sys).0.len(), 1);
+        for _ in 0..3 {
+            ui.key(&mut sys, key(Key::Backspace));
+        }
+        type_text(&mut ui, &mut sys, "shelf 3");
         // what no row holds, a quote among it
         for _ in 0..7 {
             ui.key(&mut sys, key(Key::Backspace));
@@ -1380,7 +1430,7 @@ mod tests {
         // as much as the line takes, and no more
         type_text(&mut ui, &mut sys, &"x".repeat(60));
         ui.key(&mut sys, key(Key::Enter));
-        ui.render(&mut sys);
+        listed(&mut ui, &mut sys);
         assert_eq!(row(&ui, BODY_TOP + 2).len(), " Find: ".len() + 40);
         // emptied, it shows everything again from the first page
         for _ in 0..40 {
@@ -1411,7 +1461,18 @@ mod tests {
         shell::exec(&mut sys, b"drop table items", &mut shell::tests::Lines::default());
         sys.session = events::SCREEN;
         ui.key(&mut sys, key(Key::F(5)));
-        assert_eq!(listed(&mut ui, &mut sys), (vec![], "Unknown table: items. Type tables to list them.".to_string()));
+        let gone = (vec![], "Unknown table: items. Type tables to list them.".to_string());
+        assert_eq!(listed(&mut ui, &mut sys), gone);
+        // a key that reads nothing leaves what is wrong said
+        ui.key(&mut sys, key(Key::Left));
+        type_text(&mut ui, &mut sys, "x");
+        ui.key(&mut sys, key(Key::Backspace));
+        assert_eq!(listed(&mut ui, &mut sys), gone);
+        // the table is made again: the list comes back, and nothing more is said of the failure
+        ui.run(&mut sys, b"create table items (label text, place text, qty int)");
+        ui.run(&mut sys, b"insert into items values ('back', 'here', 1)");
+        ui.tick(&mut sys, 150);
+        assert_eq!(listed(&mut ui, &mut sys), (vec![" back   here                1".to_string()], String::new()));
         ui.key(&mut sys, key(Key::PageDown));
         ui.key(&mut sys, key(Key::F(3)));
         assert_eq!(sys.screen, 0);

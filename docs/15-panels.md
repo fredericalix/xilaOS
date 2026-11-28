@@ -48,8 +48,8 @@ closes it. The table is a stored one, and must be there.
 | Line | What it says |
 |---|---|
 | `title 'text'` | The title of the screen, 32 characters at most. Without it, the name of the panel. |
-| `list a, b, c` | The columns of the list, in their order: eight at most, `id` among them if wanted. Without it, every column but `id`. |
-| `field column 'Label'` | What a column is called on this panel: the list shows the label over it. One field a column, never `id`. |
+| `list a, b, c` | The columns of the list, in their order: eight at most, which is every column a table has, `id` among them if wanted. Without it, every column but `id`. |
+| `field column 'Label'` | What a column is called on this panel, in 32 characters at most: the list shows the label over it. One field a column, never `id`. |
 | `field column 'Label' shown` | A column that is shown and not typed, for the form that is to come. |
 | `field column 'Label' among ...` | What the column may hold, for the form that is to come: kept as it is written. |
 | `# ...` | A note. |
@@ -64,7 +64,8 @@ closes it. The table is a stored one, and must be there.
   those above, a title that is no text. One that was kept under that
   name stays as it was.
 - **A panel and a program do not share a name**, and neither is named
-  as a command.
+  as a command. `panel` is a word of the language as `program` is: no
+  value and no program can be named so.
 - **The companion may not change the table `panels`**, nor drop a
   panel: a later step lets a panel run programs at a key.
 - **A panel is read again each time it opens**, on its table as it is
@@ -74,14 +75,17 @@ closes it. The table is a stored one, and must be there.
 ## Using one
 
 Its name, typed alone at the prompt of the screen, opens it and shows
-it. A panel opens at the screen of the machine only: at the serial
-port and at the prompt over the network its name answers `A panel
-opens at the screen of the machine: stock.`
+it. A panel opens at the screen of the machine only, for who sits
+there: at the serial port, at the prompt over the network, for the
+companion, in a program that runs by itself and in a job nobody waits
+for, its name answers `A panel opens at the screen of the machine:
+stock.` A program that the prompt of the screen waits for may open
+one.
 
 | Key | What it does |
 |---|---|
-| `PgDn`, `PgUp` | The next page, the one before. |
-| any character, `Backspace` | Typed in the line to find. |
+| `PgDn`, `PgUp` | The next page, the one before. A key that turns pages or reads waits for the page that was asked for before it: two typed at once are one. |
+| any character, `Backspace` | Typed in the line to find, accented letters included. |
 | `Enter` | Reads the list from its first page, keeping the rows that hold what the line to find says. Empty, it shows every row. |
 | `F5` | Reads the page again. |
 | `F3` | Leaves the panel: its screen is no more. |
@@ -99,12 +103,20 @@ opens at the screen of the machine: stock.`
 - **The line to find** looks in the text columns of the list, the first
   three of them, for what is typed, anywhere in the text. `%` and `_`
   in it stand for any characters and any one character, as in `like`.
+  A list with no text column says so. What few rows hold is looked for
+  in the whole table at once, which a large table makes long.
 - **Numbers are to the right** of their column, texts to the left. A
   column is as wide as what it holds on the page and as its label; when
-  the row is wider than the screen the widest columns are cut.
+  the row is wider than the screen the widest texts are cut, and no
+  number is.
 - **The list follows its table**: when rows are added, changed or
-  removed by anyone (another prompt, a job), the page that is shown is
-  read again within a second.
+  removed by a statement of SQL, whoever typed it (another prompt, a
+  job), the page that is shown is read again within a second. What the
+  system writes for itself (the companion's `talk` and `acts`,
+  `job_log`) is seen at `F5`.
+- **What cannot be read is said in red** on the message line (a table
+  that is gone, a column that was dropped), and stays said until the
+  list can be read again.
 - **`PgUp` remembers 64 pages back**; further than that it goes to the
   first page.
 
@@ -140,7 +152,7 @@ or ...)` when something is looked for: the cursor walks the table by
 its `id` from `N`, so a page deep in a large table costs no more than
 the first. One row more than the page shows is asked for, which tells
 whether a page follows. The page is kept as text already laid out, with
-the `id` of each row: 4 KB a panel.
+the `id` of each row: 6 KB a panel.
 
 A page is read at the tick of the interface, and nowhere else. A key or
 the command that opens a panel only says that the page is to be read;

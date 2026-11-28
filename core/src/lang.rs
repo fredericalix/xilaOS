@@ -611,6 +611,10 @@ fn define_runs(sys: &mut System, first: &[u8], lines: &[Line], out: &mut dyn Out
         }
     }
     let name = runs.name();
+    if exists_in(&sys.db, crate::panel::PANELS, name.bytes()) {
+        out.line(Style::Error, sql::error(name.bytes(), b" is a panel: a program cannot have its name.").bytes());
+        return false;
+    }
     // one more must fit among those the system watches
     refresh(sys);
     let known = exists(&sys.db, name.bytes());
