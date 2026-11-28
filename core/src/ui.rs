@@ -1264,7 +1264,9 @@ mod tests {
         ui.tick(sys, 0);
         ui.render(sys);
         let last = ui.grid.rows - 1;
-        ((BODY_TOP + 5..last - 1).map(|at| row(ui, at)).filter(|text| !text.is_empty()).collect(), row(ui, last - 1).trim().to_string())
+        // (without the columns before each row, where an option is typed)
+        let rows = (BODY_TOP + 5..last - 2).map(|at| row(ui, at)).filter(|text| !text.is_empty()).map(|text| if text.starts_with(" (") { text } else { text.get(4..).unwrap_or("").to_string() });
+        (rows.collect(), row(ui, last - 2).trim().to_string())
     }
 
     fn things(numbers: core::ops::Range<usize>) -> Vec<String> {
@@ -1289,9 +1291,10 @@ mod tests {
         assert!(title.starts_with(" The stock") && title.ends_with("page 1"), "{title}");
         assert_eq!(row(&ui, BODY_TOP + 2), " Find:");
         // the columns under their labels, numbers to the right
-        assert_eq!(row(&ui, BODY_TOP + 4), " label    Where it is  In stock");
+        assert_eq!(row(&ui, BODY_TOP + 4), " Opt label    Where it is  In stock");
         assert_eq!(listed(&mut ui, &mut sys).0, [" thing 0  shelf 0             0", " thing 1  shelf 1            10", " thing 2  shelf 2            20"]);
-        assert_eq!(row(&ui, ui.grid.rows - 1), " F3=Exit  F5=Refresh  PgUp/PgDn=Pages  Enter=Find  Esc=Overview");
+        assert_eq!(row(&ui, ui.grid.rows - 2), " 2=Change  4=Remove  5=Display");
+        assert_eq!(row(&ui, ui.grid.rows - 1), " F3=Exit  F5=Refresh  F6=Add  PgUp/PgDn=Pages  Enter=Go  Esc=Overview");
         // Esc shows the overview and leaves the panel open: its name, or its key, goes back to it
         ui.key(&mut sys, key(Key::Esc));
         assert_eq!((sys.screen, crate::panel::place_of(&sys, 3)), (0, Some(0)));
@@ -1314,7 +1317,7 @@ mod tests {
         ui.run(&mut sys, b"plain");
         ui.tick(&mut sys, 0);
         ui.render(&mut sys);
-        assert_eq!((row(&ui, BODY_TOP + 1).split_whitespace().next(), row(&ui, BODY_TOP + 4).as_str()), (Some("plain"), " label  place  qty"));
+        assert_eq!((row(&ui, BODY_TOP + 1).split_whitespace().next(), row(&ui, BODY_TOP + 4).as_str()), (Some("plain"), " Opt label  place  qty"));
         assert_eq!(listed(&mut ui, &mut sys), (vec![" (no rows)".to_string()], String::new()));
     }
 
@@ -1322,7 +1325,7 @@ mod tests {
     fn a_list_is_read_page_by_page_both_ways() {
         let (mut ui, mut sys) = with_panel(100);
         ui.run(&mut sys, b"stock");
-        let page = ui.grid.rows - BODY_TOP - 7;
+        let page = ui.grid.rows - BODY_TOP - 8;
         assert_eq!(labels(&listed(&mut ui, &mut sys).0), things(0..page));
         ui.key(&mut sys, key(Key::PageDown));
         assert_eq!(labels(&listed(&mut ui, &mut sys).0), things(page..2 * page));
@@ -1389,12 +1392,13 @@ mod tests {
     fn the_line_to_find_keeps_the_rows_that_hold_what_is_typed() {
         let (mut ui, mut sys) = with_panel(100);
         ui.run(&mut sys, b"stock");
+        listed(&mut ui, &mut sys);
         type_text(&mut ui, &mut sys, "thing 7x");
         ui.key(&mut sys, key(Key::Backspace));
         ui.render(&mut sys);
         assert_eq!(row(&ui, BODY_TOP + 2), " Find: thing 7");
         // nothing is looked for until Enter
-        assert_eq!(listed(&mut ui, &mut sys).0.len(), ui.grid.rows - BODY_TOP - 7);
+        assert_eq!(listed(&mut ui, &mut sys).0.len(), ui.grid.rows - BODY_TOP - 8);
         ui.key(&mut sys, key(Key::Enter));
         let mut wanted = vec!["thing 7".to_string()];
         wanted.extend(things(70..80));
@@ -1405,7 +1409,7 @@ mod tests {
         }
         type_text(&mut ui, &mut sys, "shelf 3");
         ui.key(&mut sys, key(Key::Enter));
-        assert_eq!(labels(&listed(&mut ui, &mut sys).0), ["thing 3", "thing 7", "thing 11"].iter().map(|text| text.to_string()).chain((15..100).step_by(4).map(|n| format!("thing {n}"))).take(ui.grid.rows - BODY_TOP - 7).collect::<Vec<_>>());
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), ["thing 3", "thing 7", "thing 11"].iter().map(|text| text.to_string()).chain((15..100).step_by(4).map(|n| format!("thing {n}"))).take(ui.grid.rows - BODY_TOP - 8).collect::<Vec<_>>());
         // letters beyond ASCII are typed and found as any other
         for _ in 0..7 {
             ui.key(&mut sys, key(Key::Backspace));
@@ -1476,6 +1480,209 @@ mod tests {
         ui.key(&mut sys, key(Key::PageDown));
         ui.key(&mut sys, key(Key::F(3)));
         assert_eq!(sys.screen, 0);
+    }
+
+    /// A system with a table that asks things of its rows, and a panel
+    /// on it that is open, its list read.
+    fn with_form() -> (Box<Ui>, Box<System>) {
+        let (mut ui, mut sys) = start();
+        for line in [
+            "create table kinds (name text)",
+            "insert into kinds values ('cables'), ('tools'), ('measure')",
+            "create table things (label text not null unique, kind text, state text default 'good' check (state = 'good' or state = 'worn'), qty int default 1, seen text)",
+            "insert into things values ('Oscilloscope', 'measure', 'good', 1, '2026-11-01'), ('Soldering iron', 'tools', 'worn', 2, '2026-11-02')",
+            "panel things on things",
+            "title 'Things'",
+            "list label, kind, state, qty",
+            "field label 'Label'",
+            "field kind 'Kind' among select name from kinds",
+            "field state 'State' among 'good', 'worn', 'it''s gone'",
+            "field qty 'In stock'",
+            "field seen 'Last seen' shown",
+            "end",
+            "things",
+        ] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        listed(&mut ui, &mut sys);
+        (ui, sys)
+    }
+
+    /// The fields of the form a panel shows, as `label: value`, and what it says.
+    fn form(ui: &mut Ui, sys: &mut System) -> (Vec<String>, String) {
+        ui.tick(sys, 0);
+        ui.render(sys);
+        let last = ui.grid.rows - 1;
+        let fields = (BODY_TOP + 3..last - 2).map(|at| row(ui, at)).filter(|text| !text.is_empty());
+        let field = |text: String| {
+            let (label, value) = text.split_once(" :").unwrap_or((&text, ""));
+            format!("{}: {}", label.trim().trim_end_matches(['.', ' ']), value.trim()).trim_end().to_string()
+        };
+        (fields.map(field).collect(), row(ui, last - 2).trim().to_string())
+    }
+
+    /// The rows of a list with one space between their columns.
+    fn squeezed(listed: (Vec<String>, String)) -> (Vec<String>, String) {
+        (listed.0.iter().map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")).collect(), listed.1)
+    }
+
+    fn keys(ui: &mut Ui, sys: &mut System, pressed: &[Key]) {
+        for pressed in pressed {
+            ui.key(sys, key(*pressed));
+            ui.tick(sys, 0);
+        }
+    }
+
+    fn typed(ui: &mut Ui, sys: &mut System, line: &str) -> Vec<String> {
+        let mut out = shell::tests::Lines::default();
+        shell::exec(sys, line.as_bytes(), &mut out);
+        ui.dirty = true;
+        out.lines
+    }
+
+    #[test]
+    fn a_row_is_added_through_the_form() {
+        let (mut ui, mut sys) = with_form();
+        keys(&mut ui, &mut sys, &[Key::F(6)]);
+        ui.render(&mut sys);
+        assert!(row(&ui, BODY_TOP + 1).ends_with("a row to add"));
+        assert_eq!(form(&mut ui, &mut sys), (vec!["Label:".to_string(), "Kind:".into(), "State:".into(), "In stock:".into(), "Last seen:".into()], String::new()));
+        assert_eq!(row(&ui, ui.grid.rows - 1), " Enter=Save  Tab=Next field  F4=Values  F12=Cancel  F3=Exit");
+        // typed field by field; a field that is only shown is passed over
+        type_text(&mut ui, &mut sys, "Cat6 cable 5m");
+        keys(&mut ui, &mut sys, &[Key::Tab]);
+        type_text(&mut ui, &mut sys, "cables");
+        keys(&mut ui, &mut sys, &[Key::Tab, Key::Tab]);
+        type_text(&mut ui, &mut sys, "6 * 2");
+        keys(&mut ui, &mut sys, &[Key::Tab]);
+        type_text(&mut ui, &mut sys, "!");
+        // (round to the first field again, where the cursor is where it was left)
+        assert_eq!(form(&mut ui, &mut sys).0, ["Label: Cat6 cable 5m!", "Kind: cables", "State:", "In stock: 6 * 2", "Last seen:"]);
+        // editing in a field: the keys of a line
+        keys(&mut ui, &mut sys, &[Key::Backspace, Key::End, Key::Left, Key::Delete, Key::Home, Key::Right]);
+        type_text(&mut ui, &mut sys, "+");
+        assert_eq!(form(&mut ui, &mut sys).0[0], "Label: C+at6 cable 5");
+        keys(&mut ui, &mut sys, &[Key::Backspace, Key::End]);
+        type_text(&mut ui, &mut sys, "m");
+        // Enter writes it: what was not typed takes the value by default, a calculation is worked out
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["Oscilloscope measure good 1".to_string(), "Soldering iron tools worn 2".into(), "Cat6 cable 5m cables good 12".into()], "1 row added to things, with id 3.".to_string()));
+        assert_eq!(typed(&mut ui, &mut sys, "select state, qty, seen is null from things where id = 3"), ["   state  qty  seenisnull", "   good   12   1"]);
+        // what the table refuses is said in its words, and the form stays as it was typed
+        keys(&mut ui, &mut sys, &[Key::F(6)]);
+        type_text(&mut ui, &mut sys, "Oscilloscope");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        let (fields, message) = form(&mut ui, &mut sys);
+        assert_eq!((fields[0].as_str(), message.contains("label") || message.contains("twice") || message.contains("already")), ("Label: Oscilloscope", true), "{message}");
+        for _ in 0..12 {
+            keys(&mut ui, &mut sys, &[Key::Backspace]);
+        }
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(form(&mut ui, &mut sys).1, "Nothing was typed: there is no row to add.");
+        keys(&mut ui, &mut sys, &[Key::Tab]);
+        type_text(&mut ui, &mut sys, "tools");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert!(!form(&mut ui, &mut sys).1.is_empty(), "a label is asked for");
+        keys(&mut ui, &mut sys, &[Key::Up]);
+        type_text(&mut ui, &mut sys, "Tape");
+        keys(&mut ui, &mut sys, &[Key::Tab, Key::Tab]);
+        type_text(&mut ui, &mut sys, "lost");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert!(form(&mut ui, &mut sys).1.contains("state = 'good' or state = 'worn'"));
+        keys(&mut ui, &mut sys, &[Key::Tab]);
+        type_text(&mut ui, &mut sys, "many");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert!(!form(&mut ui, &mut sys).1.is_empty());
+        // F12 gives it up: nothing was added
+        keys(&mut ui, &mut sys, &[Key::F(12)]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["Oscilloscope measure good 1".to_string(), "Soldering iron tools worn 2".into(), "Cat6 cable 5m cables good 12".into()], "Nothing was changed.".to_string()));
+    }
+
+    #[test]
+    fn a_row_is_shown_changed_and_removed_from_the_list() {
+        let (mut ui, mut sys) = with_form();
+        // down from the line to find to the rows; Enter alone shows the row
+        keys(&mut ui, &mut sys, &[Key::Down, Key::Down, Key::Enter]);
+        ui.render(&mut sys);
+        assert!(row(&ui, BODY_TOP + 1).ends_with("row 2"));
+        assert_eq!(form(&mut ui, &mut sys).0, ["Label: Soldering iron", "Kind: tools", "State: worn", "In stock: 2", "Last seen: 2026-11-02"]);
+        assert_eq!(row(&ui, ui.grid.rows - 1), " Enter=Back  F12=Back  F3=Exit");
+        // nothing is typed in a row that is shown
+        type_text(&mut ui, &mut sys, "x");
+        assert_eq!(form(&mut ui, &mut sys).0[0], "Label: Soldering iron");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        // 5 does the same; 2 changes; anything else says what can be typed there
+        type_text(&mut ui, &mut sys, "9");
+        assert_eq!(listed(&mut ui, &mut sys).1, "Before a row: 2 changes it, 4 removes it, 5 shows it.");
+        type_text(&mut ui, &mut sys, "2");
+        ui.render(&mut sys);
+        assert_eq!(&row(&ui, BODY_TOP + 6)[..4], "  2 ");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        ui.render(&mut sys);
+        assert!(row(&ui, BODY_TOP + 1).ends_with("row 2, changed"));
+        keys(&mut ui, &mut sys, &[Key::Tab, Key::Tab, Key::Tab]);
+        keys(&mut ui, &mut sys, &[Key::Backspace]);
+        type_text(&mut ui, &mut sys, "7");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["Oscilloscope measure good 1".to_string(), "Soldering iron tools worn 7".into()], "1 row changed in things.".to_string()));
+        // what is only shown was not written over
+        assert_eq!(typed(&mut ui, &mut sys, "select seen from things where id = 2")[1].trim(), "2026-11-02");
+        // 4 asks before it removes; F12 keeps the row
+        type_text(&mut ui, &mut sys, "4");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Remove this row? [Enter] removes it, [F12] keeps it.");
+        assert_eq!(row(&ui, ui.grid.rows - 1), " Enter=Remove  F12=Keep");
+        keys(&mut ui, &mut sys, &[Key::F(12)]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["Oscilloscope measure good 1".to_string(), "Soldering iron tools worn 7".into()], "Nothing was removed.".to_string()));
+        type_text(&mut ui, &mut sys, "4");
+        keys(&mut ui, &mut sys, &[Key::Enter, Key::Enter]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["Oscilloscope measure good 1".to_string()], "1 row removed from things.".to_string()));
+        // the keys stay on a row that is there; Up goes back to the line to find
+        keys(&mut ui, &mut sys, &[Key::Up, Key::Up]);
+        type_text(&mut ui, &mut sys, "osc");
+        ui.render(&mut sys);
+        assert_eq!(row(&ui, BODY_TOP + 2), " Find: osc");
+        // a row that went while its form was typed: said, and nothing is written
+        keys(&mut ui, &mut sys, &[Key::Down]);
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        typed(&mut ui, &mut sys, "delete from things");
+        type_text(&mut ui, &mut sys, "!");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec![], "This row is no longer there.".to_string()));
+    }
+
+    #[test]
+    fn what_a_field_may_hold_is_picked_with_f4() {
+        let (mut ui, mut sys) = with_form();
+        keys(&mut ui, &mut sys, &[Key::F(6), Key::F(4)]);
+        assert_eq!(form(&mut ui, &mut sys).1, "This field has no list of values to pick from.");
+        // from a table: the values of a column
+        keys(&mut ui, &mut sys, &[Key::Tab, Key::F(4)]);
+        ui.render(&mut sys);
+        assert!(row(&ui, BODY_TOP + 1).ends_with("Kind"));
+        assert_eq!((BODY_TOP + 3..BODY_TOP + 6).map(|at| row(&ui, at).trim().to_string()).collect::<Vec<_>>(), ["cables", "tools", "measure"]);
+        assert_eq!(row(&ui, ui.grid.rows - 1), " Enter=Pick  Up/Down=Move  F12=Back");
+        keys(&mut ui, &mut sys, &[Key::Down, Key::Down, Key::Down, Key::Up, Key::Enter]);
+        assert_eq!(form(&mut ui, &mut sys).0[1], "Kind: tools");
+        // written there: texts between quotes, a quote among them
+        keys(&mut ui, &mut sys, &[Key::Tab, Key::F(4), Key::Down, Key::Down, Key::Enter]);
+        assert_eq!(form(&mut ui, &mut sys).0[2], "State: it's gone");
+        // asked again, the keys are on the value the field holds; F12 leaves it as it is
+        keys(&mut ui, &mut sys, &[Key::F(4), Key::Up, Key::F(12)]);
+        assert_eq!(form(&mut ui, &mut sys).0[2], "State: it's gone");
+        keys(&mut ui, &mut sys, &[Key::F(4), Key::Up, Key::Enter]);
+        assert_eq!(form(&mut ui, &mut sys).0[2], "State: worn");
+        // the table still decides: what is picked is written as what is typed
+        keys(&mut ui, &mut sys, &[Key::Up, Key::Up]);
+        type_text(&mut ui, &mut sys, "Pliers");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "1 row added to things, with id 3.");
+        assert_eq!(typed(&mut ui, &mut sys, "select kind, state from things where id = 3")[1].split_whitespace().collect::<Vec<_>>(), ["tools", "worn"]);
+        // a list of values that is gone says so
+        typed(&mut ui, &mut sys, "drop table kinds");
+        keys(&mut ui, &mut sys, &[Key::F(6), Key::Tab, Key::F(4)]);
+        assert_eq!(form(&mut ui, &mut sys).1, "Unknown table: kinds. Type tables to list them.");
     }
 
     #[test]

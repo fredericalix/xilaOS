@@ -1470,7 +1470,7 @@ fn query(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
 }
 
 /// Runs a statement that changes stored tables.
-fn change(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
+pub(crate) fn change(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     // the table the statement is about, and the name it would give one
     for table in [crate::change::target(line), crate::change::becomes(line)].into_iter().flatten() {
         // the companion acting by itself leaves alone what holds it

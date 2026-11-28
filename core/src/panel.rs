@@ -58,7 +58,9 @@ const AGAIN: u64 = 100;
 /// one, the title, the line to find, a blank one, the names of the
 /// columns. And its last rows: what it has to say, and its keys.
 const HEAD: usize = 5;
-const FOOT: usize = 2;
+const FOOT: usize = 3;
+/// The columns a list gives to what is typed before a row.
+const OPT: usize = 4;
 
 /// A label, of a field or of a panel.
 pub type Label = FixedStr<32>;
@@ -70,9 +72,10 @@ pub struct Field {
     pub label: Label,
     /// Shown and not typed.
     pub shown: bool,
-    /// The line it was written on, from 0: what it may hold (`among`) is
-    /// read from there when it is needed.
+    /// The line it was written on, from 0, and whether that line says
+    /// what the field may hold (`among`): read from there when asked.
     pub line: usize,
+    pub among: bool,
 }
 
 /// A panel as it is described.
@@ -135,7 +138,7 @@ impl Panel {
     /// Reads the lines of a panel described on a table. What is wrong is
     /// told with its line, counted from 1.
     pub fn read(name: &[u8], schema: &Schema, lines: &[Line]) -> Result<Panel, Fault> {
-        let no_field = Field { column: Name::new(), label: Label::new(), shown: false, line: 0 };
+        let no_field = Field { column: Name::new(), label: Label::new(), shown: false, line: 0, among: false };
         let mut lower = Name::from_bytes(name);
         lower.lower();
         let mut panel = Panel { name: lower, table: schema.name, title: Label::from_bytes(lower.bytes()), list: [Name::new(); sql::MAX_COLUMNS], listed: 0, fields: [no_field; COLUMNS], count: 0 };
@@ -182,7 +185,7 @@ impl Panel {
                         return Err(fault(b"After the label of a field: shown, or among and what it may hold."));
                     }
                     // a table has seven columns but its id, and each has one field at most
-                    panel.fields[panel.count] = Field { column: found, label, shown, line: at };
+                    panel.fields[panel.count] = Field { column: found, label, shown, line: at, among: !rest.is_empty() };
                     panel.count += 1;
                 }
                 _ => return Err(fault(b"A line of a panel starts with title, list or field.")),
@@ -193,6 +196,13 @@ impl Panel {
             for column in &schema.columns[1..schema.count.max(1)] {
                 panel.list[panel.listed] = *column;
                 panel.listed += 1;
+            }
+        }
+        if panel.count == 0 {
+            // with no field said, every column but the id is one, under its name
+            for column in &schema.columns[1..schema.count.max(1)] {
+                panel.fields[panel.count] = Field { column: *column, label: Label::from_bytes(column.bytes()), shown: false, line: 0, among: false };
+                panel.count += 1;
             }
         }
         Ok(panel)
@@ -405,6 +415,66 @@ pub fn remove(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
     }
 }
 
+/// What is typed in a field of a form, and where in it.
+#[derive(Clone, Copy)]
+struct Input {
+    text: Text,
+    at: usize,
+}
+
+impl Input {
+    const NONE: Input = Input { text: Text::new(), at: 0 };
+
+    fn of(text: &[u8]) -> Input {
+        let text = Text::from_bytes(text);
+        Input { text, at: text.len() }
+    }
+
+    fn insert(&mut self, typed: u8) {
+        let mut longer = Text::from_bytes(&self.text.bytes()[..self.at]);
+        if self.text.len() < 48 && longer.push(typed) {
+            longer.push_bytes(&self.text.bytes()[self.at..]);
+            (self.text, self.at) = (longer, self.at + 1);
+        }
+    }
+
+    /// Takes out the character at a place, if there is one.
+    fn remove(&mut self, at: usize) {
+        if at < self.text.len() {
+            let mut shorter = Text::from_bytes(&self.text.bytes()[..at]);
+            shorter.push_bytes(&self.text.bytes()[at + 1..]);
+            self.text = shorter;
+        }
+    }
+}
+
+/// What the screen of a panel shows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Mode {
+    List,
+    /// The form, of the row `Open::id` or of a row to add: whether it is
+    /// only shown, and the field that is typed.
+    Form { shown: bool, at: usize },
+    /// The row of that id is about to be removed: yes or no.
+    Sure(u64),
+    /// What a field may hold, to pick from: the field, and the one picked.
+    Among { field: usize, at: usize },
+}
+
+/// What a key asked for, that the tick of the interface does: whatever
+/// reads or writes tables.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Todo {
+    Nothing,
+    /// Read the row of that id into the form, to change it or to show it.
+    Row(u64, bool),
+    /// Write the form: a row more, or the row it was read from.
+    Save,
+    Remove(u64),
+    /// Read what a field may hold.
+    Among(usize),
+}
+
 /// A panel that is open: what its list shows, and where in its table.
 pub struct Open {
     pub panel: Panel,
@@ -440,6 +510,22 @@ pub struct Open {
     /// Something was looked for with `Enter`: the reading that follows
     /// says so when no row holds it.
     said: bool,
+    mode: Mode,
+    todo: Todo,
+    /// The row the form is of; none for a row that is added.
+    id: Option<u64>,
+    /// Whether the message is a refusal (a row the table would not
+    /// take): said in red until the next key.
+    refused: bool,
+    /// In the list: the row the keys are on, or none for the line to
+    /// find; and what was typed before a row, if something was.
+    row: Option<usize>,
+    option: Option<u8>,
+    /// What each field of the form holds.
+    inputs: [Input; COLUMNS],
+    /// What the field that was asked about may hold.
+    choices: [Text; ROWS],
+    choice_count: usize,
 }
 
 /// What reading a page needs room for: the cursor that walks the table,
@@ -451,11 +537,13 @@ pub struct Page {
     cursor: sql::Cursor,
     cells: [[Text; sql::MAX_COLUMNS]; ROWS + 1],
     ids: [u64; ROWS + 1],
+    /// The lines of a panel, read again when what a field may hold is asked.
+    lines: [Line; MAX_LINES],
 }
 
 impl Page {
     pub const fn new() -> Page {
-        Page { cursor: sql::Cursor::new(), cells: [[Text::new(); sql::MAX_COLUMNS]; ROWS + 1], ids: [0; ROWS + 1] }
+        Page { cursor: sql::Cursor::new(), cells: [[Text::new(); sql::MAX_COLUMNS]; ROWS + 1], ids: [0; ROWS + 1], lines: [Line::new(); MAX_LINES] }
     }
 }
 
@@ -561,6 +649,15 @@ pub fn open(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
         looked: 0,
         stale: true,
         said: false,
+        mode: Mode::List,
+        todo: Todo::Nothing,
+        id: None,
+        refused: false,
+        row: None,
+        option: None,
+        inputs: [Input::NONE; COLUMNS],
+        choices: [Text::new(); ROWS],
+        choice_count: 0,
     });
     sys.screen = SCREENS.len() + place;
     true
@@ -586,6 +683,7 @@ fn kept_again(sys: &mut System, name: &[u8]) {
         Ok(Some((panel, _))) => {
             if let Some(open) = sys.panels.open[place].as_mut() {
                 (open.panel, open.after, open.back, open.page, open.stale) = (panel, 0, 0, 0, true);
+                (open.mode, open.todo, open.row, open.option) = (Mode::List, Todo::Nothing, None, None);
             }
         }
         _ => close(sys, place),
@@ -705,7 +803,7 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
         widths[at] = room.cells[..open.count].iter().map(|row| row[at].len()).max().unwrap_or(0).max(labels[at].len()).max(1);
     }
     // the widest texts give way first: a number that is cut is another number
-    let space = COLS - 2 - 2 * listed.saturating_sub(1);
+    let space = COLS - 2 - OPT - 2 * listed.saturating_sub(1);
     while widths[..listed].iter().sum::<usize>() > space {
         let texts = (0..listed).filter(|at| !numbers[*at] && widths[*at] > 1).max_by_key(|at| widths[*at]);
         let Some(widest) = texts.or_else(|| (0..listed).filter(|at| widths[*at] > 1).max_by_key(|at| widths[*at])) else {
@@ -726,6 +824,9 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
         }
         (open.ids[row], open.lines[row]) = (room.ids[row], line);
     }
+    // the keys stay on a row that is there
+    open.row = open.row.filter(|_| open.count > 0).map(|row| row.min(open.count - 1));
+    open.option = open.option.filter(|_| open.row.is_some());
     if said && nowhere {
         open.message = FixedStr::from_bytes(b"No listed column is a text: there is nothing to look in.");
     } else if said && open.count == 0 && !open.found.is_empty() {
@@ -733,62 +834,384 @@ fn read(sys: &mut System, place: usize, room: &mut Page) {
     }
 }
 
-/// Handles a key on the screen of a panel.
+/// The field after one, or before it, among those that are typed: the
+/// same when there is no other.
+fn beside(panel: &Panel, at: usize, forward: bool) -> usize {
+    let count = panel.count.max(1);
+    let mut next = at;
+    for _ in 0..count {
+        next = if forward { (next + 1) % count } else { (next + count - 1) % count };
+        if !panel.fields[next].shown {
+            return next;
+        }
+    }
+    at
+}
+
+/// Handles a key on the screen of a panel. A key asks; what reads or
+/// writes tables is done at the next tick of the interface (`refresh`),
+/// and until then the keys wait, but those that leave.
 pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
     let Some(open) = sys.panels.open[place].as_mut() else {
         return;
     };
+    match (event.key, open.mode) {
+        (Key::F(3), _) => return close(sys, place),
+        // the overview, the panel staying as it is
+        (Key::Esc, Mode::List | Mode::Form { .. }) => {
+            sys.screen = 0;
+            return;
+        }
+        _ => {}
+    }
+    if open.stale || open.todo != Todo::Nothing {
+        return;
+    }
     // what could not be read stays said until it is read again
     if !open.failed {
         open.message.clear();
     }
+    open.refused = false;
     let say = |open: &mut Open, text: &[u8]| open.message = FixedStr::from_bytes(text);
-    match event.key {
-        Key::F(3) => return close(sys, place),
-        // the overview, the panel staying open
-        Key::Esc => {
-            sys.screen = 0;
-            return;
-        }
-        // the page that was asked for is not read yet: what these keys
-        // do depends on it, and they wait for it
-        Key::F(5) | Key::PageDown | Key::PageUp | Key::Enter if open.stale => return,
-        Key::F(5) => {}
-        Key::PageDown if !open.more => return say(open, b"This is the last page."),
-        Key::PageDown => {
-            if open.back == BACK {
-                // the oldest way back is forgotten
-                open.starts.copy_within(1.., 0);
-                open.back -= 1;
+    match open.mode {
+        Mode::List => match event.key {
+            Key::F(5) => open.stale = true,
+            Key::F(6) => {
+                open.inputs = [Input::NONE; COLUMNS];
+                (open.id, open.mode) = (None, Mode::Form { shown: false, at: beside(&open.panel, open.panel.count.max(1) - 1, true) });
             }
-            open.starts[open.back] = open.after;
-            (open.back, open.page) = (open.back + 1, open.page + 1);
-            open.after = open.ids[open.count.saturating_sub(1)];
+            Key::PageDown if !open.more => say(open, b"This is the last page."),
+            Key::PageDown => {
+                if open.back == BACK {
+                    // the oldest way back is forgotten
+                    open.starts.copy_within(1.., 0);
+                    open.back -= 1;
+                }
+                open.starts[open.back] = open.after;
+                (open.back, open.page) = (open.back + 1, open.page + 1);
+                open.after = open.ids[open.count.saturating_sub(1)];
+                (open.stale, open.option) = (true, None);
+            }
+            Key::PageUp if open.back == 0 && open.page > 0 => {
+                // further back than is remembered: from the start again
+                (open.after, open.page, open.stale, open.option) = (0, 0, true, None);
+            }
+            Key::PageUp if open.back == 0 => say(open, b"This is the first page."),
+            Key::PageUp => {
+                (open.back, open.page) = (open.back - 1, open.page - 1);
+                (open.after, open.stale, open.option) = (open.starts[open.back], true, None);
+            }
+            // from the line to find down the rows, and back
+            Key::Down | Key::Tab => {
+                let next = match open.row {
+                    None => 0,
+                    Some(row) => row + 1,
+                };
+                if next < open.count {
+                    (open.row, open.option) = (Some(next), None);
+                }
+            }
+            Key::Up => (open.row, open.option) = (open.row.and_then(|row| row.checked_sub(1)), None),
+            // (a letter beyond ASCII is one as any other: tables hold them)
+            Key::Char(typed) if typed >= 0x20 && typed != 0x7f => match open.row {
+                None => {
+                    open.find.push(typed);
+                }
+                Some(_) if matches!(typed, b'2' | b'4' | b'5') => open.option = Some(typed),
+                Some(_) => say(open, b"Before a row: 2 changes it, 4 removes it, 5 shows it."),
+            },
+            Key::Backspace if open.row.is_some() => open.option = None,
+            Key::Backspace => {
+                let shorter = open.find.len().saturating_sub(1);
+                open.find = FixedStr::from_bytes(&open.find.bytes()[..shorter]);
+            }
+            Key::Enter => match open.row {
+                None => (open.found, open.after, open.back, open.page, open.said, open.stale) = (open.find, 0, 0, 0, true, true),
+                Some(row) => {
+                    let id = open.ids[row];
+                    match open.option.take() {
+                        Some(b'2') => open.todo = Todo::Row(id, true),
+                        Some(b'4') => {
+                            open.mode = Mode::Sure(id);
+                            say(open, b"Remove this row? [Enter] removes it, [F12] keeps it.");
+                        }
+                        _ => open.todo = Todo::Row(id, false),
+                    }
+                }
+            },
+            _ => {}
+        },
+        Mode::Sure(id) => match event.key {
+            Key::Enter => (open.mode, open.todo) = (Mode::List, Todo::Remove(id)),
+            Key::F(12) | Key::Esc => {
+                open.mode = Mode::List;
+                say(open, b"Nothing was removed.");
+            }
+            _ => say(open, b"Remove this row? [Enter] removes it, [F12] keeps it."),
+        },
+        Mode::Form { shown, at } => {
+            let field = open.panel.fields[at.min(COLUMNS - 1)];
+            let input = &mut open.inputs[at.min(COLUMNS - 1)];
+            match event.key {
+                Key::F(12) => {
+                    open.mode = Mode::List;
+                    if !shown {
+                        say(open, b"Nothing was changed.");
+                    }
+                }
+                Key::Enter if shown => open.mode = Mode::List,
+                Key::Enter => open.todo = Todo::Save,
+                _ if shown => {}
+                Key::F(4) if field.among => open.todo = Todo::Among(at),
+                Key::F(4) => say(open, b"This field has no list of values to pick from."),
+                Key::Tab | Key::Down => open.mode = Mode::Form { shown, at: beside(&open.panel, at, true) },
+                Key::Up => open.mode = Mode::Form { shown, at: beside(&open.panel, at, false) },
+                Key::Char(typed) if typed >= 0x20 && typed != 0x7f => input.insert(typed),
+                Key::Backspace if input.at > 0 => {
+                    input.at -= 1;
+                    input.remove(input.at);
+                }
+                Key::Delete => input.remove(input.at),
+                Key::Left => input.at = input.at.saturating_sub(1),
+                Key::Right => input.at = (input.at + 1).min(input.text.len()),
+                Key::Home => input.at = 0,
+                Key::End => input.at = input.text.len(),
+                _ => {}
+            }
         }
-        Key::PageUp if open.back == 0 && open.page > 0 => {
-            // further back than is remembered: from the start again
-            (open.after, open.page) = (0, 0);
-        }
-        Key::PageUp if open.back == 0 => return say(open, b"This is the first page."),
-        Key::PageUp => {
-            (open.back, open.page) = (open.back - 1, open.page - 1);
-            open.after = open.starts[open.back];
-        }
-        // (a letter beyond ASCII is one as any other: tables hold them)
-        Key::Char(typed) if typed >= 0x20 && typed != 0x7f => {
-            open.find.push(typed);
-            return;
-        }
-        Key::Backspace => {
-            let shorter = open.find.len().saturating_sub(1);
-            open.find = FixedStr::from_bytes(&open.find.bytes()[..shorter]);
-            return;
-        }
-        Key::Enter => (open.found, open.after, open.back, open.page, open.said) = (open.find, 0, 0, 0, true),
-        _ => return,
+        Mode::Among { field, at } => match event.key {
+            Key::Up => open.mode = Mode::Among { field, at: at.saturating_sub(1) },
+            Key::Down => open.mode = Mode::Among { field, at: (at + 1).min(open.choice_count.saturating_sub(1)) },
+            Key::Enter => {
+                if at < open.choice_count {
+                    open.inputs[field.min(COLUMNS - 1)] = Input::of(open.choices[at].bytes());
+                }
+                open.mode = Mode::Form { shown: false, at: field };
+            }
+            Key::F(12) | Key::Esc => open.mode = Mode::Form { shown: false, at: field },
+            _ => {}
+        },
     }
-    // read at the next tick of the interface, not from under this key
-    open.stale = true;
+}
+
+/// What a line of a panel says a field may hold: what follows `among`.
+fn among_of(line: &[u8]) -> Option<&[u8]> {
+    let (_, rest) = word_of(trim(line));
+    let (_, rest) = split_word(rest);
+    let (_, rest) = text_then(trim(rest))?;
+    let (next, after) = word_of(rest);
+    let rest = if next.bytes() == b"shown" { after } else { rest };
+    let (word, values) = word_of(rest);
+    (word.bytes() == b"among" && !values.is_empty()).then_some(values)
+}
+
+/// Keeps the last thing a statement said, and whether it was a refusal.
+struct Heard {
+    text: FixedStr<COLS>,
+    refused: bool,
+}
+
+impl Out for Heard {
+    fn line(&mut self, style: Style, text: &[u8]) {
+        (self.text, self.refused) = (FixedStr::from_bytes(text), style == Style::Error);
+    }
+
+    fn table(&mut self, _: &Table) {}
+}
+
+/// Writes a value of a form as SQL reads it: a text between quotes, a
+/// quote in it written twice; a number as it was typed, which lets a
+/// calculation be typed there; nothing typed is no value.
+fn written(statement: &mut FixedStr<1024>, typed: &[u8], text: bool) {
+    let typed = trim(typed);
+    if typed.is_empty() {
+        statement.push_bytes(b"null");
+    } else if text {
+        statement.push(b'\'');
+        for byte in typed {
+            statement.push_bytes(if *byte == b'\'' { b"''" } else { core::slice::from_ref(byte) });
+        }
+        statement.push(b'\'');
+    } else {
+        statement.push_bytes(typed);
+    }
+}
+
+/// Does what a key asked of the tables: reads a row into the form,
+/// writes the form, removes a row, reads what a field may hold. Called
+/// at the tick of the interface, as a page is read, and for the same
+/// reason. What is written goes through the statements of SQL, as the
+/// screen of the machine: defaults and checks hold, and who listens to
+/// the table hears of it.
+#[inline(never)]
+fn work(sys: &mut System, place: usize, room: &mut Page) {
+    let Some(open) = sys.panels.open[place].as_mut() else {
+        return;
+    };
+    let (todo, panel, id) = (core::mem::replace(&mut open.todo, Todo::Nothing), open.panel, open.id);
+    let inputs = open.inputs;
+    let mut statement = FixedStr::<1024>::new();
+    let text_of = |schema: &Schema, column: &Name| schema.columns[..schema.count].iter().zip(&schema.kinds).any(|(name, kind)| name == column && *kind == xila_db::Kind::Text);
+    match todo {
+        Todo::Nothing => {}
+        Todo::Row(row, change) => {
+            let _ = write!(statement, "select id");
+            for field in &panel.fields[..panel.count] {
+                statement.push_bytes(b", ");
+                statement.push_bytes(field.column.bytes());
+            }
+            let _ = write!(statement, " from {} where id = {row}", panel.table);
+            let read = room.cursor.open(&*sys, &NO_VARS, statement.bytes()).and_then(|_| room.cursor.next(&*sys, statement.bytes()));
+            room.cursor.close();
+            let Some(open) = sys.panels.open[place].as_mut() else {
+                return;
+            };
+            match read {
+                Ok(Some(values)) => {
+                    for at in 0..panel.count {
+                        open.inputs[at] = Input::of(values[at + 1].shown().bytes());
+                    }
+                    (open.id, open.mode) = (Some(row), Mode::Form { shown: !change, at: beside(&panel, panel.count.max(1) - 1, true) });
+                }
+                Ok(None) => (open.message, open.stale) = (FixedStr::from_bytes(b"This row is no longer there."), true),
+                Err(message) => (open.message, open.refused) = (FixedStr::from_bytes(message.bytes()), true),
+            }
+        }
+        Todo::Save | Todo::Remove(_) => {
+            let schema = match described_on(sys, panel.table.bytes()) {
+                Ok(schema) => schema,
+                Err(message) => {
+                    if let Some(open) = sys.panels.open[place].as_mut() {
+                        (open.message, open.refused) = (FixedStr::from_bytes(message.bytes()), true);
+                    }
+                    return;
+                }
+            };
+            let typed = || panel.fields[..panel.count].iter().zip(&inputs).filter(|(field, _)| !field.shown);
+            let mut nothing = false;
+            match (todo, id) {
+                (Todo::Remove(row), _) => {
+                    let _ = write!(statement, "delete from {} where id = {row}", panel.table);
+                }
+                (_, Some(row)) => {
+                    let _ = write!(statement, "update {} set ", panel.table);
+                    for (at, (field, input)) in typed().enumerate() {
+                        statement.push_bytes(if at > 0 { b", " } else { b"" });
+                        statement.push_bytes(field.column.bytes());
+                        statement.push_bytes(b" = ");
+                        written(&mut statement, input.text.bytes(), text_of(&schema, &field.column));
+                    }
+                    let _ = write!(statement, " where id = {row}");
+                }
+                (_, None) => {
+                    // a field where nothing was typed is left to the table:
+                    // its value by default, or none
+                    let given = || typed().filter(|(_, input)| !trim(input.text.bytes()).is_empty());
+                    nothing = given().next().is_none();
+                    let _ = write!(statement, "insert into {} (", panel.table);
+                    for (at, (field, _)) in given().enumerate() {
+                        statement.push_bytes(if at > 0 { b", " } else { b"" });
+                        statement.push_bytes(field.column.bytes());
+                    }
+                    statement.push_bytes(b") values (");
+                    for (at, (field, input)) in given().enumerate() {
+                        statement.push_bytes(if at > 0 { b", " } else { b"" });
+                        written(&mut statement, input.text.bytes(), text_of(&schema, &field.column));
+                    }
+                    statement.push(b')');
+                }
+            }
+            let mut heard = Heard { text: FixedStr::new(), refused: false };
+            if typed().next().is_none() && !matches!(todo, Todo::Remove(_)) {
+                (heard.text, heard.refused) = (FixedStr::from_bytes(b"This panel has no field that is typed."), true);
+            } else if nothing {
+                (heard.text, heard.refused) = (FixedStr::from_bytes(b"Nothing was typed: there is no row to add."), true);
+            } else {
+                // as who sits at the screen of the machine
+                let session = core::mem::replace(&mut sys.session, crate::events::SCREEN);
+                shell::change(sys, statement.bytes(), &mut heard);
+                sys.session = session;
+            }
+            let Some(open) = sys.panels.open[place].as_mut() else {
+                return;
+            };
+            // a row that went while its form was typed: nothing was written
+            let gone = heard.text.bytes().starts_with(b"0 rows ");
+            (open.message, open.refused) = (if gone { FixedStr::from_bytes(b"This row is no longer there.") } else { heard.text }, heard.refused);
+            if !heard.refused {
+                // written: the list again, read anew
+                (open.mode, open.stale) = (Mode::List, true);
+            }
+        }
+        Todo::Among(at) => {
+            let field = panel.fields[at.min(COLUMNS - 1)];
+            let mut choices = [Text::new(); ROWS];
+            let mut count = 0;
+            let found = (|| -> Result<(), Message> {
+                let loaded = lang::load_from(&sys.db, PANELS, panel.name.bytes(), &mut room.lines)?.ok_or_else(|| unknown(panel.name.bytes()))?;
+                let line = room.lines.get(field.line).filter(|_| field.line < loaded.count).copied().unwrap_or(Line::new());
+                let Some(values) = among_of(line.bytes()) else {
+                    return Ok(());
+                };
+                if word_of(values).0.bytes() == b"select" {
+                    // the first column of what it selects
+                    room.cursor.open(&*sys, &NO_VARS, values)?;
+                    while count < ROWS {
+                        let Some(row) = room.cursor.next(&*sys, values)? else {
+                            break;
+                        };
+                        choices[count] = row[0].shown();
+                        count += 1;
+                    }
+                    return Ok(());
+                }
+                // values written there: texts between quotes, numbers, commas between them
+                let mut rest = values;
+                while !rest.is_empty() && count < ROWS {
+                    let (value, after) = match text_then(rest) {
+                        Some((text, after)) => (unquoted(text), after),
+                        None => {
+                            let end = rest.iter().position(|byte| *byte == b',').unwrap_or(rest.len());
+                            (Text::from_bytes(trim(&rest[..end])), trim(&rest[end..]))
+                        }
+                    };
+                    choices[count] = value;
+                    count += 1;
+                    rest = trim(after.strip_prefix(b",").unwrap_or(after));
+                }
+                Ok(())
+            })();
+            room.cursor.close();
+            let Some(open) = sys.panels.open[place].as_mut() else {
+                return;
+            };
+            match found {
+                Err(message) => (open.message, open.refused) = (FixedStr::from_bytes(message.bytes()), true),
+                Ok(()) if count == 0 => open.message = FixedStr::from_bytes(b"There is nothing to pick from."),
+                Ok(()) => {
+                    (open.choices, open.choice_count) = (choices, count);
+                    // on the value the field holds, if it is one of them
+                    let held = choices[..count].iter().position(|choice| choice.bytes() == trim(inputs[at.min(COLUMNS - 1)].text.bytes())).unwrap_or(0);
+                    open.mode = Mode::Among { field: at, at: held };
+                }
+            }
+        }
+    }
+}
+
+/// The text between the quotes of a text as it is written, of any
+/// length a value has.
+fn unquoted(written: &[u8]) -> Text {
+    let inner = written.strip_prefix(b"'").and_then(|rest| rest.strip_suffix(b"'")).unwrap_or(written);
+    let mut text = Text::new();
+    let mut bytes = inner.iter();
+    while let Some(byte) = bytes.next() {
+        if *byte == b'\'' {
+            bytes.next();
+        }
+        text.push(*byte);
+    }
+    text
 }
 
 /// Reads the list of the panel that is shown when it is to be read: it
@@ -810,15 +1233,25 @@ pub fn refresh(sys: &mut System, room: &mut Page) -> bool {
     let Some(open) = sys.panels.open[place].as_mut() else {
         return false;
     };
-    if !open.stale && (stored < open.read || now < open.looked + AGAIN) {
-        return false;
+    // what a key asked of the tables, then the list if it is to be read
+    let asked = open.todo != Todo::Nothing;
+    if asked {
+        work(sys, place, room);
+    }
+    let Some(open) = sys.panels.open[place].as_mut() else {
+        return asked;
+    };
+    // (a form that is being typed is not disturbed by what others store)
+    if !open.stale && (open.mode != Mode::List || stored < open.read || now < open.looked + AGAIN) {
+        return asked;
     }
     open.looked = now;
     read(sys, place, room);
     true
 }
 
-/// Draws the panel of a place on the rows of the grid from `top` down.
+/// Draws the panel of a place on the rows of the grid from `top` down:
+/// its list, its form, or what a field may hold.
 pub fn draw(sys: &System, place: usize, grid: &mut Grid, top: usize) {
     let Some(open) = sys.panels.open[place].as_ref() else {
         return;
@@ -828,26 +1261,90 @@ pub fn draw(sys: &System, place: usize, grid: &mut Grid, top: usize) {
     for row in top..grid.rows {
         grid.fill(row, 0, COLS, blank);
     }
-    grid.text(1, top + 1, open.panel.title.bytes(), role::TERM_PROMPT, bg);
-    let mut page = FixedStr::<16>::new();
-    let _ = write!(page, "page {}", open.page + 1);
-    grid.text(COLS - 1 - page.len(), top + 1, page.bytes(), role::TERM_OUT, bg);
-    let after = grid.text(1, top + 2, b"Find: ", role::TERM_OUT, bg);
-    let end = grid.text(after, top + 2, open.find.bytes(), role::TERM_CMD, bg);
-    grid.put(end, top + 2, Cell { ch: b' ', fg: role::TERM_CMD, bg, fx: fx::PULSE });
-    grid.text(0, top + 4, open.header.bytes(), role::TERM_PROMPT, bg);
     let last = grid.rows.saturating_sub(1);
-    for (at, line) in open.lines[..open.count].iter().enumerate() {
-        if top + HEAD + at + FOOT > last {
-            break;
+    let right = |grid: &mut Grid, text: &[u8]| {
+        grid.text(COLS - 1 - text.len().min(COLS - 1), top + 1, text, role::TERM_OUT, bg);
+    };
+    grid.text(1, top + 1, open.panel.title.bytes(), role::TERM_PROMPT, bg);
+    grid.text(1, last.saturating_sub(2), open.message.bytes(), if open.failed || open.refused { role::ERROR } else { role::TERM_CMD }, bg);
+    match open.mode {
+        Mode::List | Mode::Sure(_) => {
+            let mut page = FixedStr::<16>::new();
+            let _ = write!(page, "page {}", open.page + 1);
+            right(grid, page.bytes());
+            let after = grid.text(1, top + 2, b"Find: ", role::TERM_OUT, bg);
+            let end = grid.text(after, top + 2, open.find.bytes(), role::TERM_CMD, bg);
+            if open.row.is_none() && open.mode == Mode::List {
+                grid.put(end, top + 2, Cell { ch: b' ', fg: role::TERM_CMD, bg, fx: fx::PULSE });
+            }
+            if !open.header.is_empty() {
+                grid.text(1, top + 4, b"Opt", role::TERM_PROMPT, bg);
+            }
+            grid.text(OPT, top + 4, open.header.bytes(), role::TERM_PROMPT, bg);
+            for (at, line) in open.lines[..open.count].iter().enumerate() {
+                if top + HEAD + at + FOOT > last {
+                    break;
+                }
+                // what is typed before the row the keys are on, or its place
+                let (mark, pulse) = match (open.row == Some(at), open.option) {
+                    (true, Some(option)) => (option, fx::PULSE),
+                    (true, None) => (b'_', fx::PULSE),
+                    (false, _) => (b'_', 0),
+                };
+                grid.put(2, top + HEAD + at, Cell { ch: mark, fg: role::TERM_CMD, bg, fx: pulse });
+                grid.text(OPT, top + HEAD + at, line.bytes(), role::TERM_OUT, bg);
+            }
+            if open.count == 0 && !open.failed && open.message.is_empty() && !open.stale {
+                grid.text(1, top + HEAD, b"(no rows)", role::TERM_OUT, bg);
+            }
+            if matches!(open.mode, Mode::Sure(_)) {
+                grid.text(1, last, b"Enter=Remove  F12=Keep", role::TERM_PROMPT, bg);
+            } else {
+                grid.text(1, last - 1, b"2=Change  4=Remove  5=Display", role::TERM_PROMPT, bg);
+                grid.text(1, last, b"F3=Exit  F5=Refresh  F6=Add  PgUp/PgDn=Pages  Enter=Go  Esc=Overview", role::TERM_PROMPT, bg);
+            }
         }
-        grid.text(0, top + HEAD + at, line.bytes(), role::TERM_OUT, bg);
+        Mode::Form { shown, at } => {
+            let mut what = FixedStr::<24>::new();
+            let _ = match (open.id, shown) {
+                (None, _) => write!(what, "a row to add"),
+                (Some(id), true) => write!(what, "row {id}"),
+                (Some(id), false) => write!(what, "row {id}, changed"),
+            };
+            right(grid, what.bytes());
+            // the labels, then dots up to the values, which start in one column
+            let width = open.panel.fields[..open.panel.count].iter().map(|field| field.label.len()).max().unwrap_or(0) + 3;
+            for (index, (field, input)) in open.panel.fields[..open.panel.count].iter().zip(&open.inputs).enumerate() {
+                let row = top + 3 + index;
+                if row + FOOT > last {
+                    break;
+                }
+                let end = grid.text(1, row, field.label.bytes(), role::TERM_OUT, bg);
+                grid.fill(row, end + 1, 1 + width, Cell::new(b'.', role::TERM_OUT, bg));
+                let typed = !shown && !field.shown;
+                let from = grid.text(1 + width, row, b" : ", role::TERM_OUT, bg);
+                grid.text(from, row, input.text.bytes(), if typed { role::TERM_CMD } else { role::TERM_OUT }, bg);
+                if typed && index == at {
+                    let under = input.text.bytes().get(input.at).copied().unwrap_or(b' ');
+                    grid.put(from + input.at, row, Cell { ch: under, fg: role::TERM_CMD, bg, fx: fx::PULSE });
+                }
+            }
+            grid.text(1, last, if shown { &b"Enter=Back  F12=Back  F3=Exit"[..] } else { b"Enter=Save  Tab=Next field  F4=Values  F12=Cancel  F3=Exit" }, role::TERM_PROMPT, bg);
+        }
+        Mode::Among { field, at } => {
+            right(grid, open.panel.fields[field.min(COLUMNS - 1)].label.bytes());
+            // the values around the one the keys are on, as many as the screen has rows for
+            let room = last.saturating_sub(top + 3 + FOOT).max(1);
+            let first = at.saturating_sub(room - 1);
+            for (shown, choice) in open.choices[..open.choice_count].iter().enumerate().skip(first).take(room) {
+                let row = top + 3 + shown - first;
+                let (fg, back) = if shown == at { (role::TERM_BASE, role::TERM_CMD) } else { (role::TERM_OUT, bg) };
+                grid.fill(row, 1, 52, Cell::new(b' ', fg, back));
+                grid.text(2, row, choice.bytes(), fg, back);
+            }
+            grid.text(1, last, b"Enter=Pick  Up/Down=Move  F12=Back", role::TERM_PROMPT, bg);
+        }
     }
-    if open.count == 0 && !open.failed && open.message.is_empty() && !open.stale {
-        grid.text(1, top + HEAD, b"(no rows)", role::TERM_OUT, bg);
-    }
-    grid.text(1, last.saturating_sub(1), open.message.bytes(), if open.failed { role::ERROR } else { role::TERM_CMD }, bg);
-    grid.text(1, last, b"F3=Exit  F5=Refresh  PgUp/PgDn=Pages  Enter=Find  Esc=Overview", role::TERM_PROMPT, bg);
 }
 
 #[cfg(test)]
@@ -894,7 +1391,9 @@ pub(crate) mod tests {
         // typed again it is replaced; with nothing said, it lists every column but the id under its name
         assert_eq!(said(&mut sys, &["panel stock on items", "end"]), ["Panel stock replaced: 0 lines."]);
         let (panel, _) = load(&sys, b"stock", &mut lines).unwrap().unwrap();
-        assert_eq!((panel.title.bytes(), panel.listed, panel.count, panel.label(&panel.list[3]).bytes()), (&b"stock"[..], 4, 0, &b"qty"[..]));
+        // ...and every column but the id is a field of its form
+        assert_eq!((panel.title.bytes(), panel.listed, panel.count, panel.label(&panel.list[3]).bytes()), (&b"stock"[..], 4, 4, &b"qty"[..]));
+        assert!(panel.fields[..4].iter().all(|field| !field.shown && !field.among));
         assert_eq!(said(&mut sys, &["select count(*) from panels"]), ["   count", "   2"]);
         // dropped
         assert_eq!(said(&mut sys, &["drop panel stock"]), ["Panel stock removed."]);

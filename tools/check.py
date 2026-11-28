@@ -696,27 +696,27 @@ with Xila(disk=disk) as x:
     x.type("stock")
     x.key("ret")
     rows = body(x)
-    things = [row.split("  ")[0].strip() for row in rows if row.startswith(" thing")]
+    things = [row[4:].split("  ")[0].strip() for row in rows if row[4:].startswith(" thing")]
     check("its name opens it as a screen of its own: its title, its columns under their labels, a page of its rows",
           title(x) == "STOCK" and rows[0].strip().startswith("The stock") and rows[0].endswith("page 1") and rows[1].strip() == "Find:"
-          and rows[2].split() == ["label", "Where", "it", "is", "In", "stock"] and things == ["thing %d" % n for n in range(38)]
-          and rows[-1].strip().startswith("F3=Exit"), rows[:4] + rows[-2:])
+          and rows[2].split() == ["Opt", "label", "Where", "it", "is", "In", "stock"] and things == ["thing %d" % n for n in range(37)]
+          and rows[-2].strip() == "2=Change  4=Remove  5=Display" and rows[-1].strip().startswith("F3=Exit"), rows[:4] + rows[-2:])
     check("numbers are to the right of their column", rows[3].endswith(" 0") and rows[4].endswith("10") and len(rows[3]) == len(rows[4]), rows[3:5])
     x.key("pgdn")
     rows = body(x)
-    things = [row.split("  ")[0].strip() for row in rows if row.startswith(" thing")]
-    check("PgDn shows the next page", rows[0].endswith("page 2") and things == ["thing %d" % n for n in range(38, 60)], rows[:4])
+    things = [row[4:].split("  ")[0].strip() for row in rows if row[4:].startswith(" thing")]
+    check("PgDn shows the next page", rows[0].endswith("page 2") and things == ["thing %d" % n for n in range(37, 60)], rows[:4])
     x.key("pgdn")
-    check("and says when it is the last", body(x)[-2].strip() == "This is the last page.", body(x)[-2:])
+    check("and says when it is the last", body(x)[-3].strip() == "This is the last page.", body(x)[-3:])
     x.key("pgup")
-    check("PgUp goes back", body(x)[0].endswith("page 1") and body(x)[3].strip().startswith("thing 0"), body(x)[:4])
+    check("PgUp goes back", body(x)[0].endswith("page 1") and body(x)[3][4:].strip().startswith("thing 0"), body(x)[:4])
     x.type("thing 5")
     x.key("ret")
-    things = [row.split("  ")[0].strip() for row in body(x) if row.startswith(" thing")]
+    things = [row[4:].split("  ")[0].strip() for row in body(x) if row[4:].startswith(" thing")]
     check("the line to find keeps the rows that hold what is typed", things == ["thing 5"] + ["thing %d" % n for n in range(50, 60)], things)
     x.cmd("insert into shelf values ('thing 500', 'door', 1)")
     time.sleep(1.6)
-    things = [row.split("  ")[0].strip() for row in body(x) if row.startswith(" thing")]
+    things = [row[4:].split("  ")[0].strip() for row in body(x) if row[4:].startswith(" thing")]
     check("the list follows its table: a row added elsewhere is shown without a key", things[-1:] == ["thing 500"] and len(things) == 12, things)
     x.key("esc")
     screens = x.table("select id, name, shown from screens")
@@ -727,7 +727,61 @@ with Xila(disk=disk) as x:
     x.key("f3")
     screens = x.table("select name from screens")
     check("F3 leaves it: its screen is no more", title(x) == "OVERVIEW" and len(screens) == 3, screens)
+    # the form: a row is added, shown, changed and removed with the keys, through SQL
+    for line in ("panel edit on shelf", "list label, place, qty", "end"):
+        x.cmd(line)
+    x.type("edit")
+    x.key("ret")
+    x.key("f6")
+    adding = body(x)
+    x.type("thing new")
+    x.key("tab")
+    x.type("door")
+    x.key("tab")
+    x.type("3 * 4")
+    x.key("ret")
+    time.sleep(0.3)
+    added, said = x.table("select place, qty from shelf where label = 'thing new'"), body(x)[-3].strip()
+    check("F6 shows the form of a row to add, and Enter writes it as a statement of SQL would",
+          adding[0].endswith("a row to add") and adding[-1].strip().startswith("Enter=Save") and added == [{"place": "door", "qty": "12"}]
+          and re.fullmatch(r"1 row added to shelf, with id \d+\.", said), (adding[:4], added, said))
+    x.type("thing new")
+    x.key("ret")
+    x.key("down")
+    x.type("2")
+    x.key("ret")
+    time.sleep(0.3)
+    changing = [" ".join(row.replace(".", " ").split()) for row in body(x)]
+    for name in ("tab", "tab", "backspace", "backspace"):
+        x.key(name)
+    x.type("x")
+    x.key("ret")
+    time.sleep(0.3)
+    refused = body(x)[-2].strip()
+    x.key("backspace")
+    x.type("7")
+    x.key("ret")
+    time.sleep(0.3)
+    changed, said = x.table("select place, qty from shelf where label = 'thing new'"), body(x)[-3].strip()
+    check("2 before a row shows its form with what it holds",
+          changing[0].endswith("changed") and changing[1:4] == ["label : thing new", "place : door", "qty : 12"], changing[:4])
+    check("what the table refuses is said in the form, which stays", "qty" in refused and "number" in refused, refused)
+    check("and Enter writes the change", changed == [{"place": "door", "qty": "7"}] and said == "1 row changed in shelf.", (changed, said))
+    x.type("4")
+    x.key("ret")
+    asked = body(x)[-2].strip()
+    x.key("f12")
+    kept = len(x.table("select id from shelf where label = 'thing new'"))
+    x.type("4")
+    x.key("ret")
+    x.key("ret")
+    time.sleep(0.3)
+    gone, said = len(x.table("select id from shelf where label = 'thing new'")), body(x)[-3].strip()
+    check("4 asks before it removes a row: F12 keeps it, Enter removes it",
+          asked == "Remove this row? [Enter] removes it, [F12] keeps it." and (kept, gone) == (1, 0) and said == "1 row removed from shelf.", (asked, kept, gone, said))
+    x.key("f3")
     x.cmd("drop panel stock")
+    x.cmd("drop panel edit")
     x.cmd("drop table shelf")
     x.cmd("drop table panels")
     # what is wrong with the form of a program is told when it is kept
