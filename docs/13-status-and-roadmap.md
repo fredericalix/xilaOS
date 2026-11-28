@@ -662,6 +662,43 @@ submit restock('cable', 5)
   called it are put aside in the room of the machine, and come back
   when it leaves, however it leaves.
 
+**The commands that wait for the network** (step 4; the author's
+choices of 28 November 2026). `net ping`, `net name`, `net get`,
+`net post` and `install from` each held the whole system in a loop of
+the kernel until their answer: a second, three, five of silence, a
+minute.
+
+- **A wait belongs to its job.** What was asked, how far it is and
+  what came back are kept with the job that asked, not in the one
+  place the kernel has for a request: the job is `waiting`, the
+  others run. When the answer is there, who gives the job its turns
+  says it where the job says, and the job goes on.
+- **A line typed alone waits the same way** at the screen and at the
+  serial port: it becomes a job that prompt waits for, so the system
+  lives and `Esc` or Ctrl+C gives the question up. With no place left
+  among the jobs it runs at once, as before, rather than be refused.
+- **Really side by side.** Each job has its own conversation: pages
+  (`net get`, `net post`) over TCP, which holds eight, one of them
+  for the pages of browsers and one for the companion, so a ninth
+  waits for one to end; pings, of which the network follows eight;
+  names, of which it asks four at a time. `install from` is the one
+  that is alone: there is one room in memory for a system that was
+  fetched, and a second waits for it.
+- **A task of the kernel carries the network** while something is
+  asked: it reads the card and moves every question one step, then
+  gives the lock back. At one step a tick `install from` would take
+  most of a minute; so it does not rest while frames come.
+- **A job that is stopped while it waits** hangs up.
+- **What still runs at once** (the prompt over the network, what the
+  companion runs, a system with no rooms) goes through the same
+  questions, carried to their end without the lock being given back:
+  the author's choice of 27 November for those two stands.
+- **Not this step**: `install` writing a disk, `disk check`, a
+  `select` over a large table. One instruction is still whole.
+- The questions are in `core/` with their tests; the kernel reads the
+  card, tells the time and keeps what needs its memory (a TLS client
+  for each page asked in secret, the room of a fetched system).
+
 **The steps.** Each is merged when its unit tests and its checks
 pass.
 
@@ -702,9 +739,9 @@ pass.
    of on a stack of 2 MB, so they are given 8 MB; and a program that
    gives nothing back says what it found only through a table or
    `say`, which the screens will have to live with or change.
-4. The commands that wait for the network (`net get`, `net ping`,
-   `install from`) as waits of a job, so that they hold nothing
-   either.
+4. The commands that wait for the network as waits of a job, so
+   that they hold nothing either, as chosen with the author on 28
+   November 2026 (above).
 
 Then the screens, and the stock of equipment.
 
