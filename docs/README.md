@@ -31,6 +31,8 @@ The same content as one file: [xilaos.pdf](xilaos.pdf) (rebuild it with
 
 14. [The companion](14-the-companion.md): what to ask it, what it
     sees and does, what holds it, what is kept, how it is built.
+15. [Panels](15-panels.md): the screens of applications, described on
+    a table: the list, its keys, its limits.
 
 ## Working on it
 

@@ -41,6 +41,7 @@ were also tried on the real machine.
 | Programs as jobs that hold nothing: the screen and the serial port wait for a program while the system lives (`Esc`, `Alt`+`B`, Ctrl+C); `submit`, `jobs`, `job`; the programs that run by themselves as jobs; `job_log` | yes | not tried |
 | Programs that take values (`program restock(item, count)`, `restock('cable', 5)`, `submit restock(...)`) and have names of their own | yes | not tried |
 | Commands that wait for the network (`net ping`, `net name`, `net get`, `net post`, `install from`) as waits of a job: the system lives, several go on side by side | yes | not tried |
+| Panels, the screens of applications: described on a table, kept and listed; opened as virtual screens that list their rows page by page, with a line to find; function keys | yes | not tried |
 | Clock, `now` and `today`, `every day at` | yes | yes |
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
@@ -107,7 +108,7 @@ nothing beyond a code sent in clear.** Details in
 **Hardware.** One real machine. PS/2 keyboard only, no USB, no NVMe, no
 sound, no Wi-Fi. Details in [Hardware and graphics](11-hardware.md).
 
-**Interface.** Three virtual screens (the overview, the boot log and the companion's). The
+**Interface.** Three virtual screens (the overview, the boot log and the companion's), and one for each panel that is open, four at most. A panel lists the rows of its table and does not change them yet. The
 `sound` and `irc` labels of the header come from the mock-up and have
 nothing behind them.
 
@@ -833,8 +834,9 @@ end
 
 In four steps, each merged when its unit tests and its checks pass:
 
-1. The panel as an object, the function keys, the list in its
-   virtual screen, the line to find.
+1. Done on 28 November 2026: the panel as an object, the function
+   keys, the list in its virtual screen, the line to find
+   ([Panels](15-panels.md)).
 2. The form: display, add, change, remove; `F4` and `among`.
 3. Panels opened from a row, and programs on a key or an option.
 4. The stock: its text in the repository, the tool that sends it, its

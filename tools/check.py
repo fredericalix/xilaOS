@@ -675,6 +675,61 @@ with Xila(disk=disk) as x:
         x.cmd("drop program " + name)
     for table in ("stocked", "arrivals", "job_log"):
         x.cmd("drop table " + table)
+    # panels: the screens of applications. A panel is described on a table,
+    # kept as a program is, and opens as a virtual screen of its own.
+    x.cmd("create table shelf (label text, place text, qty int)")
+    for first in range(0, 60, 4):
+        x.cmd("insert into shelf values " + ", ".join("('thing %d', 'shelf %d', %d)" % (n, n % 4, n * 10) for n in range(first, first + 4)))
+    for line in ("panel stock on shelf", "title 'The stock'", "list label, place, qty", "field place 'Where it is'", "field qty 'In stock'"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("panel keeps the screen of an application, described on a table", ok and lines == ["Panel stock kept: 4 lines."], lines)
+    shown, kept = x.cmd("show panel stock")[1], x.table("panels")
+    check("show panel and panels give it back", shown[0] == "panel stock on shelf" and shown[-1] == "end" and kept == [{"name": "stock", "on": "shelf", "lines": "4"}], (shown, kept))
+    for line in ("panel wrong on shelf", "list label, colour"):
+        x.cmd(line)
+    ok, lines = x.cmd("end")
+    check("a panel with a fault of form is not kept",
+          not ok and lines == ["Unknown column: colour. The table shelf has no such column.", "Line 1 is not right: the panel is not kept."], lines)
+    ok, lines = x.cmd("stock")
+    check("a panel opens at the screen of the machine, not at the serial port", not ok and lines == ["A panel opens at the screen of the machine: stock."], lines)
+    x.type("stock")
+    x.key("ret")
+    rows = body(x)
+    things = [row.split("  ")[0].strip() for row in rows if row.startswith(" thing")]
+    check("its name opens it as a screen of its own: its title, its columns under their labels, a page of its rows",
+          title(x) == "STOCK" and rows[0].strip().startswith("The stock") and rows[0].endswith("page 1") and rows[1].strip() == "Find:"
+          and rows[2].split() == ["label", "Where", "it", "is", "In", "stock"] and things == ["thing %d" % n for n in range(38)]
+          and rows[-1].strip().startswith("F3=Exit"), rows[:4] + rows[-2:])
+    check("numbers are to the right of their column", rows[3].endswith(" 0") and rows[4].endswith("10") and len(rows[3]) == len(rows[4]), rows[3:5])
+    x.key("pgdn")
+    rows = body(x)
+    things = [row.split("  ")[0].strip() for row in rows if row.startswith(" thing")]
+    check("PgDn shows the next page", rows[0].endswith("page 2") and things == ["thing %d" % n for n in range(38, 60)], rows[:4])
+    x.key("pgdn")
+    check("and says when it is the last", body(x)[-2].strip() == "This is the last page.", body(x)[-2:])
+    x.key("pgup")
+    check("PgUp goes back", body(x)[0].endswith("page 1") and body(x)[3].strip().startswith("thing 0"), body(x)[:4])
+    x.type("thing 5")
+    x.key("ret")
+    things = [row.split("  ")[0].strip() for row in body(x) if row.startswith(" thing")]
+    check("the line to find keeps the rows that hold what is typed", things == ["thing 5"] + ["thing %d" % n for n in range(50, 60)], things)
+    x.cmd("insert into shelf values ('thing 500', 'door', 1)")
+    time.sleep(1.6)
+    things = [row.split("  ")[0].strip() for row in body(x) if row.startswith(" thing")]
+    check("the list follows its table: a row added elsewhere is shown without a key", things[-1:] == ["thing 500"] and len(things) == 12, things)
+    x.key("esc")
+    screens = x.table("select id, name, shown from screens")
+    check("Esc shows the overview, and the panel stays open as a screen",
+          title(x) == "OVERVIEW" and screens[3:] == [{"id": "3", "name": "stock", "shown": ""}], screens)
+    x.key("alt-3")
+    check("Alt and its digit go back to it", title(x) == "STOCK" and body(x)[1].strip() == "Find: thing 5", body(x)[:2])
+    x.key("f3")
+    screens = x.table("select name from screens")
+    check("F3 leaves it: its screen is no more", title(x) == "OVERVIEW" and len(screens) == 3, screens)
+    x.cmd("drop panel stock")
+    x.cmd("drop table shelf")
+    x.cmd("drop table panels")
     # what is wrong with the form of a program is told when it is kept
     for line in ("program bad", "say 'one'", "say 2 +"):
         x.cmd(line)
@@ -734,7 +789,7 @@ with Xila(disk=disk) as x:
           ok and lines == ["alive"] and not any("Read this code" in row for row in seen) and any("qr is typed at a prompt" in row for row in logged), (lines, logged))
     x.cmd("drop program on_notify_typed")
     ok, lines = x.cmd("help l")
-    check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 28, lines[:2])
+    check("help l describes the language", ok and lines[0].startswith("XilaScript") and len(lines) == 31, lines[:2])
     x.cmd("drop program broken")
 
     # programs that run by themselves

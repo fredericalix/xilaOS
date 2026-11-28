@@ -120,6 +120,7 @@ storage engine allocates.
 | `code.rs` | 431 | XilaScript compiled: the instructions, the compiler, the faults of form. |
 | `machine.rs` | 921 | The virtual machine that runs them: units, programs three deep with names of their own, loops over rows; turns, and the rooms it runs in. |
 | `jobs.rs` | 897 | Jobs: programs that run turn by turn as who started them, what they said, `job_log`. |
+| `panel.rs` | 620 | Panels, the screens of applications: described on a table, kept as programs are, opened as virtual screens that list their rows. |
 | `waits.rs` | 380 | What jobs asked of the network and wait for: a ping, a name, a page, a fetched system, a step at a time. |
 | `tcp.rs` | 1,305 | TCP as a state machine with no hardware. |
 | `net.rs` | 1,015 | Ethernet, ARP, IPv4, ICMP, UDP, the DHCP client. |

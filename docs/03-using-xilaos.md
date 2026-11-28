@@ -88,6 +88,10 @@ The keys, all of them (`help k` lists them on the system):
 | `Backspace`, `Delete` | Remove the character before the cursor, or under it. |
 | `Enter` | Runs the line. |
 
+On the screen of a panel, the screen of an application, the keys are the
+panel's: `F3` leaves it, `PgUp` and `PgDn` turn its pages, what is typed
+goes to its line to find ([Panels](15-panels.md)).
+
 On the boot log screen there is no prompt: only `PgUp`, `PgDn`, `Esc` and the
 `Alt` keys do something there. While a QR code is on the screen, any key puts
 it away and does nothing else.
@@ -614,6 +618,7 @@ See [XilaScript](05-xilascript.md).
 | `submit`, `jobs`, `job 3` | Runs a program as a job nobody waits for; lists the jobs; shows one (`job 3 end`, `hold`, `release`). |
 | `on`, `every` | Programs that run by themselves: when a table changes, or at a regular pace. |
 | `programs`, `show name`, `drop program name` | Lists the programs, shows one, removes one. |
+| `panel`, `panels`, `show panel name`, `drop panel name` | Keeps the screen of an application, described on a table; lists them, shows one, removes one. Its name opens it ([Panels](15-panels.md)). |
 | `vars` | Lists the names that have a value. |
 | `cancel` | Drops the lines typed since a block was opened. |
 
