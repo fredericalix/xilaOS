@@ -17,6 +17,8 @@ pub enum Key {
     Home,
     End,
     Delete,
+    /// A function key: F1 to F12, by its number.
+    F(u8),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -211,6 +213,10 @@ impl Decoder {
                 0x0e => Key::Backspace,
                 0x0f => Key::Tab,
                 0x1c => Key::Enter,
+                // F1 to F10 follow each other; F11 and F12 came later, elsewhere
+                0x3b..=0x44 => Key::F((code - 0x3a) as u8),
+                0x57 => Key::F(11),
+                0x58 => Key::F(12),
                 _ if code >= 0x58 => return None,
                 _ => {
                     if (0x02..=0x0b).contains(&code) {
@@ -318,6 +324,22 @@ mod tests {
         assert_eq!(ev.digit, Some(1));
         let ev = d.feed(Layout::Fr, 0x0b).unwrap();
         assert_eq!(ev.digit, Some(0));
+    }
+
+    #[test]
+    fn function_keys_are_keys() {
+        for layout in [Layout::Us, Layout::Fr] {
+            let mut d = Decoder::new();
+            // F1 to F10 follow each other; F11 and F12 came later, elsewhere
+            for (code, number) in (0x3bu8..=0x44).zip(1u8..).chain([(0x57, 11), (0x58, 12)]) {
+                assert_eq!(d.feed(layout, code).map(|event| event.key), Some(Key::F(number)), "F{number}");
+                assert_eq!(d.feed(layout, code | 0x80), None, "its release");
+            }
+            // with Alt held, it is still that key
+            d.feed(layout, 0x38);
+            let event = d.feed(layout, 0x3d).unwrap();
+            assert_eq!((event.key, event.alt), (Key::F(3), true));
+        }
     }
 
     #[test]
