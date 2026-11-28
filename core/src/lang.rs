@@ -110,6 +110,93 @@ pub(crate) fn free_name(name: &[u8]) -> bool {
     xila_db::good_name(name) && !WORDS.contains(&lower.bytes()) && !shell::knows(lower.bytes())
 }
 
+/// Values a program takes at most.
+pub(crate) const PARAMS: usize = 8;
+
+/// A call as it is written: the name of a program, then nothing, or the
+/// values it is given between parentheses, to the end of the text.
+/// Gives the name and what is between the parentheses, empty for none.
+/// None for anything else: `restock 5` is not a call.
+pub(crate) fn call_of(text: &[u8]) -> Option<(&[u8], &[u8])> {
+    let text = trim(text);
+    let end = text.iter().position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_')).unwrap_or(text.len());
+    let (name, rest) = (&text[..end], trim(&text[end..]));
+    if name.is_empty() {
+        return None;
+    }
+    if rest.is_empty() {
+        return Some((name, b""));
+    }
+    // the parenthesis that opens must be closed by the last character;
+    // what a text holds between its quotes opens and closes nothing
+    let (mut depth, mut quoted) = (0usize, false);
+    for (at, byte) in rest.iter().enumerate() {
+        match byte {
+            b'\'' => quoted = !quoted,
+            b'(' if !quoted => depth += 1,
+            b')' if !quoted => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return (at == rest.len() - 1).then(|| (name, trim(&rest[1..at])));
+                }
+            }
+            _ if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The names of the values a program takes, in their order.
+pub(crate) struct Params {
+    names: [FixedStr<VAR_NAME>; PARAMS],
+    count: usize,
+}
+
+impl Params {
+    /// Reads them as they are written between the parentheses of
+    /// `program name(item, count)`. Nothing written is none.
+    pub(crate) fn read(written: &[u8]) -> Result<Params, Message> {
+        let mut params = Params { names: [FixedStr::new(); PARAMS], count: 0 };
+        if trim(written).is_empty() {
+            return Ok(params);
+        }
+        for name in written.split(|byte| *byte == b',').map(trim) {
+            if !free_name(name) {
+                return Err(Message::from_bytes(b"A parameter is named like a value: a letter, then letters, digits or _."));
+            }
+            if params.count == PARAMS {
+                return Err(Message::from_bytes(b"A program takes eight values at most."));
+            }
+            let mut lower = FixedStr::<VAR_NAME>::from_bytes(name);
+            lower.lower();
+            if params.names().contains(&lower) {
+                return Err(sql::error(b"Two parameters cannot share a name: ", lower.bytes()).also(b"."));
+            }
+            params.names[params.count] = lower;
+            params.count += 1;
+        }
+        Ok(params)
+    }
+
+    pub(crate) fn names(&self) -> &[FixedStr<VAR_NAME>] {
+        &self.names[..self.count]
+    }
+
+    /// As they are kept and shown: `(item, count)`. Nothing for none.
+    pub(crate) fn written(&self) -> Line {
+        let mut line = Line::new();
+        for (at, name) in self.names().iter().enumerate() {
+            line.push_bytes(if at == 0 { b"(" } else { b", " });
+            line.push_bytes(name.bytes());
+        }
+        if self.count > 0 {
+            line.push(b')');
+        }
+        line
+    }
+}
+
 /// The lines typed since a block was opened.
 pub struct Block {
     lines: [Line; MAX_LINES],
@@ -248,29 +335,43 @@ fn programs(db: &Database) -> Result<Option<usize>, Message> {
     Ok(Some(table))
 }
 
+/// A program as it is read from its table: how many lines, and the
+/// names of the values it takes, as written between its parentheses
+/// (nothing when it takes none).
+pub(crate) struct Loaded {
+    pub count: usize,
+    pub takes: Line,
+}
+
 /// Reads the lines of a program. `None` if there is no such program.
-pub(crate) fn load(db: &Database, name: &[u8], into: &mut [Line; MAX_LINES]) -> Result<Option<usize>, Message> {
+pub(crate) fn load(db: &Database, name: &[u8], into: &mut [Line; MAX_LINES]) -> Result<Option<Loaded>, Message> {
     let Some(table) = programs(db)? else {
         return Ok(None);
     };
-    let (mut count, mut found) = (0, false);
+    let (mut loaded, mut found) = (Loaded { count: 0, takes: Line::new() }, false);
     db.scan(table, &mut |fields| {
         if let (Field::Text(of), Field::Int(number), Field::Text(text)) = (fields[1], fields[2], fields[3]) {
             if of.eq_ignore_ascii_case(name) {
                 found = true;
-                // line 0 says when the program runs by itself
-                if number > 0 && count < MAX_LINES {
-                    into[count] = Line::from_bytes(text);
-                    count += 1;
+                // line 0 is not one of its lines: it says what values the
+                // program takes, or when it runs by itself
+                if number > 0 && loaded.count < MAX_LINES {
+                    into[loaded.count] = Line::from_bytes(text);
+                    loaded.count += 1;
+                } else if number == 0 {
+                    if let Some(takes) = text.strip_prefix(b"(").and_then(|rest| rest.strip_suffix(b")")) {
+                        loaded.takes = Line::from_bytes(takes);
+                    }
                 }
             }
         }
     })
     .map_err(|error| engine_error(error, None))?;
-    Ok(found.then_some(count))
+    Ok(found.then_some(loaded))
 }
 
-/// The line that says when a program runs by itself, if it does.
+/// Line 0 of a program, if it has one: the values it takes between
+/// parentheses, or when it runs by itself.
 fn header(db: &Database, name: &[u8]) -> Option<Line> {
     let table = programs(db).ok()??;
     let mut found = None;
@@ -295,15 +396,16 @@ pub fn exists(db: &Database, name: &[u8]) -> bool {
 }
 
 /// Puts the lines of a program in the database, in place of the ones it
-/// had. Returns whether the program was there before.
-fn store(db: &mut Database, name: &[u8], runs: Option<&[u8]>, lines: &[Line]) -> Result<bool, xila_db::Error> {
+/// had. `first` is its line 0, if it has one: the values it takes, or
+/// when it runs by itself. Returns whether the program was there before.
+fn store(db: &mut Database, name: &[u8], first: Option<&[u8]>, lines: &[Line]) -> Result<bool, xila_db::Error> {
     let table = match db.find(PROGRAMS) {
         Some(table) => table,
         None => db.create(PROGRAMS, &[(b"name", Kind::Text), (b"line", Kind::Int), (b"text", Kind::Text)])?,
     };
     let replaced = db.delete(table, &mut |fields| matches!(fields[1], Field::Text(of) if of.eq_ignore_ascii_case(name)))? > 0;
-    if let Some(runs) = runs {
-        db.insert(table, &[Field::Text(name), Field::Int(0), Field::Text(runs)])?;
+    if let Some(first) = first {
+        db.insert(table, &[Field::Text(name), Field::Int(0), Field::Text(first)])?;
     }
     // an empty program still has a line, so that it exists
     let empty = [Line::new()];
@@ -314,15 +416,23 @@ fn store(db: &mut Database, name: &[u8], runs: Option<&[u8]>, lines: &[Line]) ->
     Ok(replaced)
 }
 
-/// `program name ... end`: keeps the lines under the name.
-fn define(sys: &mut System, name: &[u8], lines: &[Line], out: &mut dyn Out) -> bool {
-    let mut lower = shell::Text::from_bytes(name);
-    lower.lower();
-    if !free_name(name) {
+/// `program name ... end`, `program name(item, count) ... end`: keeps
+/// the lines under the name, with the names of the values it takes.
+fn define(sys: &mut System, written: &[u8], lines: &[Line], out: &mut dyn Out) -> bool {
+    let Some((name, takes)) = call_of(written).filter(|(name, _)| free_name(name)) else {
         out.line(Style::Error, b"A program is named by a letter, then letters, digits or _, and not as a command.");
         return false;
-    }
-    keep(sys, lower.bytes(), None, lines, out)
+    };
+    let params = match Params::read(takes) {
+        Ok(params) => params,
+        Err(message) => {
+            out.line(Style::Error, message.bytes());
+            return false;
+        }
+    };
+    let mut lower = shell::Text::from_bytes(name);
+    lower.lower();
+    keep(sys, lower.bytes(), None, params.written().bytes(), lines, out)
 }
 
 /// When a program runs by itself.
@@ -457,11 +567,12 @@ fn define_runs(sys: &mut System, first: &[u8], lines: &[Line], out: &mut dyn Out
         out.line(Style::Error, b"There is room for 16 programs that wait for events and 8 that run again and again.");
         return false;
     }
-    keep(sys, name.bytes(), Some(runs.line().bytes()), lines, out)
+    keep(sys, name.bytes(), Some(runs.line().bytes()), b"", lines, out)
 }
 
-/// Puts a program in the database and says so.
-fn keep(sys: &mut System, name: &[u8], runs: Option<&[u8]>, lines: &[Line], out: &mut dyn Out) -> bool {
+/// Puts a program in the database and says so. `runs` is when it runs by
+/// itself, `takes` the values it takes as they are kept: one or neither.
+fn keep(sys: &mut System, name: &[u8], runs: Option<&[u8]>, takes: &[u8], lines: &[Line], out: &mut dyn Out) -> bool {
     if let Err(message) = programs(&sys.db) {
         out.line(Style::Error, message.bytes());
         return false;
@@ -475,7 +586,7 @@ fn keep(sys: &mut System, name: &[u8], runs: Option<&[u8]>, lines: &[Line], out:
         out.line(Style::Error, place.bytes());
         return false;
     }
-    match store(&mut sys.db, name, runs, lines) {
+    match store(&mut sys.db, name, runs.or(Some(takes).filter(|takes| !takes.is_empty())), lines) {
         Ok(replaced) => {
             let now = sys.ticks.max(1);
             sys.stored_at = now;
@@ -514,8 +625,8 @@ pub fn list(sys: &mut System, out: &mut dyn Out) -> bool {
             return false;
         }
     };
-    // name, lines, and the line that says when it runs
-    let mut found = [(shell::Text::new(), 0usize, shell::Text::new()); shell::TABLE_ROWS];
+    // name, lines, the line that says when it runs, and the values it takes
+    let mut found = [(shell::Text::new(), 0usize, shell::Text::new(), shell::Text::new()); shell::TABLE_ROWS];
     let (mut count, mut hidden) = (0, 0);
     if let Some(table) = table {
         let scanned = sys.db.scan(table, &mut |fields| {
@@ -535,6 +646,8 @@ pub fn list(sys: &mut System, out: &mut dyn Out) -> bool {
                 }
             };
             match number {
+                // a list too long to show beside the name is not cut inside a name
+                0 if text.starts_with(b"(") => found[at].3 = shell::Text::from_bytes(if name.len() + text.len() <= 48 { text } else { b"(...)" }),
                 0 => found[at].2 = shell::Text::from_bytes(text),
                 // the single line of an empty program does not count
                 _ if text.is_empty() && number == 1 => {}
@@ -551,12 +664,13 @@ pub fn list(sys: &mut System, out: &mut dyn Out) -> bool {
         return true;
     }
     let mut listed = Table::new(PROGRAMS, &[b"name", b"lines", b"runs"]);
-    for (name, lines, runs) in &found[..count] {
+    for (name, lines, runs, takes) in &found[..count] {
         let mut number = shell::Text::new();
         let _ = write!(number, "{lines}");
         let mut command = shell::Text::from_bytes(b"show ");
         command.push_bytes(name.bytes());
-        listed.row_to(&[name.bytes(), number.bytes(), if runs.is_empty() { b"when asked" } else { runs.bytes() }], command.bytes());
+        let called = shell::Text::from_bytes(name.bytes()).also(takes.bytes());
+        listed.row_to(&[called.bytes(), number.bytes(), if runs.is_empty() { b"when asked" } else { runs.bytes() }], command.bytes());
     }
     listed.more = hidden;
     shell::show(sys, out, &listed);
@@ -567,7 +681,7 @@ pub fn list(sys: &mut System, out: &mut dyn Out) -> bool {
 pub fn show(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
     let mut lines = [Line::new(); MAX_LINES];
     let count = match load(&sys.db, name, &mut lines) {
-        Ok(Some(count)) => count,
+        Ok(Some(loaded)) => loaded.count,
         Ok(None) => {
             out.line(Style::Error, crate::sql::error(b"Unknown program: ", name).also(b". Type programs to list them.").bytes());
             return false;
@@ -579,9 +693,11 @@ pub fn show(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
     };
     let mut lower = shell::Text::from_bytes(name);
     lower.lower();
+    let named = FixedStr::<{ LINE_MAX + 32 }>::from_bytes(b"program ").also(lower.bytes());
     match header(&sys.db, name) {
-        Some(header) => out.line(Style::Out, header.bytes()),
-        None => out.line(Style::Out, FixedStr::<COLS>::from_bytes(b"program ").also(lower.bytes()).bytes()),
+        Some(takes) if takes.bytes().starts_with(b"(") => out.line(Style::Out, named.also(takes.bytes()).bytes()),
+        Some(runs) => out.line(Style::Out, runs.bytes()),
+        None => out.line(Style::Out, named.bytes()),
     }
     let mut depth: usize = 1;
     for line in &lines[..count] {
@@ -1029,6 +1145,58 @@ mod tests {
             ],
         );
         sys
+    }
+
+    #[test]
+    fn a_call_is_read_as_written() {
+        let read = |text: &str| call_of(text.as_bytes()).map(|(name, given)| (String::from_utf8_lossy(name).into_owned(), String::from_utf8_lossy(given).into_owned()));
+        let is = |name: &str, given: &str| Some((name.to_string(), given.to_string()));
+        assert_eq!(read("report"), is("report", ""));
+        assert_eq!(read("  report()  "), is("report", ""));
+        assert_eq!(read("restock('cable', 5)"), is("restock", "'cable', 5"));
+        // a text may hold what would end the call anywhere else
+        assert_eq!(read("restock ('a, (b', round(2.5) )"), is("restock", "'a, (b', round(2.5)"));
+        assert_eq!(read("restock 5"), None);
+        assert_eq!(read("f(1) x"), None);
+        assert_eq!(read("f(1"), None);
+        assert_eq!(read("(1)"), None);
+        assert_eq!(read(""), None);
+    }
+
+    #[test]
+    fn parameters_are_kept_with_the_program_and_shown() {
+        let mut sys = books();
+        assert_eq!(said(&mut sys, &["program Restock( Item,count )", "say item", "end"]), ["Program restock kept: 1 line."]);
+        assert_eq!(said(&mut sys, &["show restock"]), ["program restock(item, count)", "    say item", "end"]);
+        assert_eq!(said(&mut sys, &["programs"]), ["     name                  lines  runs", " [1] restock(item, count)  1      when asked"]);
+        assert_eq!(said(&mut sys, &["1"])[0], "program restock(item, count)");
+        assert_eq!(said(&mut sys, &["select line, text from programs where name = 'restock' order by line"]), ["   line  text", "   0     (item, count)", "   1     say item"]);
+        // typed again without any, it takes none: nothing is left of them
+        type_lines(&mut sys, &["program restock()", "say 1", "end"]);
+        assert_eq!(said(&mut sys, &["show restock"])[0], "program restock");
+        assert_eq!(said(&mut sys, &["select count(*) from programs where line = 0"]), ["   count", "   0"]);
+        // a long list is not cut in the middle of a name
+        type_lines(&mut sys, &["program long(first_of_the_values, second_of_the_values, third)", "end"]);
+        assert_eq!(said(&mut sys, &["programs"])[1..], [" [1] restock    1      when asked", " [2] long(...)  0      when asked"]);
+        assert_eq!(said(&mut sys, &["show long"])[0], "program long(first_of_the_values, second_of_the_values, third)");
+    }
+
+    #[test]
+    fn what_is_wrong_with_parameters_is_told_and_nothing_is_kept() {
+        let mut sys = System::new();
+        let named = "A parameter is named like a value: a letter, then letters, digits or _.";
+        assert_eq!(said(&mut sys, &["program f(a, b, c, d, e, f, g, h, i)", "end"]), ["A program takes eight values at most."]);
+        assert_eq!(said(&mut sys, &["program f(item, Item)", "end"]), ["Two parameters cannot share a name: item."]);
+        assert_eq!(said(&mut sys, &["program f(1abc)", "end"]), [named]);
+        assert_eq!(said(&mut sys, &["program f(a, )", "end"]), [named]);
+        assert_eq!(said(&mut sys, &["program f(say)", "end"]), [named]);
+        assert_eq!(said(&mut sys, &["program f(mood)", "end"]), [named]);
+        assert_eq!(said(&mut sys, &["program f(a b)", "end"]), [named]);
+        assert_eq!(said(&mut sys, &["program f(a", "end"]), ["A program is named by a letter, then letters, digits or _, and not as a command."]);
+        assert_eq!(said(&mut sys, &["program f a", "end"]), ["A program is named by a letter, then letters, digits or _, and not as a command."]);
+        assert_eq!(said(&mut sys, &["programs"]), ["There is no program yet. help l shows how to make one."]);
+        // eight are taken
+        assert_eq!(said(&mut sys, &["program f(a, b, c, d, e, f, g, h)", "end"]), ["Program f kept: 0 lines."]);
     }
 
     #[test]

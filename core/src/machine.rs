@@ -269,7 +269,7 @@ fn call(sys: &mut System, room: Room, name: &[u8], out: &mut dyn Out) -> Result<
     }
     // read here and given to the compiler, which keeps them: not held while the program runs
     let mut lines = [Line::new(); MAX_LINES];
-    let Some(count) = lang::load(&sys.db, name, &mut lines)? else {
+    let Some(lang::Loaded { count, .. }) = lang::load(&sys.db, name, &mut lines)? else {
         return Err(crate::sql::error(b"Unknown program: ", name).also(b". Type programs to list them."));
     };
     let unit = vm(sys, room).depth;
