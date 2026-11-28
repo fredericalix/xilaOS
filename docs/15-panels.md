@@ -134,8 +134,12 @@ In the form:
   with id 4.`
 - **What the table refuses is said in red, in its words**, and the form
   stays as it was typed: `Column qty takes a whole number.`
-- **A field of a number takes a calculation**: `6 * 2` is written as 12.
-  A field of a text is written as it is typed.
+- **A field of a number takes a number, or a calculation on numbers**:
+  `6 * 2` is written as 12. It is worked out by the form, which knows no
+  column and no name there: anything else is refused before anything
+  is written (`In stock takes a number, or a calculation.`). A field of
+  a text is written as it is typed, quotes and all. Whatever is typed
+  in a field is one value of its column, and nothing more.
 - **A field where nothing is typed** is left to the table when a row is
   added (its value by default, or none), and is emptied when a row is
   changed.

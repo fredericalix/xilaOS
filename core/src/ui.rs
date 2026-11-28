@@ -1592,7 +1592,7 @@ mod tests {
         keys(&mut ui, &mut sys, &[Key::Tab]);
         type_text(&mut ui, &mut sys, "many");
         keys(&mut ui, &mut sys, &[Key::Enter]);
-        assert!(!form(&mut ui, &mut sys).1.is_empty());
+        assert_eq!(form(&mut ui, &mut sys).1, "In stock takes a number, or a calculation.");
         // F12 gives it up: nothing was added
         keys(&mut ui, &mut sys, &[Key::F(12)]);
         assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["Oscilloscope measure good 1".to_string(), "Soldering iron tools worn 2".into(), "Cat6 cable 5m cables good 12".into()], "Nothing was changed.".to_string()));
@@ -1650,6 +1650,65 @@ mod tests {
         type_text(&mut ui, &mut sys, "!");
         keys(&mut ui, &mut sys, &[Key::Enter]);
         assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec![], "This row is no longer there.".to_string()));
+    }
+
+    #[test]
+    fn what_is_typed_in_a_field_is_one_value_and_nothing_else() {
+        let (mut ui, mut sys) = with_form();
+        typed(&mut ui, &mut sys, "let qty = 500");
+        let untouched = |ui: &mut Ui, sys: &mut System| typed(ui, sys, "select label, state, qty, seen from things order by id");
+        let before = untouched(&mut ui, &mut sys);
+        // in a number: no second column, no condition, no name of the prompt, no column of the row
+        for attempt in ["1, label = 'hacked'", "1 where 1 = 1", "qty", "qty + 1", "1); drop table things", "(select 1)", "'12'", "1 2"] {
+            keys(&mut ui, &mut sys, &[Key::Down, Key::Down]);
+            type_text(&mut ui, &mut sys, "2");
+            keys(&mut ui, &mut sys, &[Key::Enter, Key::Tab, Key::Tab, Key::Tab, Key::Backspace]);
+            type_text(&mut ui, &mut sys, attempt);
+            keys(&mut ui, &mut sys, &[Key::Enter]);
+            assert_eq!(form(&mut ui, &mut sys).1, "In stock takes a number, or a calculation.", "{attempt}");
+            keys(&mut ui, &mut sys, &[Key::F(12), Key::Up, Key::Up]);
+            assert_eq!(untouched(&mut ui, &mut sys), before, "{attempt}");
+        }
+        // in a text: whatever is typed is the text
+        for (attempt, kept) in [("it's, seen = 'x'", "it's, seen = 'x'"), ("a' where 1 = 1 --", "a' where 1 = 1 --"), ("'); drop table things", "'); drop table things"), ("  spaced  ", "spaced")] {
+            keys(&mut ui, &mut sys, &[Key::Down, Key::Down]);
+            type_text(&mut ui, &mut sys, "2");
+            keys(&mut ui, &mut sys, &[Key::Enter, Key::Tab]);
+            for _ in 0..40 {
+                keys(&mut ui, &mut sys, &[Key::Backspace]);
+            }
+            type_text(&mut ui, &mut sys, attempt);
+            keys(&mut ui, &mut sys, &[Key::Enter]);
+            assert_eq!(listed(&mut ui, &mut sys).1, "1 row changed in things.", "{attempt}");
+            let row = typed(&mut ui, &mut sys, "select kind = 'x', seen from things where id = 2");
+            assert_eq!(row[1].split_whitespace().last(), Some("2026-11-02"), "{attempt}");
+            sys.session = events::SERIAL;
+            sys.vars[events::SERIAL].set(b"wanted", crate::sql::Value::text(kept.as_bytes()));
+            assert_eq!(typed(&mut ui, &mut sys, "select count(*) from things where id = 2 and kind = wanted")[1].trim(), "1", "{attempt}");
+            sys.session = events::SCREEN;
+            keys(&mut ui, &mut sys, &[Key::Up, Key::Up]);
+        }
+        assert_eq!(typed(&mut ui, &mut sys, "select count(*) from things")[1].trim(), "2");
+        // a decimal comes back as it was written, and a calculation is worked out by the form
+        typed(&mut ui, &mut sys, "create table prices (label text, price decimal(8,2))");
+        typed(&mut ui, &mut sys, "insert into prices values ('cable', 12.50)");
+        for line in ["panel prices on prices", "end"] {
+            ui.key(&mut sys, key(Key::Esc));
+            ui.run(&mut sys, line.as_bytes());
+        }
+        ui.run(&mut sys, b"prices");
+        listed(&mut ui, &mut sys);
+        keys(&mut ui, &mut sys, &[Key::Down]);
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(form(&mut ui, &mut sys).0, ["label: cable", "price: 12.50"]);
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(typed(&mut ui, &mut sys, "select price from prices")[1].trim(), "12.50");
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Enter, Key::Tab]);
+        type_text(&mut ui, &mut sys, " * 2 + 0.25");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(typed(&mut ui, &mut sys, "select price from prices")[1].trim(), "25.25");
     }
 
     #[test]

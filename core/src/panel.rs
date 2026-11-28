@@ -1019,10 +1019,15 @@ impl Out for Heard {
     fn table(&mut self, _: &Table) {}
 }
 
-/// Writes a value of a form as SQL reads it: a text between quotes, a
-/// quote in it written twice; a number as it was typed, which lets a
-/// calculation be typed there; nothing typed is no value.
-fn written(statement: &mut FixedStr<1024>, typed: &[u8], text: bool) {
+/// Writes a value of a form as SQL reads it, and says false when what
+/// was typed is no value. A text goes between quotes, a quote in it
+/// written twice: whatever is typed is the text. A number is worked out
+/// here, with no column and no name to read, and only what it comes to
+/// is written: a calculation may be typed (`6 * 2`), and nothing typed
+/// there can be more than one value of one column (written as it was
+/// typed, `1, label = 'x'` changed another column of the row). Nothing
+/// typed is no value.
+fn written(statement: &mut FixedStr<1024>, typed: &[u8], text: bool) -> bool {
     let typed = trim(typed);
     if typed.is_empty() {
         statement.push_bytes(b"null");
@@ -1033,8 +1038,14 @@ fn written(statement: &mut FixedStr<1024>, typed: &[u8], text: bool) {
         }
         statement.push(b'\'');
     } else {
-        statement.push_bytes(typed);
+        let mut lexer = sql::Lexer::new(typed);
+        let worked = crate::expr::parse(&mut lexer, crate::expr::Names::without(&NO_VARS, b"")).and_then(|read| lexer.end().map(|_| read)).and_then(|read| read.eval(&[Value::Null; sql::MAX_COLUMNS]));
+        match worked {
+            Ok(number @ (Value::Int(_) | Value::Dec(..))) => statement.push_bytes(number.shown().bytes()),
+            _ => return false,
+        }
     }
+    true
 }
 
 /// Does what a key asked of the tables: reads a row into the form,
@@ -1089,6 +1100,8 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
             };
             let typed = || panel.fields[..panel.count].iter().zip(&inputs).filter(|(field, _)| !field.shown);
             let mut nothing = false;
+            // the first field that holds what is no value, if one does
+            let mut wrong: Option<Label> = None;
             match (todo, id) {
                 (Todo::Remove(row), _) => {
                     let _ = write!(statement, "delete from {} where id = {row}", panel.table);
@@ -1099,7 +1112,9 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
                         statement.push_bytes(if at > 0 { b", " } else { b"" });
                         statement.push_bytes(field.column.bytes());
                         statement.push_bytes(b" = ");
-                        written(&mut statement, input.text.bytes(), text_of(&schema, &field.column));
+                        if !written(&mut statement, input.text.bytes(), text_of(&schema, &field.column)) {
+                            wrong = wrong.or(Some(field.label));
+                        }
                     }
                     let _ = write!(statement, " where id = {row}");
                 }
@@ -1116,7 +1131,9 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
                     statement.push_bytes(b") values (");
                     for (at, (field, input)) in given().enumerate() {
                         statement.push_bytes(if at > 0 { b", " } else { b"" });
-                        written(&mut statement, input.text.bytes(), text_of(&schema, &field.column));
+                        if !written(&mut statement, input.text.bytes(), text_of(&schema, &field.column)) {
+                            wrong = wrong.or(Some(field.label));
+                        }
                     }
                     statement.push(b')');
                 }
@@ -1126,6 +1143,12 @@ fn work(sys: &mut System, place: usize, room: &mut Page) {
                 (heard.text, heard.refused) = (FixedStr::from_bytes(b"This panel has no field that is typed."), true);
             } else if nothing {
                 (heard.text, heard.refused) = (FixedStr::from_bytes(b"Nothing was typed: there is no row to add."), true);
+            } else if let Some(label) = wrong {
+                // nothing is run with a field that is not one value
+                (heard.text, heard.refused) = (FixedStr::from_bytes(label.bytes()).also(b" takes a number, or a calculation."), true);
+            } else if statement.len() == 1024 {
+                // (it holds seven texts of 48 quotes and more; said rather than run cut)
+                (heard.text, heard.refused) = (FixedStr::from_bytes(b"What is typed is too long to be written."), true);
             } else {
                 // as who sits at the screen of the machine
                 let session = core::mem::replace(&mut sys.session, crate::events::SCREEN);
