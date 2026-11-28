@@ -61,8 +61,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 27 November 2026: about 40,000 lines, 377
-unit tests, 536 system checks.
+about 300 system checks. On 28 November 2026: about 41,000 lines, 391
+unit tests, 551 system checks.
 
 ## Known limits of what is done
 
@@ -563,12 +563,12 @@ its cursors, who started it, and a state: ready, running, waiting
   there keeps the limits of a program nobody watches, so that it
   ends, and a line that comes from there meanwhile is refused with
   the number of the job. For long work there, `submit`, then `job n`.
-- **Names.** A job has one set of names, which the programs it calls
-  share, as today; a call is made so that it can have names of its
-  own in step 3. A job that a prompt waits for sees and changes the
-  names of that session, as a program does today. Sent to the
-  background it leaves with a copy of them. A job that is submitted,
-  or that the system starts, begins with none.
+- **Names.** As step 2 built it, a job had one set of names, which
+  the programs it called shared, and a job that a prompt waited for
+  saw and changed the names of that session. Step 3 changed that
+  (below): a program has its own. What stays: a block typed at a
+  prompt uses the names of that prompt, and sent to the background
+  it leaves with a copy of them.
 - **The programs that run by themselves become jobs** (`on`,
   `every`): made when their time comes, run one after the other in
   the order of what happened, as today, beside the jobs that people

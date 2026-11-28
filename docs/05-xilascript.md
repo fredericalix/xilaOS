@@ -454,10 +454,13 @@ there, become a job that prompt waits for. What it says is shown as it
 runs. At the screen the edit row says so, and how to have the prompt back:
 
 ```
-XilaOS|all:/>inventory('north')
+XilaOS|all:/>inventory(3)
 Counting shelves...
-Running inventory('north'). [Esc] stops it, [Alt]+[B] sends it to the background.
+Running inventory(3). [Esc] stops it, [Alt]+[B] sends it to the background.
 ```
+
+The row has room for sixteen characters of what runs: a longer call is
+shown by its name, `inventory(...)`.
 
 A line that a command of the program types (`qr about`) runs at once,
 inside it, and its code is shown then. (To a job nobody waits for, `qr`
@@ -491,7 +494,9 @@ Counting shelves...
 - **It leaves with its values.** What `submit restock('cable', n + 1)`
   gives is worked out when it is typed, with the names of that prompt,
   and the job is listed with it: `restock('cable', 5)`, cut when it is
-  longer than 48 characters. Changing `n` afterwards changes nothing of
+  longer than 48 characters. Those values are kept in clear, in `jobs`
+  and in `job_log`, and the companion and the web pages read both: a
+  key is not a value to give a job. Changing `n` afterwards changes nothing of
   the job, and the job changes no name of the prompt: a program has its
   own, here as anywhere. A block typed at a prompt, which uses the names
   of that prompt, goes on with a copy of them when it is sent to the

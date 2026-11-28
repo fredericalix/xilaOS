@@ -138,6 +138,9 @@ pub(crate) fn call_of(text: &[u8]) -> Option<(&[u8], &[u8])> {
     if rest.is_empty() {
         return Some((name, b""));
     }
+    if rest[0] != b'(' {
+        return None;
+    }
     // the parenthesis that opens must be closed by the last character;
     // what a text holds between its quotes opens and closes nothing
     let (mut depth, mut quoted) = (0usize, false);
@@ -174,7 +177,7 @@ impl Params {
         }
         for name in written.split(|byte| *byte == b',').map(trim) {
             if !free_name(name) {
-                return Err(Message::from_bytes(b"A parameter is named like a value: a letter, then letters, digits or _."));
+                return Err(Message::from_bytes(b"A parameter is a letter, then letters, digits or _, and not a command."));
             }
             if params.count == PARAMS {
                 return Err(Message::from_bytes(b"A program takes eight values at most."));
@@ -651,7 +654,8 @@ pub fn list(sys: &mut System, out: &mut dyn Out) -> bool {
                     count - 1
                 }
                 None => {
-                    hidden += (number <= 1) as usize;
+                    // every program has a line 1, and only some a line 0
+                    hidden += (number == 1) as usize;
                     return;
                 }
             };
@@ -1171,6 +1175,9 @@ mod tests {
         assert_eq!(read("f(1"), None);
         assert_eq!(read("(1)"), None);
         assert_eq!(read(""), None);
+        // the parenthesis comes right after the name
+        assert_eq!(read("tell''('a', 1)"), None);
+        assert_eq!(read("tell,(1)"), None);
     }
 
     #[test]
@@ -1194,19 +1201,33 @@ mod tests {
     #[test]
     fn what_is_wrong_with_parameters_is_told_and_nothing_is_kept() {
         let mut sys = System::new();
-        let named = "A parameter is named like a value: a letter, then letters, digits or _.";
+        let named = "A parameter is a letter, then letters, digits or _, and not a command.";
         assert_eq!(said(&mut sys, &["program f(a, b, c, d, e, f, g, h, i)", "end"]), ["A program takes eight values at most."]);
         assert_eq!(said(&mut sys, &["program f(item, Item)", "end"]), ["Two parameters cannot share a name: item."]);
         assert_eq!(said(&mut sys, &["program f(1abc)", "end"]), [named]);
         assert_eq!(said(&mut sys, &["program f(a, )", "end"]), [named]);
         assert_eq!(said(&mut sys, &["program f(say)", "end"]), [named]);
         assert_eq!(said(&mut sys, &["program f(mood)", "end"]), [named]);
+        assert_eq!(said(&mut sys, &["program f(label, time)", "end"]), [named]);
         assert_eq!(said(&mut sys, &["program f(a b)", "end"]), [named]);
         assert_eq!(said(&mut sys, &["program f(a", "end"]), ["A program is named by a letter, then letters, digits or _, and not as a command."]);
         assert_eq!(said(&mut sys, &["program f a", "end"]), ["A program is named by a letter, then letters, digits or _, and not as a command."]);
         assert_eq!(said(&mut sys, &["programs"]), ["There is no program yet. help l shows how to make one."]);
         // eight are taken
         assert_eq!(said(&mut sys, &["program f(a, b, c, d, e, f, g, h)", "end"]), ["Program f kept: 0 lines."]);
+    }
+
+    #[test]
+    fn programs_beyond_what_a_list_shows_are_counted_once_each() {
+        let mut sys = System::new();
+        for n in 0..shell::TABLE_ROWS + 8 {
+            // some take a value, some none, some have no line
+            let first = if n % 2 == 0 { format!("program p{n}(a)") } else { format!("program p{n}") };
+            let lines: Vec<&str> = if n % 3 == 0 { vec![&first, "end"] } else { vec![&first, "say 1", "end"] };
+            type_lines(&mut sys, &lines);
+        }
+        let listed = said(&mut sys, &["programs"]);
+        assert_eq!(listed.last().unwrap(), "8 more rows are not shown. Narrow the query with WHERE.");
     }
 
     #[test]

@@ -773,7 +773,7 @@ with Xila(disk=disk) as x:
     ticks = int(x.table("select count(*) from heard")[0]["count"])
     check("every: a program runs again and again", 2 <= ticks <= 4, ticks)
     listed = {row["name"]: row["runs"] for row in x.table("programs")}
-    wanted = {"report": "when asked", "on_insert_spent": "on insert into spent", "on_notify_ping": "on notify ping", "every_1_second": "every 1 second"}
+    wanted = {"report": "when asked", "restock(item, count)": "when asked", "on_insert_spent": "on insert into spent", "on_notify_ping": "on notify ping", "every_1_second": "every 1 second"}
     check("programs says when each one runs", listed == wanted, listed)
     x.cmd("drop program every_1_second")
     after = int(x.table("select count(*) from heard")[0]["count"])

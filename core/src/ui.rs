@@ -694,11 +694,13 @@ impl Ui {
                     const HOW: &[u8] = b". [Esc] stops it, [Alt]+[B] sends it to the background.";
                     let (name, room) = (job.program.bytes(), COLS - 1 - 8 - HOW.len());
                     running.push_bytes(b"Running ");
-                    // a call too long for the row is shown by its name, its values left out
+                    // a call too long for the row is shown by its name, its
+                    // values left out; the first line of a block is cut
                     let bare = name.split(|byte| *byte == b'(').next().unwrap_or(name);
+                    let called = bare.len() < name.len() && xila_db::good_name(bare);
                     if name.len() <= room {
                         running.push_bytes(name);
-                    } else if bare.len() < name.len() && bare.len() + 5 <= room {
+                    } else if called && bare.len() + 5 <= room {
                         running.push_bytes(bare);
                         running.push_bytes(b"(...)");
                     } else {
@@ -1345,6 +1347,14 @@ mod tests {
         ui.key(&mut sys, key(Key::Esc));
         ui.work(&mut sys, &mut || true);
         assert!(rows(&mut ui, &mut sys).last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
+        // the first line of a block typed is no call: it is cut where the row ends
+        ui.run(&mut sys, b"let n = 0");
+        for line in ["while n < (1 + 2) * 1000000", "let n = n + 1", "end"] {
+            type_text(&mut ui, &mut sys, line);
+            ui.key(&mut sys, key(Key::Enter));
+        }
+        assert!(rows(&mut ui, &mut sys).last().unwrap().starts_with("Running while n < (1 + 2. [Esc] stops it"));
+        ui.key(&mut sys, key(Key::Esc));
     }
 
     #[test]

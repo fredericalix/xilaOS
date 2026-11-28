@@ -86,7 +86,7 @@ struct Stage {
 
 /// A virtual machine as it is before anything runs in it: what each room
 /// of the jobs is made from. One of them is in the file of the kernel,
-/// not nine: a machine is 270 KB, and is not made of zeros.
+/// not nine: a machine is 278 KB, and is not made of zeros.
 static NEW_ROOM: xila_core::machine::Machine = xila_core::machine::Machine::new();
 
 /// The rooms of the jobs: a virtual machine each, eight for the jobs

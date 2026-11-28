@@ -324,17 +324,19 @@ fn takes(name: &[u8], params: &lang::Params) -> Message {
     lower.lower();
     let mut message = Message::new();
     let _ = match params.names().len() {
-        0 => write!(message, "{lower} takes no value."),
-        1 => write!(message, "{lower} takes 1 value: "),
-        count => write!(message, "{lower} takes {count} values: "),
+        0 => write!(message, "{lower} takes no value"),
+        1 => write!(message, "{lower} takes 1 value"),
+        count => write!(message, "{lower} takes {count} values"),
     };
-    for (at, param) in params.names().iter().enumerate() {
-        message.push_bytes(if at > 0 { b", " } else { b"" });
-        message.push_bytes(param.bytes());
+    // their names, when they can be said whole on the line
+    let named: usize = params.names().iter().map(|param| param.len() + 2).sum();
+    if message.len() + named < COLS {
+        for (at, param) in params.names().iter().enumerate() {
+            message.push_bytes(if at > 0 { b", " } else { b": " });
+            message.push_bytes(param.bytes());
+        }
     }
-    if !params.names().is_empty() {
-        message.push(b'.');
-    }
+    message.push(b'.');
     message
 }
 
@@ -365,6 +367,11 @@ fn bind(sys: &System, name: &[u8], takes_these: &[u8], written: &[u8]) -> Result
 /// Takes the next unit, whose code is ready, for a program or for lines.
 /// A program comes with its names, which become the ones in use: those
 /// of who called it wait in the room. Lines typed have none of their own.
+///
+/// Never part of who calls it, no more than `leave`: each holds the
+/// names of a program, 3 KB, and `turn` is below every command a
+/// program runs.
+#[inline(never)]
 fn enter(sys: &mut System, room: Room, program: Text, lines: usize, names: Option<Vars>) {
     let caller = names.map(|names| core::mem::replace(sys.names_mut(), names));
     let machine = vm_mut(sys, room);
@@ -385,6 +392,7 @@ fn enter(sys: &mut System, room: Room, program: Text, lines: usize, names: Optio
 
 /// Gives the unit at the top back, and the cursors it left open. When it
 /// is a program, the names of who called it are the ones in use again.
+#[inline(never)]
 fn leave(sys: &mut System, room: Room) {
     let machine = vm_mut(sys, room);
     machine.depth -= 1;
@@ -728,6 +736,9 @@ pub(crate) mod tests {
         typed(&mut sys, &["program calls", "say 'before'", "two(1)", "end"]);
         assert_eq!(each(&mut sys, &["calls"]), ["before", "two takes 2 values: item, count.", "Stopped at line 2 of calls."]);
         assert_eq!(each(&mut sys, &["nowhere(1)"]), ["Unknown program: nowhere. Type programs to list them."]);
+        // names too long to be said on one line are left out, not cut
+        typed(&mut sys, &["program eight(alpha_long_name_one, beta_long_name_two, gamma_long_name_3, delta_long_name_4, e, f, g, h)", "end"]);
+        assert_eq!(each(&mut sys, &["eight(1)"]), ["eight takes 8 values."]);
     }
 
     #[test]
@@ -1012,7 +1023,7 @@ pub(crate) mod tests {
         }
         typed(&mut sys, &["program top", "say 'top'", "middle", "say 'not here'", "end"]);
         typed(&mut sys, &["program middle", "say 'middle'", "run bottom", "end"]);
-        typed(&mut sys, &["program bottom", "say 'bottom'", "let x = 1 / zero", "end", "let zero = 0"]);
+        typed(&mut sys, &["program bottom", "say 'bottom'", "let zero = 0", "let x = 1 / zero", "end"]);
         sys
     }
 

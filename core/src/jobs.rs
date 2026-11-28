@@ -412,9 +412,12 @@ fn called(name: &[u8], names: &Vars) -> Text {
         whole.push_bytes(if at == 0 { b"(" } else { b", " });
         match value {
             crate::sql::Value::Null => whole.push_bytes(b"null"),
+            // as it is typed: a quote in the text is written twice
             crate::sql::Value::Text(text) => {
                 whole.push(b'\'');
-                whole.push_bytes(text.bytes());
+                for byte in text.bytes() {
+                    whole.push_bytes(if *byte == b'\'' { b"\'\'" } else { core::slice::from_ref(byte) });
+                }
                 whole.push(b'\'');
             }
             number => whole.push_bytes(number.shown().bytes()),
@@ -807,6 +810,9 @@ mod tests {
         typed(&mut sys, &["program tell(what, more, n)", "say what", "end"]);
         let number = begin(&mut sys, What::Program(b"tell('cable', null, 2.50)"), Watch::Nobody, &mut Lines::default()).unwrap();
         assert_eq!(sys.jobs.list()[place_of(&sys, number)].program.bytes(), b"tell('cable', null, 2.50)");
+        // as it can be typed again: a quote in a text is written twice
+        let number = begin(&mut sys, What::Program(b"tell('it''s', 1, 2)"), Watch::Nobody, &mut Lines::default()).unwrap();
+        assert_eq!(sys.jobs.list()[place_of(&sys, number)].program.bytes(), b"tell('it''s', 1, 2)");
         let number = begin(&mut sys, What::Program(b"tell('a text of some length', 'and another one as long', 3)"), Watch::Nobody, &mut Lines::default()).unwrap();
         assert_eq!(sys.jobs.list()[place_of(&sys, number)].program.bytes(), b"tell('a text of some length', 'and another o...)");
         // lines nobody waits for begin with no name, and what they name is not the session's
