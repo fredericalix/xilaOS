@@ -42,6 +42,8 @@ const TRIES: u8 = 3;
 /// An address is kept for as long as its answer says, within these.
 const KEPT: (u64, u64) = (10, 86_400);
 const KNOWN: usize = 8;
+/// Names that are asked about at one time, a question each.
+pub const ASKED: usize = 4;
 
 pub type Name = FixedStr<NAME>;
 
@@ -195,15 +197,24 @@ struct Asking {
     tries: u8,
 }
 
-/// The names this machine knows, and the one it is asking about.
+/// One of the places where a name is asked about.
+#[derive(Clone, Copy)]
+enum Place {
+    Free,
+    Asking(Asking),
+    /// What the server said of a name it has no address for, and when,
+    /// until who asked takes it or the place is needed.
+    Failed(Name, Failed, u64),
+}
+
+/// The names this machine knows, and those it is asking about.
 pub struct Names {
     /// Who is asked: what the network said, or what `net names` set.
     pub server: Option<(Ip, u16)>,
     /// Set by hand: what the network says no longer replaces it.
     pub by_hand: bool,
     known: [Known; KNOWN],
-    asking: Option<Asking>,
-    failed: Option<(Name, Failed)>,
+    places: [Place; ASKED],
     chance: u64,
     /// Questions sent since the start, for `net`.
     pub asked: u64,
@@ -211,7 +222,7 @@ pub struct Names {
 
 impl Names {
     pub const fn new() -> Names {
-        Names { server: None, by_hand: false, known: [Known { name: Name::new(), ip: [0; 4], until: 0 }; KNOWN], asking: None, failed: None, chance: 0x2545_f491_4f6c_dd1d, asked: 0 }
+        Names { server: None, by_hand: false, known: [Known { name: Name::new(), ip: [0; 4], until: 0 }; KNOWN], places: [Place::Free; ASKED], chance: 0x2545_f491_4f6c_dd1d, asked: 0 }
     }
 
     /// Mixes in a number nobody outside can guess: the numbers of the
@@ -251,51 +262,86 @@ impl Names {
     /// called again and again until it says something else than
     /// `Asking`. When there is a message to send, it is written in
     /// `message` and what is returned with the state says where it goes.
+    /// Several names are asked about side by side, a question each; one
+    /// more waits, `Asking` with nothing sent, until a place is free.
     pub fn look(&mut self, name: &[u8], now: u64, message: &mut [u8; QUESTION]) -> (Lookup, Option<Send>) {
         let name = kept(name);
         if let Some(known) = self.known.iter().find(|known| known.until > now && known.name == name) {
             return (Lookup::Found(known.ip), None);
         }
-        if let Some((_, why)) = self.failed.take_if(|(failed, _)| *failed == name) {
+        if let Some(at) = self.places.iter().position(|place| matches!(place, Place::Failed(failed, ..) if *failed == name)) {
+            let Place::Failed(_, why, _) = core::mem::replace(&mut self.places[at], Place::Free) else {
+                return (Lookup::Asking, None);
+            };
             return (Lookup::Failed(why), None);
         }
         let Some((server, port)) = self.server else {
             return (Lookup::Failed(Failed::NoServer), None);
         };
-        let asking = match self.asking {
-            Some(asking) if asking.name == name => {
+        let mine = self.places.iter().position(|place| matches!(place, Place::Asking(asking) if asking.name == name));
+        let (at, asking) = match mine {
+            Some(at) => {
+                let Place::Asking(asking) = self.places[at] else {
+                    return (Lookup::Asking, None);
+                };
                 if now < asking.again {
                     return (Lookup::Asking, None);
                 }
                 if asking.tries >= TRIES {
-                    self.asking = None;
+                    self.places[at] = Place::Free;
                     return (Lookup::Failed(Failed::Silent), None);
                 }
                 // the same question again: the first may have been lost
-                Asking { again: now + SECOND, tries: asking.tries + 1, ..asking }
+                (at, Asking { again: now + SECOND, tries: asking.tries + 1, ..asking })
             }
-            // one question at a time: this one takes the place of any other
-            _ => {
-                let drawn = self.draw();
-                // a port of ours among those kept for such uses
-                Asking { name, number: drawn as u16, port: 49152 + (drawn >> 16) as u16 % 16384, again: now + SECOND, tries: 1 }
+            None => {
+                let Some(at) = self.place(now) else {
+                    // every place is asking for another name: this one waits
+                    return (Lookup::Asking, None);
+                };
+                // a port of ours among those kept for such uses, that no other question has
+                let (number, port) = loop {
+                    let drawn = self.draw();
+                    let port = 49152 + (drawn >> 16) as u16 % 16384;
+                    if !self.places.iter().any(|place| matches!(place, Place::Asking(other) if other.port == port)) {
+                        break (drawn as u16, port);
+                    }
+                };
+                (at, Asking { name, number, port, again: now + SECOND, tries: 1 })
             }
         };
-        (self.asking, self.failed) = (Some(asking), None);
+        self.places[at] = Place::Asking(asking);
         self.asked += 1;
         let length = question(name.bytes(), asking.number, message);
         (Lookup::Asking, Some((server, port, asking.port, length)))
     }
 
-    /// The question could not be sent: nothing is being asked.
-    pub fn give_up(&mut self) {
-        self.asking = None;
+    /// A place for one more question: one that is free, else that of a
+    /// failure nobody took, the oldest, else that of a question nobody
+    /// looked at since two seconds after it was to be sent again: who
+    /// asked is gone.
+    fn place(&self, now: u64) -> Option<usize> {
+        let free = self.places.iter().position(|place| matches!(place, Place::Free));
+        let failed = || (0..ASKED).filter_map(|at| if let Place::Failed(_, _, since) = self.places[at] { Some((since, at)) } else { None }).min().map(|(_, at)| at);
+        let left = || (0..ASKED).filter_map(|at| if let Place::Asking(asking) = self.places[at] { Some((asking.again, at)) } else { None }).filter(|(again, _)| again + 2 * SECOND < now).min().map(|(_, at)| at);
+        free.or_else(failed).or_else(left)
+    }
+
+    /// The question about a name could not be sent, or who asked no
+    /// longer wants its answer: its place is free.
+    pub fn give_up(&mut self, name: &[u8]) {
+        let name = kept(name);
+        for place in &mut self.places {
+            if matches!(place, Place::Asking(asking) if asking.name == name) {
+                *place = Place::Free;
+            }
+        }
     }
 
     /// A UDP message came for a port of ours. Returns true if it was for
     /// the port a question was asked from, whatever it holds.
     pub fn answered(&mut self, from: Ip, from_port: u16, port: u16, bytes: &[u8], now: u64) -> bool {
-        let Some(asking) = self.asking.filter(|asking| asking.port == port) else {
+        let Some((at, asking)) = self.places.iter().enumerate().find_map(|(at, place)| if let Place::Asking(asking) = place { (asking.port == port).then_some((at, *asking)) } else { None }) else {
             return false;
         };
         if self.server != Some((from, from_port)) {
@@ -305,14 +351,11 @@ impl Names {
             None => {}
             Some(Ok((ip, seconds))) => {
                 // in the place of what is no longer kept, or of what ends first
-                let at = (0..KNOWN).min_by_key(|at| if self.known[*at].until <= now { 0 } else { self.known[*at].until }).unwrap_or(0);
-                self.known[at] = Known { name: asking.name, ip, until: now + (seconds as u64).clamp(KEPT.0, KEPT.1) * SECOND };
-                self.asking = None;
+                let known = (0..KNOWN).min_by_key(|at| if self.known[*at].until <= now { 0 } else { self.known[*at].until }).unwrap_or(0);
+                self.known[known] = Known { name: asking.name, ip, until: now + (seconds as u64).clamp(KEPT.0, KEPT.1) * SECOND };
+                self.places[at] = Place::Free;
             }
-            Some(Err(why)) => {
-                self.failed = Some((asking.name, why));
-                self.asking = None;
-            }
+            Some(Err(why)) => self.places[at] = Place::Failed(asking.name, why, now),
         }
         true
     }
@@ -460,6 +503,108 @@ pub(crate) mod tests {
         // and asking again starts anew, with another number
         let (state, send) = names.look(b"mute.example", now, &mut message);
         assert!(state == Lookup::Asking && send.is_some() && message[..2] != sent[0].2[..]);
+    }
+
+    #[test]
+    fn four_names_are_asked_side_by_side() {
+        let mut names = Names::new();
+        names.told(SERVER);
+        let asked = ["one.example", "two.example", "three.example", "four.example"];
+        let mut questions = Vec::new();
+        for name in asked {
+            let mut message = [0u8; QUESTION];
+            let (state, sent) = names.look(name.as_bytes(), 0, &mut message);
+            let (_, _, port, length) = sent.unwrap();
+            assert_eq!(state, Lookup::Asking);
+            questions.push((port, message[..length].to_vec()));
+        }
+        // each from a port of its own, and none took the place of another
+        let mut ports: Vec<u16> = questions.iter().map(|(port, _)| *port).collect();
+        ports.dedup();
+        assert_eq!(ports.len(), ASKED);
+        let mut message = [0u8; QUESTION];
+        for name in asked {
+            assert_eq!(names.look(name.as_bytes(), 10, &mut message), (Lookup::Asking, None), "{name}");
+        }
+        // the answers come in another order: each name gets its own
+        for (at, (port, question)) in questions.iter().enumerate().rev() {
+            assert!(names.answered(SERVER, 53, *port, &served(question, 0, &[(1, 30, &[10, 0, 0, at as u8 + 1])]), 20));
+        }
+        for (at, name) in asked.iter().enumerate() {
+            assert_eq!(names.look(name.as_bytes(), 21, &mut message), (Lookup::Found([10, 0, 0, at as u8 + 1]), None));
+        }
+        assert_eq!(names.asked, 4);
+    }
+
+    #[test]
+    fn a_fifth_name_waits_for_a_place() {
+        let mut names = Names::new();
+        names.told(SERVER);
+        let mut message = [0u8; QUESTION];
+        let mut first = None;
+        for name in ["one.example", "two.example", "three.example", "four.example"] {
+            let (_, sent) = names.look(name.as_bytes(), 0, &mut message);
+            first.get_or_insert((sent.unwrap(), message));
+        }
+        // nothing is sent for it, and the four go on
+        assert_eq!(names.look(b"five.example", 10, &mut message), (Lookup::Asking, None));
+        assert_eq!(names.look(b"one.example", 10, &mut message), (Lookup::Asking, None));
+        assert_eq!(names.asked, 4);
+        // one is answered: its place is the fifth's
+        let ((_, _, port, length), question) = first.unwrap();
+        assert!(names.answered(SERVER, 53, port, &served(&question[..length], 0, &[(1, 30, &[10, 0, 0, 1])]), 20));
+        assert!(matches!(names.look(b"five.example", 21, &mut message), (Lookup::Asking, Some(_))));
+        assert_eq!(names.look(b"one.example", 21, &mut message), (Lookup::Found([10, 0, 0, 1]), None));
+    }
+
+    #[test]
+    fn a_question_nobody_looks_at_gives_its_place_back() {
+        let mut names = Names::new();
+        names.told(SERVER);
+        let mut message = [0u8; QUESTION];
+        for name in ["one.example", "two.example", "three.example", "four.example"] {
+            names.look(name.as_bytes(), 0, &mut message);
+        }
+        // three go on being asked; who asked for the first is gone
+        for now in [100, 200] {
+            for name in ["two.example", "three.example", "four.example"] {
+                names.look(name.as_bytes(), now, &mut message);
+            }
+            assert_eq!(names.look(b"five.example", now, &mut message), (Lookup::Asking, None), "at {now}");
+        }
+        // three seconds after it was last sent, its place is taken
+        assert!(matches!(names.look(b"five.example", 301, &mut message), (Lookup::Asking, Some(_))));
+        // given up by who asked: at once
+        names.give_up(b"five.example");
+        assert!(matches!(names.look(b"six.example", 302, &mut message), (Lookup::Asking, Some(_))));
+    }
+
+    #[test]
+    fn a_failure_stays_with_its_name() {
+        let mut names = Names::new();
+        names.told(SERVER);
+        let mut sent = Vec::new();
+        for name in ["none.example", "empty.example", "good.example"] {
+            let mut message = [0u8; QUESTION];
+            let (_, send) = names.look(name.as_bytes(), 0, &mut message);
+            let (_, _, port, length) = send.unwrap();
+            sent.push((port, message[..length].to_vec()));
+        }
+        assert!(names.answered(SERVER, 53, sent[0].0, &served(&sent[0].1, 3, &[]), 5));
+        assert!(names.answered(SERVER, 53, sent[1].0, &served(&sent[1].1, 0, &[]), 5));
+        assert!(names.answered(SERVER, 53, sent[2].0, &served(&sent[2].1, 0, &[(1, 30, &[10, 0, 0, 3])]), 5));
+        let mut message = [0u8; QUESTION];
+        // whoever looks first, each hears of its own
+        assert_eq!(names.look(b"empty.example", 6, &mut message), (Lookup::Failed(Failed::NoAddress), None));
+        assert_eq!(names.look(b"good.example", 6, &mut message), (Lookup::Found([10, 0, 0, 3]), None));
+        assert_eq!(names.look(b"none.example", 6, &mut message), (Lookup::Failed(Failed::NoSuchName), None));
+        // a failure nobody takes does not keep its place for ever
+        for name in ["a.example", "b.example", "c.example", "d.example"] {
+            let (_, send) = names.look(name.as_bytes(), 7, &mut message);
+            let (_, _, port, length) = send.unwrap();
+            assert!(names.answered(SERVER, 53, port, &served(&message[..length], 3, &[]), 8));
+        }
+        assert!(matches!(names.look(b"e.example", 9, &mut message), (Lookup::Asking, Some(_))));
     }
 
     #[test]

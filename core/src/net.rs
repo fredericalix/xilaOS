@@ -340,7 +340,7 @@ impl Net {
         if let Some((to, to_port, from_port, length)) = send {
             if !self.message(to, to_port, from_port, &question[..length], now, wire) {
                 // no address of our own, or no way to the server
-                self.names.give_up();
+                self.names.give_up(name);
                 return crate::dns::Lookup::Failed(crate::dns::Failed::NoServer);
             }
         }
