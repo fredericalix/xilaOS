@@ -256,6 +256,7 @@ it. Its steps are [below](#the-companion).
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
 | 5. The virtual machine | The machine, XilaScript compiled for it, and programs as jobs that hold nothing; with it what phase 3 had of parameters, names of a program's own and commands that wait | Designed on 27 November 2026 ([below](#the-virtual-machine-and-the-jobs)), put ahead by the author. The machine and the compiler, then jobs, were built that day, parameters and names of a program's own on 28 November; the commands that wait for the network on 28 November too: the phase is built. Then application screens, batch work and the scheduling of jobs, each with a design of its own |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
+| 7. A memory by meaning for the companion | What it remembers found by what it means and not only by its last lines: vectors kept with the facts, a search by distance | Asked for by the author on 28 November 2026, as the piece of work that follows the panels ([below](#a-memory-by-meaning-for-the-companion)). Not designed |
 
 **Tried on the T430, and what still waits.** On 27 November 2026 the
 T430 was started from its network cable with the kernel of that day.
@@ -850,6 +851,48 @@ In four steps, each merged when its unit tests and its checks pass:
 3. Panels opened from a row, and programs on a key or an option.
 4. The stock: its text in the repository, the tool that sends it, its
    chapter of the documentation.
+
+### A memory by meaning for the companion
+
+Asked for by the author on 28 November 2026: the piece of work that
+follows the panels, before batch work and the scheduling of jobs. It
+gets a design of its own, with the author, before anything is built.
+
+**What is there today.** The companion remembers through three plain
+tables that are read again at every question: `remembered` (a fact of
+200 characters at most, added by its tool `remember`), of which the
+last twenty are told to the model; `talk`, of which the last six turns
+are sent; `acts`, the record of what it ran. What is older is not
+lost, but the model sees it only if it thinks of asking for it with
+`select`, and it then looks for words (`like`), not for what is meant.
+There is no vector and no search by distance anywhere in the system.
+
+**What is asked.** That what the companion is told of its memory be
+what bears on the question, however old, found by its meaning.
+
+**What the design has to settle**, none of it decided:
+
+- **Who makes the vectors.** A model of the Internet, reached as the
+  companion's own is (one more call for each fact that is kept and
+  for each question, each with its cost, and the text of the fact
+  leaves the machine once more), or something small enough to run on
+  the machine itself, which has no vector instructions in its kernel
+  today.
+- **Where a vector is kept.** A value of a table is a number or a
+  text of 48 characters and a table has eight columns: a vector of a
+  few hundred numbers is neither. A kind of column of its own in the
+  storage engine, or a table apart that only the companion reads, as
+  `kept_keys` is apart.
+- **How it is searched.** By reading them all, which a few thousand
+  facts allow, or through an index made for distances.
+- **What is given a vector**: the facts of `remembered` only, or the
+  turns of `talk` too.
+- **What the model is then sent**: the nearest facts beside the last
+  ones, how many, and what it is told of where they come from.
+- **What the user sees and holds**: the tables stay the user's to
+  read and to empty; a fact that is removed must take its vector with
+  it; and what leaves the machine to become a vector is said, as what
+  is not encrypted is said.
 
 ### Loose ends of what exists
 

@@ -290,7 +290,9 @@ XilaOS|all:/>select at, text from remembered
 A fact holds 200 characters. The table is the user's: `delete from
 remembered where id = 1` makes it forget one thing, and a row added by
 hand is a thing it will be told. There is no search in it and no index
-of meanings: twenty short lines are read whole.
+of meanings: twenty short lines are read whole. A memory found by what
+it means is the piece of work planned after the panels
+([Status and roadmap](13-status-and-roadmap.md#a-memory-by-meaning-for-the-companion)).
 
 ## What is said is kept
 
