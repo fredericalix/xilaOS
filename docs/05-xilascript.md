@@ -436,8 +436,10 @@ What is not there:
 - **What still holds the system while it runs**: one instruction, however
   long (a `select` over a large table, `disk check`, `install` writing a
   disk), and whole programs started from the prompt over the network or
-  run for the companion, which are not jobs yet, with what they ask of the
-  network. Those two keep the limits that stop a program nobody watches.
+  run for the companion, which are not jobs yet; what the first asks of
+  the network holds the system too (the second is given no command that
+  needs the kernel). Those two keep the limits that stop a program nobody
+  watches.
 
 ## Jobs
 
@@ -673,5 +675,5 @@ the table of programs, the programs that run by themselves), `code.rs`
   what one instruction needs: its lines, its instructions and its rows are
   in `System::vm`, about 278 KB (four units of 46 KB, four cursors of
   20 KB, the names put aside for four programs), which makes a `System`
-  about 454 KB with the list of the jobs. The lines of a program are
+  about 482 KB with the list of the jobs and what they wait for. The lines of a program are
   on the stack, 12 KB, only while it is loaded and compiled.

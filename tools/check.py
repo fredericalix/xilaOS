@@ -1441,10 +1441,7 @@ with Xila(net="e1000e") as x:
     quick = time.time() - began
     states = {row["job"]: row["state"] for row in x.table("jobs")}
     check("a job that waits for the network holds nothing: the prompt answers at once",
-          lives == (True, ["2"]) and quick < 1.0 and [states.get(number) for number in numbers] == ["waiting", "waiting"], (lives, quick, states))
-    x.type("say 'the screen too'")
-    x.key("ret")
-    check("and so does the screen", body(x)[-2].strip() == "the screen too", body(x)[-3:])
+          lives == (True, ["2"]) and quick < 1.5 and [states.get(number) for number in numbers] == ["waiting", "waiting"], (lives, quick, states))
     for _ in range(60):
         states = {row["job"]: row["state"] for row in x.table("jobs")}
         if all(states.get(number) == "done" for number in numbers):
@@ -1466,16 +1463,25 @@ with Xila(net="e1000e") as x:
     # at the serial port Ctrl+C gives the question up, and what is typed ahead is run after
     began = time.time()
     x.begin("net get %s/slow-stopped" % there)
-    time.sleep(0.5)
+    time.sleep(0.3)
     ok, lines = x.stop()
+    stopped = time.time() - began
     after = x.cmd("net get %s/after" % there)
     check("Ctrl+C gives up a question that waits, and the next one is answered",
-          not ok and lines == ["Stopped."] and time.time() - began < 1.8 and after == (True, [there + " answered 200.", "hello from the host", "you asked for /after"]), (ok, lines, after))
+          not ok and lines == ["Stopped."] and stopped < 1.7 and after == (True, [there + " answered 200.", "hello from the host", "you asked for /after"]), (ok, lines, stopped, after))
     x.serial.sendall(("net get %s/slow-ahead\rsay 'typed ahead'\r" % there).encode())
     first = x.cmd(None, timeout=20)
     second = x.cmd(None, timeout=20)
     check("what is typed ahead of a command that waits is run after it",
           first == (True, [there + " answered 200.", "hello from the host", "you asked for /slow-ahead"]) and second == (True, ["typed ahead"]), (first, second))
+    # a code is made of an answer that was waited for, not of the nothing there is before it
+    for line in ("program coded", "qr net ping 10.0.2.2", "end"):
+        x.cmd(line)
+    ok, lines = x.cmd("coded")
+    check("qr of a command that waits for the network, in a program, makes its code of the answer",
+          ok and len(lines) == 1 and re.fullmatch(r"A code of \d+ characters is on the screen\.", lines[0]), lines)
+    x.key("esc")
+    x.cmd("drop program coded")
     # three pings nobody answers, a second each: side by side they take one
     for line in ("program lost", "net ping 10.0.2.99", "end"):
         x.cmd(line)

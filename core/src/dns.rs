@@ -42,6 +42,9 @@ const TRIES: u8 = 3;
 /// An address is kept for as long as its answer says, within these.
 const KEPT: (u64, u64) = (10, 86_400);
 const KNOWN: usize = 8;
+/// Ticks for which a failure is said to whoever asks about its name, so
+/// that all who asked hear it; after that the name is asked about again.
+const HEARD: u64 = 20;
 /// Names that are asked about at one time, a question each.
 pub const ASKED: usize = 4;
 
@@ -202,8 +205,9 @@ struct Asking {
 enum Place {
     Free,
     Asking(Asking),
-    /// What the server said of a name it has no address for, and when,
-    /// until who asked takes it or the place is needed.
+    /// What came of a name that has no address, or whose server stayed
+    /// silent, and when: said for `HEARD` ticks to whoever asks, or until
+    /// the place is needed.
     Failed(Name, Failed, u64),
 }
 
@@ -269,11 +273,12 @@ impl Names {
         if let Some(known) = self.known.iter().find(|known| known.until > now && known.name == name) {
             return (Lookup::Found(known.ip), None);
         }
-        if let Some(at) = self.places.iter().position(|place| matches!(place, Place::Failed(failed, ..) if *failed == name)) {
-            let Place::Failed(_, why, _) = core::mem::replace(&mut self.places[at], Place::Free) else {
-                return (Lookup::Asking, None);
-            };
-            return (Lookup::Failed(why), None);
+        if let Some((at, why, since)) = self.places.iter().enumerate().find_map(|(at, place)| if let Place::Failed(failed, why, since) = place { (*failed == name).then_some((at, *why, *since)) } else { None }) {
+            if now < since + HEARD {
+                return (Lookup::Failed(why), None);
+            }
+            // said long enough: the name may have an address by now
+            self.places[at] = Place::Free;
         }
         let Some((server, port)) = self.server else {
             return (Lookup::Failed(Failed::NoServer), None);
@@ -288,7 +293,7 @@ impl Names {
                     return (Lookup::Asking, None);
                 }
                 if asking.tries >= TRIES {
-                    self.places[at] = Place::Free;
+                    self.places[at] = Place::Failed(name, Failed::Silent, now);
                     return (Lookup::Failed(Failed::Silent), None);
                 }
                 // the same question again: the first may have been lost
@@ -500,8 +505,10 @@ pub(crate) mod tests {
         assert_eq!(sent.iter().map(|(at, ..)| *at).collect::<Vec<_>>(), [0, 100, 200]);
         assert!(sent.iter().all(|(_, send, number)| *send == sent[0].1 && *number == sent[0].2));
         assert_eq!(now, 310);
-        // and asking again starts anew, with another number
-        let (state, send) = names.look(b"mute.example", now, &mut message);
+        // another who asked about the same name hears the same, without three more seconds
+        assert_eq!(names.look(b"mute.example", now, &mut message), (Lookup::Failed(Failed::Silent), None));
+        // and asking again later starts anew, with another number
+        let (state, send) = names.look(b"mute.example", now + HEARD, &mut message);
         assert!(state == Lookup::Asking && send.is_some() && message[..2] != sent[0].2[..]);
     }
 
@@ -616,8 +623,11 @@ pub(crate) mod tests {
         let (_, _, port, length) = sent.unwrap();
         assert!(names.answered(SERVER, 53, port, &served(&message[..length], 3, &[]), 5));
         assert_eq!(names.look(b"none.example", 6, &mut message), (Lookup::Failed(Failed::NoSuchName), None));
-        // asked again the next time: the name may exist by then
-        assert!(matches!(names.look(b"none.example", 7, &mut message), (Lookup::Asking, Some(_))));
+        // everyone who asked hears it: said for a fifth of a second, to whoever looks
+        assert_eq!(names.look(b"none.example", 5 + HEARD - 1, &mut message), (Lookup::Failed(Failed::NoSuchName), None));
+        assert_eq!(names.asked, 1);
+        // asked again after that: the name may exist by then
+        assert!(matches!(names.look(b"none.example", 5 + HEARD, &mut message), (Lookup::Asking, Some(_))));
     }
 
     #[test]

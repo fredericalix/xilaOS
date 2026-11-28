@@ -1011,6 +1011,42 @@ mod tests {
     }
 
     #[test]
+    fn a_code_is_made_of_an_answer_that_was_waited_for() {
+        use crate::net::tests::{echo, Kept};
+        let mut sys = crate::waits::tests::networked();
+        rooms(&mut sys, PLACES + 1);
+        // in a job the screen waits for, `qr` runs its line at once and wants its answer as a code
+        let asks = lines(&["qr net ping 8.8.8.8", "say 'after'"]);
+        let number = begin(&mut sys, What::Lines(&asks), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        let mut out = Lines::default();
+        for _ in 0..10 {
+            turn(&mut sys, place, &mut out, &mut || true);
+            if sys.request.is_some() {
+                break;
+            }
+        }
+        assert!(sys.noting && sys.jobs.list()[place].state == State::Waiting);
+        assert!(crate::waits::begin(&mut sys, place, 0));
+        // who gave the turn asks what the kernel answered: nothing yet, and no code of nothing
+        assert!(crate::shell::served(&mut sys, &mut out));
+        answered(&mut sys, place, true);
+        assert_eq!((out.lines.len(), sys.code.is_some(), sys.jobs.list()[place].state), (0, false, State::Waiting));
+        // the answer comes: it is the code, and the job goes on
+        let mut wire = Kept::default();
+        crate::waits::step(&mut sys, place, &mut wire, 100, 1_000, None, &mut []);
+        let answer = echo(&wire.0[0], [8, 8, 8, 8]);
+        sys.net.receive(&answer, 101, &mut wire);
+        crate::waits::step(&mut sys, place, &mut wire, 101, 3_500, None, &mut []);
+        assert!(crate::waits::take(&mut sys, place));
+        assert!(crate::shell::served(&mut sys, &mut out));
+        answered(&mut sys, place, true);
+        assert_eq!(out.lines, ["A code of 28 characters is on the screen."]);
+        assert!(sys.code.is_some() && !sys.noting);
+        assert_eq!(finish(&mut sys, place), ["after"]);
+    }
+
+    #[test]
     fn a_job_stopped_while_it_waits_hangs_up() {
         use crate::net::tests::Kept;
         let mut sys = crate::waits::tests::networked();

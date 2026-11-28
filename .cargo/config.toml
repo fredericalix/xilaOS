@@ -12,8 +12,8 @@ rustflags = [
 ]
 
 # A unit test makes a whole System on its stack, more than once when a
-# helper returns one: 454 KB each since a machine keeps the names of who
-# called each program. The 2 MB a test thread gets by default no longer
+# helper returns one: 482 KB each, with the room of the virtual machine,
+# the names of who called each program and what jobs wait for. The 2 MB a test thread gets by default no longer
 # hold that, so the tests are given 8 MB. This says nothing of the
 # kernel, whose System is not on a stack: its task stacks are tried by
 # tools/check.py.

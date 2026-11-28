@@ -15,9 +15,11 @@
 //! is alone: there is one room for a system that is fetched, so a second
 //! `install from` waits for the first.
 //!
-//! What runs at once (the prompt over the network, what the companion
-//! runs, a system with no rooms) has a place of its own, `AT_ONCE`, and
-//! the kernel steps it to its end before it does anything else.
+//! What runs at once (the prompt over the network, a system with no
+//! rooms, a line typed with every place of a job taken) has a place of
+//! its own, `AT_ONCE`, and the kernel steps it to its end before it does
+//! anything else. (What the companion runs never comes here: a request
+//! left for the kernel is taken back from it.)
 //!
 //! Two things a wait needs are the kernel's to keep, since they take
 //! memory of its own: the TLS client of a page asked in secret, given to
@@ -73,7 +75,7 @@ enum Stage {
     /// A page: the address once it is known, then the conversation.
     /// `since` is the tick it began to wait for a conversation to be free.
     Page { to: Option<Ip>, port: u16, secret: bool, post: bool, ask: Option<Ask>, since: u64 },
-    /// A fetch: going once the room for a system is its own.
+    /// A fetch: going once the room for a system is its own, and since when.
     Fetch { server: Ip, fetch: Option<tftp::Fetch>, began: u64 },
     Done(Outcome),
 }
@@ -88,6 +90,9 @@ pub struct Wait {
     path: FixedStr<200>,
     text: Text,
     kept: [u8; START],
+    /// Whether the answer is wanted as a code (`qr`): what `System`
+    /// said so when the wait began, given back with the outcome.
+    noting: bool,
 }
 
 pub struct Waits {
@@ -120,7 +125,9 @@ pub fn begin(sys: &mut System, at: usize, micros: u64) -> bool {
     sys.request = None;
     // one that was there is hung up: its place has another to ask
     drop(sys, at);
-    sys.waits.list[at] = Some(Wait { stage, machine: sys.asked_machine, path: sys.asked_path, text: sys.asked_text, kept: [0; START] });
+    // a code is made of the answer, not of the nothing there is to say until it comes
+    let noting = core::mem::take(&mut sys.noting);
+    sys.waits.list[at] = Some(Wait { stage, machine: sys.asked_machine, path: sys.asked_path, text: sys.asked_text, kept: [0; START], noting });
     true
 }
 
@@ -203,12 +210,15 @@ pub fn no_room(sys: &mut System) {
 /// place where its name is asked about.
 fn hang_up(sys: &mut System, at: usize) {
     let System { waits, net, .. } = sys;
+    let naming = |wait: &Wait| matches!(wait.stage, Stage::Page { to: None, .. } | Stage::Name);
+    // another wait may ask about the same name: the question is then its own too
+    let shared = waits.list.get(at).copied().flatten().is_some_and(|mine| waits.list.iter().enumerate().any(|(other, wait)| other != at && wait.is_some_and(|wait| naming(&wait) && wait.machine.bytes().eq_ignore_ascii_case(mine.machine.bytes()))));
     let Some(wait) = waits.list.get_mut(at).and_then(|wait| wait.as_mut()) else {
         return;
     };
     match &mut wait.stage {
         Stage::Page { ask: Some(ask), .. } => ask.drop_it(&mut net.tcp),
-        Stage::Page { to: None, .. } | Stage::Name => net.names.give_up(wait.machine.bytes()),
+        Stage::Page { to: None, .. } | Stage::Name if !shared => net.names.give_up(wait.machine.bytes()),
         _ => {}
     }
 }
@@ -226,10 +236,11 @@ pub fn drop(sys: &mut System, at: usize) {
 /// `shell::served` reads the kernel's answers, with the machine that was
 /// asked. True when there was something: it is then to be said.
 pub fn take(sys: &mut System, at: usize) -> bool {
-    let Some(Wait { stage: Stage::Done(outcome), machine, .. }) = sys.waits.list.get(at).copied().flatten() else {
+    let Some(Wait { stage: Stage::Done(outcome), machine, noting, .. }) = sys.waits.list.get(at).copied().flatten() else {
         return false;
     };
     sys.waits.list[at] = None;
+    sys.noting |= noting;
     match outcome {
         Outcome::Pinged(to, took) => sys.pinged = Some((to, took)),
         Outcome::Named(found) => (sys.asked_machine, sys.named) = (machine, Some(found)),
@@ -277,7 +288,7 @@ pub fn step(sys: &mut System, at: usize, wire: &mut dyn Wire, now: u64, micros: 
     let taken = filling(sys);
     let System { waits, net, .. } = sys;
     let wait = waits.list.get_mut(at)?.as_mut()?;
-    let Wait { stage, machine, path, text, kept } = wait;
+    let Wait { stage, machine, path, text, kept, .. } = wait;
     let outcome = match stage {
         Stage::Done(_) => return None,
         Stage::Ping { to, sent: None } => {
@@ -334,11 +345,12 @@ pub fn step(sys: &mut System, at: usize, wire: &mut dyn Wire, now: u64, micros: 
                 ask::Step::Failed(why) => Outcome::Got(*port, Err(why)),
             }
         }
-        Stage::Fetch { server, fetch: None, began } => {
+        Stage::Fetch { server, fetch: None, .. } => {
             if taken || room.is_empty() {
                 return None;
             }
-            *stage = Stage::Fetch { server: *server, fetch: Some(tftp::Fetch::start(*server, now, net, wire)), began: *began };
+            // its minute is counted from here: it may have waited for the room
+            *stage = Stage::Fetch { server: *server, fetch: Some(tftp::Fetch::start(*server, now, net, wire)), began: micros };
             return None;
         }
         Stage::Fetch { server, fetch: Some(fetch), began } => {
@@ -661,6 +673,18 @@ pub(crate) mod tests {
             pass(&mut sys, at, &mut wire, 20, 0);
             drop(&mut sys, at);
         }
+        // two ask about the same name: one that is dropped leaves the other its question
+        ask(&mut sys, 0, "net name shared.example");
+        ask(&mut sys, 1, "net get shared.example/");
+        pass(&mut sys, 0, &mut wire, 20, 0);
+        pass(&mut sys, 1, &mut wire, 20, 0);
+        let asked = sys.net.names.asked;
+        drop(&mut sys, 1);
+        pass(&mut sys, 0, &mut wire, 21, 0);
+        assert_eq!(sys.net.names.asked, asked, "the question was not sent again");
+        assert!(name_server(&mut sys, &mut wire, "shared.example", Some([10, 0, 0, 9]), 22));
+        pass(&mut sys, 0, &mut wire, 22, 0);
+        assert_eq!(said(&mut sys, 0), ["shared.example is at 10.0.0.9."]);
         let asked = sys.net.names.asked;
         ask(&mut sys, 5, "net name here.example");
         pass(&mut sys, 5, &mut wire, 21, 0);
@@ -719,10 +743,13 @@ pub(crate) mod tests {
         assert!(done(&sys, 0) && going(&sys, 1) && !filling(&sys));
         let told = said(&mut sys, 0);
         assert!(told[0].starts_with("192.168.1.1 gave a system of 1300 bytes, check "), "{told:?}");
-        // the second has the room now
+        // the second has the room now, more than a minute after it was
+        // asked: its minute is counted from here
         let before = wire.0.len();
-        assert_eq!(step(&mut sys, 1, &mut wire, 13, 0, None, &mut room), None);
+        assert_eq!(step(&mut sys, 1, &mut wire, 13, 70_000_000, None, &mut room), None);
         assert_eq!(wire.0.len(), before + 1);
+        assert_eq!(step(&mut sys, 1, &mut wire, 13, 70_500_000, None, &mut room), None);
+        assert!(going(&sys, 1));
         // what it is given is no system: said so, and no length is returned
         assert_eq!(serve_file(&mut sys, &mut wire, &mut room, &[7u8; 700], 14), None);
         assert_eq!(said(&mut sys, 1), ["192.168.1.1 gave something that is not a system for this machine."]);

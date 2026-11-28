@@ -62,8 +62,8 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 28 November 2026: about 41,000 lines, 391
-unit tests, 551 system checks.
+about 300 system checks. On 28 November 2026: about 42,000 lines, 410
+unit tests, 559 system checks.
 
 ## Known limits of what is done
 
@@ -690,8 +690,9 @@ minute.
   gives the lock back. At one step a tick `install from` would take
   most of a minute; so it does not rest while frames come.
 - **A job that is stopped while it waits** hangs up.
-- **What still runs at once** (the prompt over the network, what the
-  companion runs, a system with no rooms) goes through the same
+- **What still runs at once** (the prompt over the network, a system
+  with no rooms; the companion is given no command that needs the
+  kernel) goes through the same
   questions, carried to their end without the lock being given back:
   the author's choice of 27 November for those two stands.
 - **Not this step**: `install` writing a disk, `disk check`, a
@@ -758,7 +759,7 @@ Then the screens, and the stock of equipment.
   codes. (The companion and the web pages read and write them as
   UTF-8 since 27 November 2026.)
 - What the prompt over the network and the companion run still holds
-  the system, with what it asks of the network.
+  the system, and so does what the first asks of the network.
 - A development mode. The serial shell is always open and may do
   everything; it is meant to be open in QEMU, or on request at start,
   and closed otherwise.

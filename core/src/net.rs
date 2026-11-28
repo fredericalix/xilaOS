@@ -142,8 +142,9 @@ pub struct Message<'a> {
 const KNOWN: usize = 8;
 /// Packets that wait at one time for the address of a card.
 pub const HELD: usize = 4;
-/// Pings whose answers are waited for at one time.
-pub const PINGS: usize = 8;
+/// Pings whose answers are waited for at one time: more than there are
+/// waits (`waits::PLACES`), so that none is pushed out while it is waited for.
+pub const PINGS: usize = 12;
 
 /// The network as this machine sees it.
 pub struct Net {
