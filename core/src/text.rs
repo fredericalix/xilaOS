@@ -63,6 +63,11 @@ impl<const N: usize> FixedStr<N> {
         }
     }
 
+    /// Turns ASCII small letters into capitals.
+    pub fn upper(&mut self) {
+        self.buf[..self.len].make_ascii_uppercase();
+    }
+
     /// Makes the letters small.
     pub fn lower(&mut self) {
         let len = self.len;

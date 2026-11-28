@@ -9,7 +9,7 @@
 use core::fmt::Write;
 
 use crate::city;
-use crate::shell::{System, Text, NAMES, SCREENS};
+use crate::shell::{System, Text, NAMES};
 use crate::change::engine_error;
 use crate::sql::{row_from, Kind, Message, Row, Schema, Source, TableDef, Value, MAX_COLUMNS};
 use crate::theme::THEMES;
@@ -261,12 +261,17 @@ impl System {
                 visit(&row(&[text(b"energy"), Value::Text(energy)]));
                 visit(&row(&[text(b"theme"), text(THEMES[self.theme].name)]));
                 visit(&row(&[text(b"keymap"), text(self.layout.name())]));
-                visit(&row(&[text(b"screen"), text(SCREENS[self.screen])]));
+                // the overview, the log, the companion's, or a panel that is open
+                let mut shown = Text::new();
+                crate::panel::screens(self, &mut |number, name| {
+                    if number == self.screen {
+                        shown = Text::from_bytes(name);
+                    }
+                });
+                visit(&row(&[text(b"screen"), Value::Text(shown)]));
             }
             4 => {
-                for (id, name) in SCREENS.iter().enumerate() {
-                    visit(&row(&[number(id as u64), text(name), text(if id == self.screen { b"yes" } else { b"" })]));
-                }
+                crate::panel::screens(self, &mut |id, name| visit(&row(&[number(id as u64), text(name), text(if id == self.screen { b"yes" } else { b"" })])));
             }
             5 => {
                 let m = &self.machine;

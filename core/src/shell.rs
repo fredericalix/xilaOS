@@ -916,6 +916,8 @@ pub struct System {
     pub jobs: crate::jobs::Jobs,
     /// What jobs asked of the network and wait for (`waits.rs`).
     pub waits: crate::waits::Waits,
+    /// The panels that are open, each a virtual screen (`panel.rs`).
+    pub panels: crate::panel::Panels,
     pub display: Display,
     /// The kernel's answer to `Request::Measure`.
     pub measured: Option<Measure>,
@@ -1075,6 +1077,7 @@ impl System {
             rooms: None,
             jobs: crate::jobs::Jobs::new(),
             waits: crate::waits::Waits::new(),
+            panels: crate::panel::Panels::new(),
             display: Display { shown: Pictures::Direct, every: 0, sweeps: 0, light: None, direct: false, combining: false, whole_us: 0, firmware_us: 0, pictures: 0, longest_us: 0, city_us: 0, skipped: 0 },
             measured: None,
             note: Note::new(),
@@ -1408,6 +1411,8 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
             sys.reboot = true;
             true
         }
+        // the name of a panel opens it
+        _ if arg.is_empty() && crate::panel::exists(sys, word) => crate::panel::open(sys, word, out),
         _ => {
             let mut msg = FixedStr::<COLS>::from_bytes(b"Unknown command: ");
             msg.push_bytes(word);
@@ -2490,20 +2495,27 @@ fn answers(sys: &mut System, out: &mut dyn Out) {
 
 fn screen(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     if arg.is_empty() {
+        // the three the system has, then the panels that are open
         let mut t = Table::new(b"screen", &[b"key", b"screen", b"state"]);
-        for (i, name) in SCREENS.iter().enumerate() {
+        let shown = sys.screen;
+        crate::panel::screens(sys, &mut |i, name| {
             let mut key = Text::new();
             let _ = write!(key, "[Alt]+[{}]", i);
             let mut command = Text::new();
             let _ = write!(command, "screen {}", i);
-            t.row_to(&[key.bytes(), name, if i == sys.screen { b"shown" } else { b"" }], command.bytes());
-        }
+            t.row_to(&[key.bytes(), name, if i == shown { b"shown" } else { b"" }], command.bytes());
+        });
         show(sys, out, &t);
         return true;
     }
-    let wanted = parse_number(arg).or_else(|| SCREENS.iter().position(|name| name.eq_ignore_ascii_case(arg)));
+    let mut wanted = None;
+    crate::panel::screens(sys, &mut |number, name| {
+        if parse_number(arg) == Some(number) || name.eq_ignore_ascii_case(arg) {
+            wanted = wanted.or(Some(number));
+        }
+    });
     match wanted {
-        Some(n) if n < SCREENS.len() => {
+        Some(n) => {
             sys.screen = n;
             true
         }

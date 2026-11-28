@@ -29,16 +29,36 @@ use xila_db::Field as Stored;
 
 use crate::change::engine_error;
 use crate::code::Fault;
-use crate::grid::COLS;
+use crate::expr::NO_VARS;
+use crate::grid::{fx, Cell, Grid, COLS};
+use crate::keys::{Key, KeyEvent};
 use crate::lang::{self, word_of, Line, MAX_LINES};
-use crate::shell::{self, Out, Style, System, Table, Text};
-use crate::sql::{self, Message, Name, Schema, Source};
+use crate::shell::{self, Out, Style, System, Table, Text, SCREENS};
+use crate::sql::{self, Message, Name, Schema, Source, Value};
 use crate::text::{split_word, trim, FixedStr};
+use crate::theme::role;
 
 /// The table panels are kept in.
 pub const PANELS: &[u8] = b"panels";
 /// Columns a list shows, and fields a form has: what a table has but `id`.
 pub const COLUMNS: usize = sql::MAX_COLUMNS - 1;
+
+/// Panels open at one time, each a virtual screen.
+pub const OPEN: usize = 4;
+/// Rows a page of a list has at most: what the tallest screen has room for.
+const ROWS: usize = 40;
+/// Pages one can go back through; before those, `PgUp` stops.
+const BACK: usize = 64;
+/// Characters of the line to find, and the text columns it looks in.
+const FIND: usize = 40;
+const LOOKED: usize = 3;
+/// Ticks between two looks at whether the list changed under who reads it.
+const AGAIN: u64 = 100;
+/// The first rows of a panel's screen, before those of its list: a blank
+/// one, the title, the line to find, a blank one, the names of the
+/// columns. And its last rows: what it has to say, and its keys.
+const HEAD: usize = 5;
+const FOOT: usize = 2;
 
 /// A label, of a field or of a panel.
 pub type Label = FixedStr<32>;
@@ -233,6 +253,7 @@ pub fn define(sys: &mut System, written: &[u8], lines: &[Line], out: &mut dyn Ou
             let (what, count) = (if replaced { "replaced" } else { "kept" }, lines.len());
             let _ = write!(message, "Panel {lower} {what}: {count} line{}.", if count == 1 { "" } else { "s" });
             out.line(Style::Out, message.bytes());
+            kept_again(sys, lower.bytes());
             true
         }
         Err(error) => {
@@ -370,6 +391,7 @@ pub fn remove(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
             lower.lower();
             sys.events.notify(PANELS, Text::from_bytes(b"drop ").also(lower.bytes()).bytes(), now);
             out.line(Style::Out, FixedStr::<COLS>::from_bytes(b"Panel ").also(lower.bytes()).also(b" removed.").bytes());
+            kept_again(sys, lower.bytes());
             true
         }
         Err(error) => {
@@ -378,6 +400,387 @@ pub fn remove(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
             false
         }
     }
+}
+
+/// A panel that is open: what its list shows, and where in its table.
+pub struct Open {
+    pub panel: Panel,
+    /// What is typed in the line to find, and what the list was read with.
+    find: FixedStr<FIND>,
+    found: FixedStr<FIND>,
+    /// The id after which this page begins, and those of the pages
+    /// before it, for the way back.
+    after: u64,
+    starts: [u64; BACK],
+    back: usize,
+    /// How many pages are before this one.
+    page: usize,
+    /// The page as it is shown: the names of the columns, then each row
+    /// with its id.
+    header: FixedStr<COLS>,
+    ids: [u64; ROWS],
+    lines: [FixedStr<COLS>; ROWS],
+    count: usize,
+    /// Whether rows follow this page.
+    more: bool,
+    /// What the panel has to say, and whether it is a failure.
+    message: FixedStr<COLS>,
+    failed: bool,
+    /// The tick of the last reading, and of the last look at whether the
+    /// tables changed since.
+    read: u64,
+    looked: u64,
+}
+
+/// The panels that are open, each at its place: the virtual screen
+/// `SCREENS.len() + place`.
+pub struct Panels {
+    open: [Option<Open>; OPEN],
+    /// Rows a list may show: what the screen has under the title bar,
+    /// less the head and the foot of a panel. The interface says it.
+    pub rows: usize,
+}
+
+impl Panels {
+    pub const fn new() -> Panels {
+        Panels { open: [const { None }; OPEN], rows: 20 }
+    }
+}
+
+impl Default for Panels {
+    fn default() -> Panels {
+        Panels::new()
+    }
+}
+
+/// The rows a list may show on a screen of so many rows, the first of
+/// its panel being `top`.
+pub fn rows_for(rows: usize, top: usize) -> usize {
+    rows.saturating_sub(top + HEAD + FOOT).clamp(1, ROWS)
+}
+
+/// The place of the panel a screen shows, if it shows one that is open.
+pub fn place_of(sys: &System, screen: usize) -> Option<usize> {
+    screen.checked_sub(SCREENS.len()).filter(|place| sys.panels.open.get(*place).is_some_and(|open| open.is_some()))
+}
+
+/// Calls `visit` with every virtual screen there is, by its number and
+/// its name: the three the system has, then the panels that are open.
+pub fn screens(sys: &System, visit: &mut dyn FnMut(usize, &[u8])) {
+    for (number, name) in SCREENS.iter().enumerate() {
+        visit(number, name);
+    }
+    for (place, open) in sys.panels.open.iter().enumerate() {
+        if let Some(open) = open {
+            visit(SCREENS.len() + place, open.panel.name.bytes());
+        }
+    }
+}
+
+/// The name of the panel a screen shows, in the letters of a title.
+pub fn title(sys: &System, screen: usize) -> Option<Name> {
+    let mut name = sys.panels.open[place_of(sys, screen)?].as_ref()?.panel.name;
+    name.upper();
+    Some(name)
+}
+
+/// Opens a panel by its name, as a virtual screen of its own, and goes
+/// to it. One that is open already is gone to. A panel opens for who
+/// sits at the screen of the machine, and nobody else.
+pub fn open(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
+    let fail = |out: &mut dyn Out, message: &[u8]| {
+        out.line(Style::Error, message);
+        false
+    };
+    let seen = crate::jobs::in_turn(sys).is_none_or(|job| job.watch == crate::jobs::Watch::Screen);
+    if sys.session != crate::events::SCREEN || sys.acting || !seen {
+        return fail(out, sql::error(b"A panel opens at the screen of the machine: ", name).also(b".").bytes());
+    }
+    if let Some(place) = sys.panels.open.iter().position(|open| open.as_ref().is_some_and(|open| open.panel.name.bytes().eq_ignore_ascii_case(name))) {
+        sys.screen = SCREENS.len() + place;
+        return true;
+    }
+    let Some(place) = sys.panels.open.iter().position(|open| open.is_none()) else {
+        return fail(out, b"Four panels are open: leave one with [F3].");
+    };
+    let mut lines = [Line::new(); MAX_LINES];
+    let panel = match load(sys, name, &mut lines) {
+        Ok(Some((panel, _))) => panel,
+        Ok(None) => return fail(out, unknown(name).bytes()),
+        Err(message) => return fail(out, message.bytes()),
+    };
+    sys.panels.open[place] = Some(Open {
+        panel,
+        find: FixedStr::new(),
+        found: FixedStr::new(),
+        after: 0,
+        starts: [0; BACK],
+        back: 0,
+        page: 0,
+        header: FixedStr::new(),
+        ids: [0; ROWS],
+        lines: [FixedStr::new(); ROWS],
+        count: 0,
+        more: false,
+        message: FixedStr::new(),
+        failed: false,
+        read: 0,
+        looked: 0,
+    });
+    read(sys, place);
+    sys.screen = SCREENS.len() + place;
+    true
+}
+
+/// Leaves the panel of a place: its screen is no more, and the overview
+/// is shown if it was that one.
+pub fn close(sys: &mut System, place: usize) {
+    sys.panels.open[place] = None;
+    if sys.screen == SCREENS.len() + place {
+        sys.screen = 0;
+    }
+}
+
+/// A panel was kept again or removed: one that is open under that name
+/// is read anew as it is described now, or left if it cannot be.
+fn kept_again(sys: &mut System, name: &[u8]) {
+    let Some(place) = sys.panels.open.iter().position(|open| open.as_ref().is_some_and(|open| open.panel.name.bytes().eq_ignore_ascii_case(name))) else {
+        return;
+    };
+    let mut lines = [Line::new(); MAX_LINES];
+    match load(sys, name, &mut lines) {
+        Ok(Some((panel, _))) => {
+            if let Some(open) = sys.panels.open[place].as_mut() {
+                (open.panel, open.after, open.back, open.page) = (panel, 0, 0, 0);
+            }
+            read(sys, place);
+        }
+        _ => close(sys, place),
+    }
+}
+
+/// Writes a value as a list shows it, in a width: a number to the right,
+/// anything else to the left, cut when it is longer.
+fn cell(line: &mut FixedStr<COLS>, value: &[u8], width: usize, number: bool) {
+    let shown = &value[..value.len().min(width)];
+    let pad = width - shown.len();
+    for _ in 0..if number { pad } else { 0 } {
+        line.push(b' ');
+    }
+    line.push_bytes(shown);
+    for _ in 0..if number { 0 } else { pad } {
+        line.push(b' ');
+    }
+}
+
+/// Reads the page of a list from its table: the rows after `after`,
+/// those that hold what is looked for when something is, as many as the
+/// screen shows. What cannot be read is the panel's message, and its
+/// list is then empty.
+///
+/// Never part of who calls it: it holds a cursor, 20 KB, for the time
+/// it reads.
+#[inline(never)]
+fn read(sys: &mut System, place: usize) {
+    let Some(mut open) = sys.panels.open[place].take() else {
+        return;
+    };
+    let wanted = sys.panels.rows.clamp(1, ROWS);
+    let listed = open.panel.listed;
+    (open.count, open.more, open.read) = (0, false, sys.ticks);
+    open.header.clear();
+    // one row more than the page shows, to know whether a page follows
+    let mut cells = [[Text::new(); sql::MAX_COLUMNS]; ROWS + 1];
+    let mut numbers = [false; sql::MAX_COLUMNS];
+    let mut ids = [0u64; ROWS + 1];
+    let mut count = 0;
+    let fetched = (|| -> Result<(), Message> {
+        let schema = described_on(sys, open.panel.table.bytes())?;
+        let mut query = FixedStr::<512>::from_bytes(b"select id");
+        for column in &open.panel.list[..listed] {
+            query.push_bytes(b", ");
+            query.push_bytes(column.bytes());
+        }
+        let _ = write!(query, " from {} where id > {}", open.panel.table, open.after);
+        // what is looked for: in the first text columns of the list, a quote written twice
+        let mut looked = 0;
+        for column in open.panel.list[..listed].iter().filter(|column| schema.columns[..schema.count].iter().zip(&schema.kinds).any(|(name, kind)| name == *column && *kind == xila_db::Kind::Text)) {
+            if open.found.is_empty() || looked == LOOKED {
+                break;
+            }
+            query.push_bytes(if looked == 0 { b" and (" } else { b" or " });
+            query.push_bytes(column.bytes());
+            query.push_bytes(b" like '%");
+            for byte in open.found.bytes() {
+                query.push_bytes(if *byte == b'\'' { b"''" } else { core::slice::from_ref(byte) });
+            }
+            query.push_bytes(b"%'");
+            looked += 1;
+        }
+        if looked > 0 {
+            query.push(b')');
+        }
+        let mut cursor = sql::Cursor::new();
+        cursor.open(&*sys, &NO_VARS, query.bytes())?;
+        while count <= wanted {
+            let Some(row) = cursor.next(&*sys, query.bytes())? else {
+                break;
+            };
+            ids[count] = if let Value::Int(id) = row[0] { id as u64 } else { 0 };
+            for at in 0..listed {
+                cells[count][at] = row[at + 1].shown();
+                numbers[at] |= matches!(row[at + 1], Value::Int(_) | Value::Dec(..));
+            }
+            count += 1;
+        }
+        Ok(())
+    })();
+    match fetched {
+        Err(message) => {
+            open.message = FixedStr::from_bytes(message.bytes());
+            open.failed = true;
+        }
+        Ok(()) => {
+            (open.more, open.count) = (count > wanted, count.min(wanted));
+            // each column as wide as what it holds on this page and as its
+            // name; the widest give way until the row fits
+            let mut labels = [Label::new(); sql::MAX_COLUMNS];
+            let mut widths = [0usize; sql::MAX_COLUMNS];
+            for at in 0..listed {
+                labels[at] = open.panel.label(&open.panel.list[at]);
+                widths[at] = cells[..open.count].iter().map(|row| row[at].len()).max().unwrap_or(0).max(labels[at].len()).max(1);
+            }
+            let room = COLS - 2 - 2 * listed.saturating_sub(1);
+            while widths[..listed].iter().sum::<usize>() > room {
+                if let Some(widest) = widths[..listed].iter_mut().max() {
+                    *widest -= 1;
+                }
+            }
+            open.header.push(b' ');
+            for at in 0..listed {
+                open.header.push_bytes(if at > 0 { b"  " } else { b"" });
+                cell(&mut open.header, labels[at].bytes(), widths[at], numbers[at]);
+            }
+            for row in 0..open.count {
+                let mut line = FixedStr::from_bytes(b" ");
+                for at in 0..listed {
+                    line.push_bytes(if at > 0 { b"  " } else { b"" });
+                    cell(&mut line, cells[row][at].bytes(), widths[at], numbers[at]);
+                }
+                (open.ids[row], open.lines[row]) = (ids[row], line);
+            }
+        }
+    }
+    sys.panels.open[place] = Some(open);
+}
+
+/// Handles a key on the screen of a panel.
+pub fn key(sys: &mut System, place: usize, event: KeyEvent) {
+    let Some(open) = sys.panels.open[place].as_mut() else {
+        return;
+    };
+    open.message.clear();
+    open.failed = false;
+    let say = |open: &mut Open, text: &[u8]| open.message = FixedStr::from_bytes(text);
+    match event.key {
+        Key::F(3) => return close(sys, place),
+        // the overview, the panel staying open
+        Key::Esc => {
+            sys.screen = 0;
+            return;
+        }
+        Key::F(5) => {}
+        Key::PageDown if !open.more => return say(open, b"This is the last page."),
+        Key::PageDown => {
+            if open.back == BACK {
+                // the oldest way back is forgotten
+                open.starts.copy_within(1.., 0);
+                open.back -= 1;
+            }
+            open.starts[open.back] = open.after;
+            (open.back, open.page) = (open.back + 1, open.page + 1);
+            open.after = open.ids[open.count.saturating_sub(1)];
+        }
+        Key::PageUp if open.back == 0 && open.page > 0 => {
+            // further back than is remembered: from the start again
+            (open.after, open.page) = (0, 0);
+        }
+        Key::PageUp if open.back == 0 => return say(open, b"This is the first page."),
+        Key::PageUp => {
+            (open.back, open.page) = (open.back - 1, open.page - 1);
+            open.after = open.starts[open.back];
+        }
+        Key::Char(typed) if (0x20..0x7f).contains(&typed) => {
+            open.find.push(typed);
+            return;
+        }
+        Key::Backspace => {
+            let shorter = open.find.len().saturating_sub(1);
+            open.find = FixedStr::from_bytes(&open.find.bytes()[..shorter]);
+            return;
+        }
+        Key::Enter => (open.found, open.after, open.back, open.page) = (open.find, 0, 0, 0),
+        _ => return,
+    }
+    read(sys, place);
+    if let Some(open) = sys.panels.open[place].as_mut() {
+        if !open.failed && open.count == 0 && event.key == Key::Enter && !open.found.is_empty() {
+            open.message = FixedStr::from_bytes(b"No row holds: ").also(open.found.bytes());
+        }
+    }
+}
+
+/// Reads again the list of the panel that is shown, when something was
+/// stored since it was read: a second apart at most, so that a job that
+/// writes many rows does not have it read as many times. Returns
+/// whether it was read.
+pub fn refresh(sys: &mut System) -> bool {
+    let Some(place) = place_of(sys, sys.screen) else {
+        return false;
+    };
+    let now = sys.ticks;
+    let stored = sys.stored_at;
+    let Some(open) = sys.panels.open[place].as_mut() else {
+        return false;
+    };
+    if stored < open.read || now < open.looked + AGAIN {
+        return false;
+    }
+    open.looked = now;
+    read(sys, place);
+    true
+}
+
+/// Draws the panel of a place on the rows of the grid from `top` down.
+pub fn draw(sys: &System, place: usize, grid: &mut Grid, top: usize) {
+    let Some(open) = sys.panels.open[place].as_ref() else {
+        return;
+    };
+    let bg = role::TERM_BASE;
+    let blank = Cell::new(b' ', role::TERM_OUT, bg);
+    for row in top..grid.rows {
+        grid.fill(row, 0, COLS, blank);
+    }
+    grid.text(1, top + 1, open.panel.title.bytes(), role::TERM_PROMPT, bg);
+    let mut page = FixedStr::<16>::new();
+    let _ = write!(page, "page {}", open.page + 1);
+    grid.text(COLS - 1 - page.len(), top + 1, page.bytes(), role::TERM_OUT, bg);
+    let after = grid.text(1, top + 2, b"Find: ", role::TERM_OUT, bg);
+    let end = grid.text(after, top + 2, open.find.bytes(), role::TERM_CMD, bg);
+    grid.put(end, top + 2, Cell { ch: b' ', fg: role::TERM_CMD, bg, fx: fx::PULSE });
+    grid.text(0, top + 4, open.header.bytes(), role::TERM_PROMPT, bg);
+    let last = grid.rows.saturating_sub(1);
+    for (at, line) in open.lines[..open.count].iter().enumerate() {
+        if top + HEAD + at + FOOT > last {
+            break;
+        }
+        grid.text(0, top + HEAD + at, line.bytes(), role::TERM_OUT, bg);
+    }
+    if open.count == 0 && !open.failed && open.message.is_empty() {
+        grid.text(1, top + HEAD, b"(no rows)", role::TERM_OUT, bg);
+    }
+    grid.text(1, last.saturating_sub(1), open.message.bytes(), if open.failed { role::ERROR } else { role::TERM_CMD }, bg);
+    grid.text(1, last, b"F3=Exit  F5=Refresh  PgUp/PgDn=Pages  Enter=Find  Esc=Overview", role::TERM_PROMPT, bg);
 }
 
 #[cfg(test)]

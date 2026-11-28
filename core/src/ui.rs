@@ -250,13 +250,13 @@ impl Ui {
 
         if ev.alt {
             if let Some(d) = ev.digit {
-                if (d as usize) < SCREENS.len() {
+                if (d as usize) < SCREENS.len() || crate::panel::place_of(sys, d as usize).is_some() {
                     sys.screen = d as usize;
                     self.menu = None;
                 }
             } else if let Key::Char(c) = ev.key {
                 match c.to_ascii_lowercase() {
-                    b'e' => self.menu = if self.menu.is_some() { None } else { Some(sys.screen) },
+                    b'e' => self.menu = if self.menu.is_some() { None } else { Some(Self::listed(sys).0.iter().position(|screen| *screen == sys.screen).unwrap_or(0)) },
                     b'x' => sys.mood = sys.mood.next(),
                     // the program the prompt waits for goes on without it
                     b'b' => {
@@ -273,16 +273,26 @@ impl Ui {
         }
 
         if let Some(selected) = self.menu {
-            let n = SCREENS.len();
+            let (screens, n) = Self::listed(sys);
+            let selected = selected.min(n - 1);
             match ev.key {
                 Key::Up => self.menu = Some((selected + n - 1) % n),
                 Key::Down => self.menu = Some((selected + 1) % n),
                 Key::Enter => {
-                    sys.screen = selected;
+                    sys.screen = screens[selected];
                     self.menu = None;
                 }
                 Key::Esc => self.menu = None,
                 _ => {}
+            }
+            return;
+        }
+
+        // the screen of a panel: its keys are its own
+        if sys.screen >= SCREENS.len() {
+            match crate::panel::place_of(sys, sys.screen) {
+                Some(place) => crate::panel::key(sys, place, ev),
+                None => sys.screen = 0,
             }
             return;
         }
@@ -517,6 +527,10 @@ impl Ui {
             sys.log_rows = self.terms[1].len();
             self.dirty = true;
         }
+        // The list of the panel that is shown follows its table.
+        if crate::panel::refresh(sys) {
+            self.dirty = true;
+        }
         // What this prompt listens to is shown as it happens.
         while let Some(event) = sys.events.take(events::SCREEN) {
             let line = FixedStr::<COLS>::from_bytes(b"event ").also(event.channel.bytes()).also(b": ").also(event.text.bytes());
@@ -573,14 +587,31 @@ impl Ui {
         }
     }
 
+    /// The virtual screens there are, by their numbers, and how many: the
+    /// three of the system, then the panels that are open.
+    fn listed(sys: &System) -> ([usize; SCREENS.len() + crate::panel::OPEN], usize) {
+        let (mut screens, mut count) = ([0; SCREENS.len() + crate::panel::OPEN], 0);
+        crate::panel::screens(sys, &mut |number, _| {
+            screens[count] = number;
+            count += 1;
+        });
+        (screens, count)
+    }
+
     /// Rewrites the grid from the current state.
     pub fn render(&mut self, sys: &mut System) {
         self.dirty = false;
+        // a list shows as many rows as this screen has for it
+        sys.panels.rows = crate::panel::rows_for(self.grid.rows, BODY_TOP);
+        // the panel that was shown is no longer open: the overview
+        if sys.screen >= SCREENS.len() && crate::panel::place_of(sys, sys.screen).is_none() {
+            sys.screen = 0;
+        }
         self.header(sys);
         self.bar(sys);
         self.body(sys);
         if let Some(selected) = self.menu {
-            self.menu_box(selected, term_top(sys.screen));
+            self.menu_box(sys, selected, term_top(sys.screen));
         }
         sys.term_rows = self.terms[0].len();
         sys.log_rows = self.terms[1].len();
@@ -635,7 +666,13 @@ impl Ui {
         g.fill(BAR_ROW, 0, COLS, Cell::new(b' ', ink, bg));
         g.put(0, BAR_ROW, Cell { ch: b' ', fg: ink, bg, fx: fx::ROUND_L });
         g.put(COLS - 1, BAR_ROW, Cell { ch: b' ', fg: ink, bg, fx: fx::ROUND_R });
-        g.text(2, BAR_ROW, if sys.code.is_some() { b"CODE" } else { TITLES[sys.screen] }, ink, bg);
+        let panel = crate::panel::title(sys, sys.screen);
+        let title: &[u8] = match (&sys.code, &panel) {
+            (Some(_), _) => b"CODE",
+            (None, Some(name)) => name.bytes(),
+            (None, None) => TITLES[sys.screen.min(TITLES.len() - 1)],
+        };
+        g.text(2, BAR_ROW, title, ink, bg);
         g.put(COLS - 3, BAR_ROW, Cell::new(b'=', role::BAR_ICON, bg));
         // Whoever sits at the machine sees which doors are open to the
         // network, the prompt and the pages, and who came through last,
@@ -666,9 +703,12 @@ impl Ui {
             self.grid.text(0, self.grid.rows - 1, b"Read this code with the camera of a phone. Any key goes back.", role::TERM_OUT, blank.bg);
             return;
         }
+        if let Some(place) = crate::panel::place_of(sys, sys.screen) {
+            return crate::panel::draw(sys, place, &mut self.grid, BODY_TOP);
+        }
         let top = term_top(sys.screen);
         let height = self.term_rows(sys.screen);
-        let term = &self.terms[sys.screen];
+        let term = &self.terms[sys.screen.min(SCREENS.len() - 1)];
         // The rows of the city, if any, belong to the kernel.
         for row in BODY_TOP..top {
             self.grid.fill(row, 0, COLS, Cell::new(b' ', role::TERM_OUT, term.bg));
@@ -731,30 +771,34 @@ impl Ui {
         }
     }
 
-    fn menu_box(&mut self, selected: usize, top: usize) {
+    fn menu_box(&mut self, sys: &System, selected: usize, top: usize) {
         const WIDTH: usize = 26;
+        let (_, count) = Self::listed(sys);
         let g = &mut self.grid;
         let left = COLS - WIDTH - 1;
         let (ink, bg) = (role::TERM_PROMPT, role::TERM_BASE);
-        let bottom = top + SCREENS.len() + 1;
+        let bottom = top + count + 1;
         g.fill(top, left, left + WIDTH, Cell::new(0xc4, ink, bg));
         g.fill(bottom, left, left + WIDTH, Cell::new(0xc4, ink, bg));
         for (row, l, r) in [(top, 0xda, 0xbf), (bottom, 0xc0, 0xd9)] {
             g.put(left, row, Cell::new(l, ink, bg));
             g.put(left + WIDTH - 1, row, Cell::new(r, ink, bg));
         }
-        for (i, name) in SCREENS.iter().enumerate() {
+        let mut i = 0;
+        crate::panel::screens(sys, &mut |number, name| {
             let row = top + 1 + i;
-            let (fg, back) = if i == selected { (role::TERM_BASE, role::TERM_CMD) } else { (ink, bg) };
+            let (fg, back) = if i == selected.min(count - 1) { (role::TERM_BASE, role::TERM_CMD) } else { (ink, bg) };
             g.put(left, row, Cell::new(0xb3, ink, bg));
             g.fill(row, left + 1, left + WIDTH - 1, Cell::new(b' ', fg, back));
-            let mut item = FixedStr::<32>::from_bytes(b" [Alt]+[");
-            item.push(b'0' + i as u8);
+            // (a long name of a panel is cut where the box ends)
+            let mut item = FixedStr::<{ WIDTH - 2 }>::from_bytes(b" [Alt]+[");
+            item.push(b'0' + number as u8);
             item.push_bytes(b"]  ");
             item.push_bytes(name);
             g.text(left + 1, row, item.bytes(), fg, back);
             g.put(left + WIDTH - 1, row, Cell::new(0xb3, ink, bg));
-        }
+            i += 1;
+        });
     }
 }
 
@@ -1195,6 +1239,258 @@ mod tests {
         ui.key(&mut sys, key(Key::Tab));
         ui.render(&mut sys);
         assert_eq!(body(&ui)[2..], ["mem  mood", "XilaOS|all:/>m"]);
+    }
+
+    /// A system with a table of so many things and a panel on it.
+    fn with_panel(count: usize) -> (Box<Ui>, Box<System>) {
+        let (mut ui, mut sys) = start();
+        ui.run(&mut sys, b"create table items (label text, place text, qty int)");
+        for first in (0..count).step_by(4) {
+            let values: Vec<String> = (first..(first + 4).min(count)).map(|n| format!("('thing {n}', 'shelf {}', {})", n % 4, n * 10)).collect();
+            ui.run(&mut sys, format!("insert into items values {}", values.join(", ")).as_bytes());
+        }
+        for line in ["panel stock on items", "title 'The stock'", "list label, place, qty", "field place 'Where it is'", "field qty 'In stock'", "end"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        (ui, sys)
+    }
+
+    /// The rows of the list a panel shows, and what it has to say.
+    fn listed(ui: &mut Ui, sys: &mut System) -> (Vec<String>, String) {
+        ui.render(sys);
+        let last = ui.grid.rows - 1;
+        ((BODY_TOP + 5..last - 1).map(|at| row(ui, at)).filter(|text| !text.is_empty()).collect(), row(ui, last - 1).trim().to_string())
+    }
+
+    fn things(numbers: core::ops::Range<usize>) -> Vec<String> {
+        numbers.map(|n| format!("thing {n}")).collect()
+    }
+
+    fn labels(rows: &[String]) -> Vec<String> {
+        rows.iter().map(|text| text.trim().split("  ").next().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn a_panel_opens_as_a_screen_of_its_own_and_lists_its_table() {
+        let (mut ui, mut sys) = with_panel(3);
+        ui.run(&mut sys, b"stock");
+        assert_eq!(sys.screen, 3);
+        ui.render(&mut sys);
+        assert!(row(&ui, BAR_ROW).contains("STOCK"));
+        let title = row(&ui, BODY_TOP + 1);
+        assert!(title.starts_with(" The stock") && title.ends_with("page 1"), "{title}");
+        assert_eq!(row(&ui, BODY_TOP + 2), " Find:");
+        // the columns under their labels, numbers to the right
+        assert_eq!(row(&ui, BODY_TOP + 4), " label    Where it is  In stock");
+        assert_eq!(listed(&mut ui, &mut sys).0, [" thing 0  shelf 0             0", " thing 1  shelf 1            10", " thing 2  shelf 2            20"]);
+        assert_eq!(row(&ui, ui.grid.rows - 1), " F3=Exit  F5=Refresh  PgUp/PgDn=Pages  Enter=Find  Esc=Overview");
+        // Esc shows the overview and leaves the panel open: its name, or its key, goes back to it
+        ui.key(&mut sys, key(Key::Esc));
+        assert_eq!((sys.screen, crate::panel::place_of(&sys, 3)), (0, Some(0)));
+        ui.key(&mut sys, alt_digit(3));
+        assert_eq!(sys.screen, 3);
+        ui.key(&mut sys, key(Key::Esc));
+        ui.run(&mut sys, b"Stock");
+        assert_eq!((sys.screen, crate::panel::place_of(&sys, 4)), (3, None));
+        // F3 leaves it: its screen is no more
+        ui.key(&mut sys, key(Key::F(3)));
+        assert_eq!((sys.screen, crate::panel::place_of(&sys, 3)), (0, None));
+        ui.key(&mut sys, alt_digit(3));
+        assert_eq!(sys.screen, 0);
+        ui.render(&mut sys);
+        assert!(row(&ui, BAR_ROW).contains("OVERVIEW"));
+        // a table with no row, and a panel that says nothing of its columns
+        ui.run(&mut sys, b"delete from items");
+        ui.run(&mut sys, b"panel plain on items");
+        ui.run(&mut sys, b"end");
+        ui.run(&mut sys, b"plain");
+        ui.render(&mut sys);
+        assert_eq!((row(&ui, BODY_TOP + 1).split_whitespace().next(), row(&ui, BODY_TOP + 4).as_str()), (Some("plain"), " label  place  qty"));
+        assert_eq!(listed(&mut ui, &mut sys), (vec![" (no rows)".to_string()], String::new()));
+    }
+
+    #[test]
+    fn a_list_is_read_page_by_page_both_ways() {
+        let (mut ui, mut sys) = with_panel(100);
+        ui.run(&mut sys, b"stock");
+        let page = ui.grid.rows - BODY_TOP - 7;
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), things(0..page));
+        ui.key(&mut sys, key(Key::PageDown));
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), things(page..2 * page));
+        assert!(row(&ui, BODY_TOP + 1).ends_with("page 2"));
+        // to the last page, which is not full, and no further
+        let mut pages = 2;
+        while listed(&mut ui, &mut sys).0.len() == page {
+            ui.key(&mut sys, key(Key::PageDown));
+            pages += 1;
+        }
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), things((pages - 1) * page..100));
+        ui.key(&mut sys, key(Key::PageDown));
+        assert_eq!(listed(&mut ui, &mut sys), (labels(&things((pages - 1) * page..100)).iter().map(|_| String::new()).zip(listed(&mut ui, &mut sys).0).map(|(_, text)| text).collect(), "This is the last page.".to_string()));
+        // and back, page by page, to the first
+        for back in (0..pages - 1).rev() {
+            ui.key(&mut sys, key(Key::PageUp));
+            assert_eq!(labels(&listed(&mut ui, &mut sys).0), things(back * page..(back + 1) * page), "page {}", back + 1);
+        }
+        assert!(row(&ui, BODY_TOP + 1).ends_with("page 1"));
+        ui.key(&mut sys, key(Key::PageUp));
+        assert_eq!(listed(&mut ui, &mut sys).1, "This is the first page.");
+        // the message goes at the next key
+        ui.key(&mut sys, key(Key::F(5)));
+        assert_eq!(listed(&mut ui, &mut sys).1, "");
+    }
+
+    #[test]
+    fn the_line_to_find_keeps_the_rows_that_hold_what_is_typed() {
+        let (mut ui, mut sys) = with_panel(100);
+        ui.run(&mut sys, b"stock");
+        type_text(&mut ui, &mut sys, "thing 7x");
+        ui.key(&mut sys, key(Key::Backspace));
+        ui.render(&mut sys);
+        assert_eq!(row(&ui, BODY_TOP + 2), " Find: thing 7");
+        // nothing is looked for until Enter
+        assert_eq!(listed(&mut ui, &mut sys).0.len(), ui.grid.rows - BODY_TOP - 7);
+        ui.key(&mut sys, key(Key::Enter));
+        let mut wanted = vec!["thing 7".to_string()];
+        wanted.extend(things(70..80));
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), wanted);
+        // in any text column of the list: the places too
+        for _ in 0..7 {
+            ui.key(&mut sys, key(Key::Backspace));
+        }
+        type_text(&mut ui, &mut sys, "shelf 3");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), ["thing 3", "thing 7", "thing 11"].iter().map(|text| text.to_string()).chain((15..100).step_by(4).map(|n| format!("thing {n}"))).take(ui.grid.rows - BODY_TOP - 7).collect::<Vec<_>>());
+        // what no row holds, a quote among it
+        for _ in 0..7 {
+            ui.key(&mut sys, key(Key::Backspace));
+        }
+        type_text(&mut ui, &mut sys, "it's 100%");
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(listed(&mut ui, &mut sys), (vec![], "No row holds: it's 100%".to_string()));
+        // as much as the line takes, and no more
+        type_text(&mut ui, &mut sys, &"x".repeat(60));
+        ui.key(&mut sys, key(Key::Enter));
+        ui.render(&mut sys);
+        assert_eq!(row(&ui, BODY_TOP + 2).len(), " Find: ".len() + 40);
+        // emptied, it shows everything again from the first page
+        for _ in 0..40 {
+            ui.key(&mut sys, key(Key::Backspace));
+        }
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0)[0], "thing 0");
+    }
+
+    #[test]
+    fn a_list_follows_its_table() {
+        let (mut ui, mut sys) = with_panel(2);
+        ui.run(&mut sys, b"stock");
+        ui.tick(&mut sys, 150);
+        assert_eq!(listed(&mut ui, &mut sys).0.len(), 2);
+        // a row added from the serial port: shown within a second, without a key
+        sys.session = events::SERIAL;
+        shell::exec(&mut sys, b"insert into items values ('from afar', 'door', 1)", &mut shell::tests::Lines::default());
+        sys.session = events::SCREEN;
+        ui.tick(&mut sys, 1);
+        ui.tick(&mut sys, 120);
+        assert_eq!(labels(&listed(&mut ui, &mut sys).0), ["thing 0", "thing 1", "from afar"]);
+        // its table changes under it: a listed column goes, then the table
+        sys.session = events::SERIAL;
+        shell::exec(&mut sys, b"alter table items drop column place", &mut shell::tests::Lines::default());
+        ui.key(&mut sys, key(Key::F(5)));
+        assert_eq!(listed(&mut ui, &mut sys), (vec![], "Unknown column: place".to_string()));
+        shell::exec(&mut sys, b"drop table items", &mut shell::tests::Lines::default());
+        sys.session = events::SCREEN;
+        ui.key(&mut sys, key(Key::F(5)));
+        assert_eq!(listed(&mut ui, &mut sys), (vec![], "Unknown table: items. Type tables to list them.".to_string()));
+        ui.key(&mut sys, key(Key::PageDown));
+        ui.key(&mut sys, key(Key::F(3)));
+        assert_eq!(sys.screen, 0);
+    }
+
+    #[test]
+    fn four_panels_are_open_at_one_time_each_a_screen() {
+        let (mut ui, mut sys) = with_panel(3);
+        for name in ["second", "third", "fourth", "fifth"] {
+            ui.run(&mut sys, format!("panel {name} on items").as_bytes());
+            ui.run(&mut sys, b"end");
+        }
+        for (name, screen) in [("stock", 3), ("second", 4), ("third", 5), ("fourth", 6)] {
+            ui.key(&mut sys, key(Key::Esc));
+            ui.run(&mut sys, name.as_bytes());
+            assert_eq!(sys.screen, screen, "{name}");
+        }
+        ui.key(&mut sys, key(Key::Esc));
+        ui.run(&mut sys, b"fifth");
+        ui.render(&mut sys);
+        assert_eq!((sys.screen, body(&ui).iter().rev().nth(1).unwrap().as_str()), (0, "Four panels are open: leave one with [F3]."));
+        // the menu and the commands know them
+        ui.key(&mut sys, alt(b'e', None));
+        ui.render(&mut sys);
+        let menu: Vec<String> = (TOP + 1..TOP + 8).map(|at| row(&ui, at).rsplit("[Alt]+").next().unwrap().trim_end_matches('~').trim().to_string()).collect();
+        assert_eq!(menu, ["[0]  overview", "[1]  boot log", "[2]  companion", "[3]  stock", "[4]  second", "[5]  third", "[6]  fourth"]);
+        for _ in 0..5 {
+            ui.key(&mut sys, key(Key::Down));
+        }
+        ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(sys.screen, 5);
+        ui.key(&mut sys, key(Key::Esc));
+        ui.run(&mut sys, b"select id, name, shown from screens where id > 2");
+        ui.render(&mut sys);
+        let shown = body(&ui);
+        assert_eq!(shown[shown.len() - 5..shown.len() - 1].iter().map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>(), ["3 stock", "4 second", "5 third", "6 fourth"]);
+        ui.run(&mut sys, b"screen second");
+        assert_eq!(sys.screen, 4);
+        // one is left: its place is free, the others keep theirs
+        ui.key(&mut sys, key(Key::F(3)));
+        ui.key(&mut sys, alt_digit(4));
+        assert_eq!(sys.screen, 0);
+        ui.key(&mut sys, alt_digit(6));
+        assert_eq!(sys.screen, 6);
+        ui.key(&mut sys, key(Key::Esc));
+        ui.run(&mut sys, b"fifth");
+        assert_eq!(sys.screen, 4);
+        // a panel that is dropped while it is open is left; kept again, it is read anew
+        ui.key(&mut sys, key(Key::Esc));
+        ui.run(&mut sys, b"drop panel fifth");
+        assert_eq!(crate::panel::place_of(&sys, 4), None);
+        for line in ["panel stock on items", "title 'Renamed'", "end"] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        ui.key(&mut sys, alt_digit(3));
+        ui.render(&mut sys);
+        assert!(row(&ui, BODY_TOP + 1).starts_with(" Renamed"));
+    }
+
+    #[test]
+    fn a_panel_opens_at_the_screen_of_the_machine_only() {
+        let (mut ui, mut sys) = with_panel(3);
+        let refused = |sys: &mut System| {
+            let mut out = shell::tests::Lines::default();
+            let ok = shell::exec(sys, b"stock", &mut out);
+            (ok, out.lines)
+        };
+        let nowhere = (false, vec!["A panel opens at the screen of the machine: stock.".to_string()]);
+        for session in [events::SERIAL, events::NETWORK, events::BACKGROUND] {
+            sys.session = session;
+            assert_eq!(refused(&mut sys), nowhere, "session {session}");
+        }
+        sys.session = events::SCREEN;
+        sys.acting = true;
+        assert_eq!(refused(&mut sys), nowhere);
+        sys.acting = false;
+        assert_eq!((sys.screen, crate::panel::place_of(&sys, 3)), (0, None));
+        // a name that is no panel is still an unknown command, and a panel takes no word after it
+        ui.run(&mut sys, b"stocks");
+        ui.run(&mut sys, b"stock now");
+        ui.render(&mut sys);
+        assert_eq!(body(&ui).iter().rev().nth(1).unwrap(), "Unknown command: stock");
+        // a code over a panel: any key puts it away, and the panel has not moved
+        ui.run(&mut sys, b"stock");
+        ui.key(&mut sys, key(Key::PageDown));
+        sys.code = crate::qr::encode(b"x", 5);
+        ui.key(&mut sys, key(Key::F(3)));
+        assert_eq!(sys.screen, 3);
     }
 
     #[test]
