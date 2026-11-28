@@ -189,6 +189,16 @@ pub fn fail(sys: &mut System, at: usize, trouble: Trouble) {
     }
 }
 
+/// There is no memory to keep a fetched system in: every fetch ends
+/// there, and says so.
+pub fn no_room(sys: &mut System) {
+    for at in 0..PLACES {
+        if sys.waits.list[at].is_some_and(|wait| matches!(wait.stage, Stage::Fetch { .. })) {
+            fail(sys, at, Trouble::NoMemory);
+        }
+    }
+}
+
 /// Lets go of what a wait holds in the network: its conversation, the
 /// place where its name is asked about.
 fn hang_up(sys: &mut System, at: usize) {
@@ -272,7 +282,7 @@ pub fn step(sys: &mut System, at: usize, wire: &mut dyn Wire, now: u64, micros: 
         Stage::Done(_) => return None,
         Stage::Ping { to, sent: None } => {
             // a packet that waits for the address of a card would lose its place
-            if net.holding() {
+            if net.holding(now) {
                 return None;
             }
             match net.ping(*to, now, wire) {
@@ -463,29 +473,52 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_ping_waits_for_a_packet_that_waits_for_a_card() {
+    fn pings_to_machines_whose_cards_are_not_known_go_side_by_side() {
         let mut sys = networked();
         let mut wire = Kept::default();
-        // two machines on the cable whose cards are not known
-        ask(&mut sys, 0, "net ping 192.168.1.7");
-        ask(&mut sys, 1, "net ping 192.168.1.8");
-        pass(&mut sys, 0, &mut wire, 100, 0);
-        pass(&mut sys, 1, &mut wire, 100, 0);
-        // the first asked whose card it is; the second did not take its place
-        assert_eq!(wire.0.len(), 1);
-        sys.net.receive(&arp(false, [2, 0, 0, 0, 0, 7], [192, 168, 1, 7], US), 101, &mut wire);
-        pass(&mut sys, 1, &mut wire, 102, 20_000);
-        sys.net.receive(&arp(false, [2, 0, 0, 0, 0, 8], [192, 168, 1, 8], US), 103, &mut wire);
-        // both pings left in the end, each to its machine
-        let pings: Vec<&Vec<u8>> = wire.0.iter().filter(|frame| frame[12..14] == [8, 0] && frame[23] == 1).collect();
-        assert_eq!(pings.iter().map(|frame| frame[33]).collect::<Vec<_>>(), [7, 8]);
-        let (first, second) = (echo(pings[0], [192, 168, 1, 7]), echo(pings[1], [192, 168, 1, 8]));
-        sys.net.receive(&second, 104, &mut wire);
-        sys.net.receive(&first, 104, &mut wire);
-        pass(&mut sys, 0, &mut wire, 104, 40_000);
-        pass(&mut sys, 1, &mut wire, 104, 40_000);
-        assert_eq!(said(&mut sys, 1), ["192.168.1.8 answered in 20.0 ms."]);
+        // more machines on the cable than packets can wait for a card
+        let asked = crate::net::HELD + 1;
+        for at in 0..asked {
+            ask(&mut sys, at, &format!("net ping 192.168.1.{}", 7 + at));
+            pass(&mut sys, at, &mut wire, 100, 0);
+        }
+        // each asked whose card it is, but the last, which waits for a place
+        assert_eq!(wire.0.len(), asked - 1);
+        for at in 0..asked - 1 {
+            let last = 7 + at as u8;
+            sys.net.receive(&arp(false, [2, 0, 0, 0, 0, last], [192, 168, 1, last], US), 101, &mut wire);
+        }
+        pass(&mut sys, asked - 1, &mut wire, 102, 20_000);
+        let last = 7 + asked as u8 - 1;
+        sys.net.receive(&arp(false, [2, 0, 0, 0, 0, last], [192, 168, 1, last], US), 103, &mut wire);
+        // every ping left in the end, each to its machine, and each has its answer
+        let pings: Vec<Vec<u8>> = wire.0.iter().filter(|frame| frame[12..14] == [8, 0] && frame[23] == 1).cloned().collect();
+        assert_eq!(pings.iter().map(|frame| frame[33]).collect::<Vec<_>>(), (7..7 + asked as u8).collect::<Vec<_>>());
+        for ping in pings.iter().rev() {
+            sys.net.receive(&echo(ping, [192, 168, 1, ping[33]]), 104, &mut wire);
+        }
+        for at in 0..asked {
+            pass(&mut sys, at, &mut wire, 104, 40_000);
+        }
+        assert_eq!(said(&mut sys, asked - 1), [format!("192.168.1.{last} answered in 20.0 ms.")]);
         assert_eq!(said(&mut sys, 0), ["192.168.1.7 answered in 40.0 ms."]);
+        for at in 1..asked - 1 {
+            assert!(take(&mut sys, at));
+        }
+        // three to a machine nobody is: each waits its second, side by side
+        for at in 0..3 {
+            ask(&mut sys, at, "net ping 192.168.1.99");
+            pass(&mut sys, at, &mut wire, 200, 0);
+        }
+        for at in 0..3 {
+            pass(&mut sys, at, &mut wire, 300, 1_000_000);
+            assert_eq!(said(&mut sys, at), ["192.168.1.99 did not answer within a second."]);
+        }
+        // and what waited for its card keeps no place after that second
+        ask(&mut sys, 3, "net ping 192.168.1.7");
+        pass(&mut sys, 3, &mut wire, 310, 0);
+        let last = wire.0.last().unwrap();
+        assert_eq!((last[23], last[33]), (1, 7), "the next ping left");
     }
 
     /// Answers the question about a name that is on the wire, if one is.

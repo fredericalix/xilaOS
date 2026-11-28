@@ -474,15 +474,22 @@ pub fn turn(sys: &mut System, at: usize, out: &mut dyn Out, spent: &mut dyn FnMu
 /// The kernel served what a waiting job asked: it goes on. A failure is
 /// remembered: the job will not have gone well.
 pub fn answered(sys: &mut System, at: usize, ok: bool) {
-    // what it asked of the network is still being asked: it goes on when
-    // the answer has come and was said
-    if crate::waits::going(sys, at) {
+    // what it asked of the network is still being asked, or its answer
+    // is there and not said yet: it goes on once that was taken and said
+    if crate::waits::going(sys, at) || crate::waits::done(sys, at) {
         return;
     }
     if let Some(job) = sys.jobs.list.get_mut(at).filter(|job| job.state == State::Waiting) {
         job.state = State::Ready;
         job.refused |= !ok;
     }
+}
+
+/// The place of a job nobody waits for whose wait for the network has
+/// its outcome: who carries those jobs takes it (`waits::take`) and
+/// says it (`served`).
+pub fn answer_ready(sys: &System) -> Option<usize> {
+    (0..sys.jobs.list.len()).find(|at| sys.jobs.list[*at].watch == Watch::Nobody && crate::waits::done(sys, *at))
 }
 
 /// The place of the job a prompt waits for, ended or not, until how it
@@ -963,7 +970,9 @@ mod tests {
         crate::waits::step(&mut sys, place, &mut wire, 100, 1_000, None, &mut []);
         let answer = echo(&wire.0[0], [8, 8, 8, 8]);
         sys.net.receive(&answer, 101, &mut wire);
+        assert_eq!(answer_ready(&sys), None);
         crate::waits::step(&mut sys, place, &mut wire, 101, 3_500, None, &mut []);
+        assert_eq!(answer_ready(&sys), Some(place));
         assert!(crate::waits::take(&mut sys, place));
         assert!(served(&mut sys, place, &mut Lines::default()));
         assert_eq!(sys.jobs.list()[place].state, State::Ready);
@@ -971,7 +980,7 @@ mod tests {
         assert_eq!(kept, ["8.8.8.8 answered in 2.5 ms."]);
         assert_eq!(finish(&mut sys, place), ["after"]);
         assert_eq!(sys.jobs.list()[place].state, State::Done);
-        // an answer that is a failure makes the job one, and stops it there
+        // an answer that is a failure makes the job one that failed
         let number = begin(&mut sys, What::Lines(&asks), Watch::Nobody, &mut Lines::default()).unwrap();
         let place = place_of(&sys, number);
         until_it_asks(&mut sys, place);
@@ -980,6 +989,24 @@ mod tests {
         assert!(crate::waits::take(&mut sys, place));
         assert!(!served(&mut sys, place, &mut Lines::default()));
         finish(&mut sys, place);
+        assert_eq!(sys.jobs.list()[place].state, State::Failed);
+        // a wait that ends as soon as it begins (the kernel could not give
+        // what it needs): the job still waits for its answer to be said
+        let secret = lines(&["net get https://example.org/", "say 'not here'"]);
+        let number = begin(&mut sys, What::Lines(&secret), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        for _ in 0..10 {
+            turn(&mut sys, place, &mut Lines::default(), &mut || true);
+        }
+        assert!(crate::waits::begin(&mut sys, place, 0));
+        crate::waits::fail(&mut sys, place, crate::waits::Trouble::NoChance);
+        assert!(served(&mut sys, place, &mut Lines::default()));
+        assert_eq!(sys.jobs.list()[place].state, State::Waiting);
+        assert_eq!(answer_ready(&sys), Some(place));
+        assert!(crate::waits::take(&mut sys, place));
+        assert!(!served(&mut sys, place, &mut Lines::default()));
+        // (as before waits: what follows a request that failed still runs, and the job has failed)
+        assert_eq!(finish(&mut sys, place), ["not here"]);
         assert_eq!(sys.jobs.list()[place].state, State::Failed);
     }
 

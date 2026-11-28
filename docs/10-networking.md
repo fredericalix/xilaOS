@@ -97,7 +97,7 @@ XilaOS|all:/>net ping 10.0.2.99
 10.0.2.99 did not answer within a second.
 ```
 
-The machine waits up to one second for the answer and does nothing else meanwhile. It is a trial tool, not a measuring one.
+The answer is waited for up to one second, and the system lives meanwhile ([below](#what-waits-for-the-network)). Eight pings are followed at one time. It is a trial tool, not a measuring one.
 
 ### net restart
 
@@ -343,7 +343,7 @@ pub trait Wire {
 - `ping(to, now, wire)` and `message(to, to_port, from_port, bytes, now, wire)` send.
 - `speak(now, wire)` sends what the TCP conversations have to say, twelve segments at most in one call.
 
-Time is the kernel's count of timer ticks, 100 per second. Since nothing here needs a card, the unit tests of `core/` play the other machine: they hand in frames built by hand and read what comes out of a `Wire` that keeps them in a list. Everything uses fixed buffers; one packet at a time can wait for an ARP answer.
+Time is the kernel's count of timer ticks, 100 per second. Since nothing here needs a card, the unit tests of `core/` play the other machine: they hand in frames built by hand and read what comes out of a `Wire` that keeps them in a list. Everything uses fixed buffers; four packets at a time can wait for an ARP answer, a second each.
 
 The DHCP client asks after 2, 4, then every 8 seconds until it is offered an address, takes a lease of between one minute and thirty days, asks again at half of it and then every minute, and gives the address up if the lease runs out unanswered.
 
@@ -351,7 +351,17 @@ The DHCP client asks after 2, 4, then every 8 seconds until it is offered an add
 
 The card raises no interrupt. The interface task, the one that also reads the keyboard and redraws the screen, calls `network` in `kernel/src/main.rs` at each pass of its loop: it takes up to 32 frames from the card, gives each to `Net::receive`, then calls `Net::tick`. A packet therefore waits up to a hundredth of a second. If one of the messages is a command for the remote prompt, it is run there and then, exactly as the serial task runs a line. Then `web::step` does a little of the pages' work and `Net::speak` sends what TCP has ready.
 
-Commands that wait for the network (`net ping`, `net name`, `net get` and `net post`, `install from`) run their own loop of the same kind while the command is served, holding the system for up to one second, three seconds, as long as the answer keeps coming (five seconds of silence end it, after the three of a name), and one minute respectively.
+### What waits for the network
+
+`net ping`, `net name`, `net get`, `net post` and `install from` ask another machine something and need its answer: up to one second, three seconds, as long as the answer keeps coming (five seconds of silence end it, after the three of a name), and one minute respectively. Until 28 November 2026 each ran a loop of the kernel for that time and the whole system waited with it.
+
+Each is now a *wait* that belongs to the job that asked (`core/src/waits.rs`, in `System::waits`): what was asked, the machine that asks it (`Net::ping`, `Net::name`, `ask::Ask`, `tftp::Fetch`), then what came of it. The job is `waiting` and the others run. A line typed alone at the screen or at the serial port becomes a job that prompt waits for, so the same holds there: the edit row says `Running net get ...`, and `Esc` or Ctrl+C gives the question up and hangs up. With no place left among the jobs, such a line runs at once, as before.
+
+Waits go on side by side, each with its own conversation: pages over TCP, which holds eight conversations (one more page waits for one to end, five seconds at most); eight pings; four questions about names. `install from` is the one that is alone: there is one room in memory for a system that was fetched, and a second waits for the first.
+
+`waits::step` moves one wait a step and needs the card and the time, nothing else. The kernel calls it for every wait at each pass of `network`: the interface task at every tick, and the task `jobs` as well while something is asked, without rest while frames come or while a ping or a fetch is going (a ping's time is told; a fetch goes a block at each answer, and at one step a tick would take most of a minute). When a wait has its outcome, who gives its job turns takes it (`waits::take`), which puts it where `shell::served` reads the kernel's answers, and says it where the job says. Two things are the kernel's to keep, since they take memory of its own: the TLS client of each page asked in secret (37 KB, for as long as its wait goes on) and the room of a fetched system.
+
+What runs at once (a line from the prompt over the network, what the companion runs, a system with no rooms for jobs) goes through the same wait, which the kernel then carries to its end before it does anything else: there the system is still held for that time.
 
 ### Asking
 
@@ -386,7 +396,7 @@ The unit tests of the crate play the server with made-up certificates (`tls/fixt
 
 `core/src/dns.rs` is, like the rest, a machine with no hardware under it. `Names::look` is asked for a name again and again: it answers from the eight names it keeps, or says what question to send (to the server, from a port and with a number both drawn from `System::chance`), sends it again after one second and after two, and gives up after three. `Names::answered` takes a UDP message that came to that port: it must come from the server's address and port and carry the number and the name of the question. `Net::name` carries both, and `Net::receive` hands it the messages before anything else sees them.
 
-One question at a time, for an address of four bytes only. The server is asked to find the answer itself, going from server to server; XilaOS does not. When a name is another name for a second machine, the server follows it and the address is the first one in its answer. An answer too long for one UDP message is not asked again over TCP. A name that has no address is not remembered as such: it is asked again the next time.
+Four questions at a time, each from a port of its own, for an address of four bytes only; a fifth name waits for a place, and a question nobody looks at any more gives its place back after three seconds. The server is asked to find the answer itself, going from server to server; XilaOS does not. When a name is another name for a second machine, the server follows it and the address is the first one in its answer. An answer too long for one UDP message is not asked again over TCP. A name that has no address is not remembered as such: it is asked again the next time.
 
 ### The e1000 driver
 
@@ -518,9 +528,9 @@ Every frame that goes by is kept in `build/net.pcap`. `tools/check.py` reads tha
 ## Limits
 
 - One card, one address, one gateway. No IPv6, no fragments.
-- Names: IPv4 addresses only, one question at a time, names of 56 characters at most, no answers over TCP, and nothing that proves who answered.
+- Names: IPv4 addresses only, four questions at a time, names of 56 characters at most, no answers over TCP, and nothing that proves who answered.
 - A packet waits up to 10 ms for the next tick; throughput is whatever 100 passes per second and a 1 KB receive window allow. This is enough for pages of tables and a 1 MB kernel, and not meant for more.
-- `net ping`, `net name`, `net get`, `net post` and `install from` hold the whole system while they wait.
+- `net ping`, `net name`, `net get`, `net post` and `install from` still hold the whole system when they are run from the prompt over the network or for the companion; from the screen, the serial port and a job they hold nothing. Four packets at a time wait for the address of a card, a second each at most: one more ping waits its turn rather than push one out.
 - TCP is only used by the kernel's own `web` and `net get`; the language has no way to open a conversation.
 - The parts specific to the 82579 ran on a single T430. The driver has never met another real card.
 - Encryption only where XilaOS calls (`net get https://`), never where it is called (`remote`, `web`). TLS 1.3 only, one cipher, no revocation.

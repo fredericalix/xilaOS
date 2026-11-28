@@ -40,6 +40,7 @@ were also tried on the real machine.
 | XilaScript compiled for the virtual machine, which runs it; what is wrong with the form of a program told when it is kept; loops over the rows of a stored table without a limit | yes | not tried |
 | Programs as jobs that hold nothing: the screen and the serial port wait for a program while the system lives (`Esc`, `Alt`+`B`, Ctrl+C); `submit`, `jobs`, `job`; the programs that run by themselves as jobs; `job_log` | yes | not tried |
 | Programs that take values (`program restock(item, count)`, `restock('cable', 5)`, `submit restock(...)`) and have names of their own | yes | not tried |
+| Commands that wait for the network (`net ping`, `net name`, `net get`, `net post`, `install from`) as waits of a job: the system lives, several go on side by side | yes | not tried |
 | Clock, `now` and `today`, `every day at` | yes | yes |
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
@@ -252,7 +253,7 @@ it. Its steps are [below](#the-companion).
 | 2. SQL | Done: `IN`, `BETWEEN`, `NOT LIKE`, calculations on functions over rows; a row reached by its `id` without reading the table; joins of two tables. Resumed on 27 November 2026 with what a column asks: `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`, kept in the catalog (format version 2; version 1 is read). Then indexes on one column, the same day (`CREATE INDEX ON t (c)`; format version 3), which `SELECT`, joins and `UNIQUE` use. Then `ALTER TABLE` (columns added, dropped, renamed; what they ask changed). Left: `BEGIN` / `COMMIT`; indexes for `UPDATE` and `DELETE`, on several columns, and a choice between two; a view of the log, which waits for texts longer than 48 characters | Under way |
 | 3. XilaScript | An editor; `insert ... select`, the values of before, more rhythms. Parameters, names of a program's own and a program that holds nothing went to phase 5 on 27 November 2026 | After 5 |
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
-| 5. The virtual machine | The machine, XilaScript compiled for it, and programs as jobs that hold nothing; with it what phase 3 had of parameters, names of a program's own and commands that wait | Designed on 27 November 2026 ([below](#the-virtual-machine-and-the-jobs)), put ahead by the author. The machine and the compiler, then jobs, were built that day, parameters and names of a program's own on 28 November; the commands that wait are what is left of it. Then application screens, batch work and the scheduling of jobs, each with a design of its own |
+| 5. The virtual machine | The machine, XilaScript compiled for it, and programs as jobs that hold nothing; with it what phase 3 had of parameters, names of a program's own and commands that wait | Designed on 27 November 2026 ([below](#the-virtual-machine-and-the-jobs)), put ahead by the author. The machine and the compiler, then jobs, were built that day, parameters and names of a program's own on 28 November; the commands that wait for the network on 28 November too: the phase is built. Then application screens, batch work and the scheduling of jobs, each with a design of its own |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
 
 **Tried on the T430, and what still waits.** On 27 November 2026 the
@@ -739,9 +740,15 @@ pass.
    of on a stack of 2 MB, so they are given 8 MB; and a program that
    gives nothing back says what it found only through a table or
    `say`, which the screens will have to live with or change.
-4. The commands that wait for the network as waits of a job, so
-   that they hold nothing either, as chosen with the author on 28
-   November 2026 (above).
+4. Done on 28 November 2026: the commands that wait for the network
+   as waits of a job, as chosen with the author that day (above).
+   The questions are in `core/src/waits.rs`; the task `jobs` reads
+   the card while something is asked. What it showed, in the checks in
+   QEMU and not in the unit tests: the network kept one packet
+   waiting for the address of a card, for ever when no card answered,
+   which pings side by side could not live with (it keeps four now,
+   a second each); and a job must wait until its answer is said, not
+   only until it has come.
 
 Then the screens, and the stock of equipment.
 
@@ -750,8 +757,8 @@ Then the screens, and the stock of equipment.
 - Characters outside ASCII leave as `?` on the serial port and in QR
   codes. (The companion and the web pages read and write them as
   UTF-8 since 27 November 2026.)
-- `net ping`, `net get` and `install from` hold the system while they
-  wait: phase 3.
+- What the prompt over the network and the companion run still holds
+  the system, with what it asks of the network.
 - A development mode. The serial shell is always open and may do
   everything; it is meant to be open in QEMU, or on request at start,
   and closed otherwise.

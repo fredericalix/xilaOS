@@ -140,6 +140,8 @@ pub struct Message<'a> {
 }
 
 const KNOWN: usize = 8;
+/// Packets that wait at one time for the address of a card.
+pub const HELD: usize = 4;
 /// Pings whose answers are waited for at one time.
 pub const PINGS: usize = 8;
 
@@ -157,9 +159,10 @@ pub struct Net {
     exchange: u32,
     /// The cards known by their IP address, and when each was learnt.
     known: [(Ip, Mac, u64); KNOWN],
-    /// One packet that waits for the address of a card.
-    waiting: Option<(Ip, usize)>,
-    held: [u8; FRAME],
+    /// The packets that wait for the address of a card: whose, how long
+    /// each is and since when.
+    waiting: [Option<(Ip, usize, u64)>; HELD],
+    held: [[u8; FRAME]; HELD],
     /// The pings that are followed: the last that were sent.
     followed: [Option<Ping>; PINGS],
     pings: u16,
@@ -182,8 +185,8 @@ impl Net {
             lease: Lease::Asking { again: 0, tries: 0 },
             exchange: 0,
             known: [(NOWHERE, [0; 6], 0); KNOWN],
-            waiting: None,
-            held: [0; FRAME],
+            waiting: [None; HELD],
+            held: [[0; FRAME]; HELD],
             followed: [None; PINGS],
             pings: 0,
             tcp: crate::tcp::Tcp::new(),
@@ -198,7 +201,7 @@ impl Net {
     /// with the server of addresses comes from the card and from the time.
     pub fn start(&mut self, mac: Mac, now: u64) {
         self.mac = Some(mac);
-        (self.ip, self.waiting) = (None, None);
+        (self.ip, self.waiting) = (None, [None; HELD]);
         self.exchange = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]) ^ (now as u32).wrapping_mul(0x9e37_79b9);
         self.lease = Lease::Asking { again: now, tries: 0 };
         // the names were those of the network the card was on
@@ -278,9 +281,11 @@ impl Net {
             None => {
                 // ask whose address it is, and keep the packet until the answer:
                 // whole, but for the card it will go to
+                // in a place that is free, or in that of the one that waited longest
                 self.frame_keeping(frame, [0; 6]);
-                self.held[..14 + total].copy_from_slice(&frame[..14 + total]);
-                self.waiting = Some((next, 14 + total));
+                let at = (0..HELD).min_by_key(|at| self.waiting[*at].map_or(0, |(_, _, since)| since + 1)).unwrap_or(0);
+                self.held[at][..14 + total].copy_from_slice(&frame[..14 + total]);
+                self.waiting[at] = Some((next, 14 + total, now));
                 self.arp(true, EVERYONE, [0; 6], next, wire);
             }
         }
@@ -374,10 +379,12 @@ impl Net {
         self.followed.iter().flatten().find(|ping| ping.number == number).map(|ping| ping.took)
     }
 
-    /// Whether a packet waits for the address of a card: one more that
-    /// had to wait would take its place.
-    pub fn holding(&self) -> bool {
-        self.waiting.is_some()
+    /// Whether as many packets wait for the address of a card as can:
+    /// one more that had to wait would take the place of one. A packet
+    /// counts for a second: a card that has not said its address by then
+    /// will not, and its place is anyone's.
+    pub fn holding(&self, now: u64) -> bool {
+        self.waiting.iter().all(|waiting| waiting.is_some_and(|(_, _, since)| now < since + 100))
     }
 
     /// Asks the network for an address, or to have the one it offered.
@@ -562,16 +569,18 @@ impl Net {
                     if asking {
                         self.arp(false, their_card, their_card, their_ip, wire);
                     }
-                } else if self.card_of(their_ip, now).is_some() || self.waiting.is_some_and(|(ip, _)| ip == their_ip) {
+                } else if self.card_of(their_ip, now).is_some() || self.waiting.iter().flatten().any(|(ip, ..)| *ip == their_ip) {
                     // news of a card we talk to
                     self.learn(their_ip, their_card, now);
                 }
-                // the packet that waited for this address can go
-                if let Some((_, length)) = self.waiting.filter(|(ip, _)| *ip == their_ip) {
-                    self.waiting = None;
-                    let mut held = self.held;
-                    held[..6].copy_from_slice(&their_card);
-                    self.put(&mut held, length, wire);
+                // the packets that waited for this address can go
+                for at in 0..HELD {
+                    if let Some((_, length, _)) = self.waiting[at].filter(|(ip, ..)| *ip == their_ip) {
+                        self.waiting[at] = None;
+                        let mut held = self.held[at];
+                        held[..6].copy_from_slice(&their_card);
+                        self.put(&mut held, length, wire);
+                    }
                 }
                 None
             }
@@ -841,7 +850,7 @@ pub(crate) mod tests {
         let mut wire = Kept::default();
         // the card of the gateway is known: nothing waits for it
         net.receive(&arp(false, THEIRS, BOX, US), 1, &mut wire);
-        assert!(!net.holding());
+        assert!(!net.holding(1));
         let first = net.ping([8, 8, 8, 8], 100, &mut wire).unwrap();
         let second = net.ping([9, 9, 9, 9], 105, &mut wire).unwrap();
         assert_ne!(first, second);
@@ -859,9 +868,25 @@ pub(crate) mod tests {
             net.ping([8, 8, 4, 4], 200 + n, &mut wire).unwrap();
         }
         assert_eq!((net.pinged(first), net.pinged(second)), (None, Some(Some(5))));
-        // a packet that waits for a card is said, so that a ping does not take its place
-        net.ping([192, 168, 1, 7], 300, &mut wire);
-        assert!(net.holding());
+        // packets wait for the address of a card side by side, four of them
+        let before = wire.0.len();
+        for last in 7..7 + HELD as u8 {
+            assert!(!net.holding(300));
+            net.ping([192, 168, 1, last], 300, &mut wire);
+        }
+        assert_eq!(wire.0.len(), before + HELD, "each asked whose card it is");
+        // with every place taken it is said, so that one more does not push one out...
+        assert!(net.holding(300) && net.holding(399));
+        // ...for a second: a card that has not answered by then will not
+        assert!(!net.holding(400));
+        // the cards answer in another order: each packet goes to its own
+        let sent = wire.0.len();
+        for last in [9u8, 7, 10, 8] {
+            net.receive(&arp(false, [2, 0, 0, 0, 0, last], [192, 168, 1, last], US), 401, &mut wire);
+        }
+        let went: Vec<(u8, u8)> = wire.0[sent..].iter().map(|frame| (frame[5], frame[33])).collect();
+        assert_eq!(went, [(9, 9), (7, 7), (10, 10), (8, 8)]);
+        assert!(!net.holding(402));
     }
 
     #[test]

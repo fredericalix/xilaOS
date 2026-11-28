@@ -434,10 +434,10 @@ What is not there:
 - Other rhythms by the clock (`every monday at 9:00`).
 - An editor.
 - **What still holds the system while it runs**: one instruction, however
-  long (a `select` over a large table, `disk check`, `net get`), and whole
-  programs started from the prompt over the network or run for the
-  companion, which are not jobs yet. Those two keep the limits that stop a
-  program nobody watches.
+  long (a `select` over a large table, `disk check`, `install` writing a
+  disk), and whole programs started from the prompt over the network or
+  run for the companion, which are not jobs yet, with what they ask of the
+  network. Those two keep the limits that stop a program nobody watches.
 
 ## Jobs
 
@@ -474,6 +474,16 @@ drives the machine wants; a Ctrl+C byte stops the job, and what is typed
 ahead meanwhile, a line of it, is run once the job has ended. A single line
 that is no program is not a job: it has run when the prompt comes back,
 so `jobs` and `job 3 end` can always be typed.
+
+**What waits for the network holds nothing either.** `net ping`,
+`net name`, `net get`, `net post` and `install from` need an answer from
+another machine. The job that asks is `waiting` until it comes, and the
+others run; several jobs ask side by side, each with its own conversation
+([Networking](10-networking.md#what-waits-for-the-network)). Typed alone
+at the screen or at the serial port, such a command is waited for as a
+program is, and `Esc` or Ctrl+C gives the question up. A job cannot be
+held while it waits (`Job 7 waits for the kernel: try again.`); ended, it
+hangs up.
 
 **`submit name` runs a program that nobody waits for.**
 

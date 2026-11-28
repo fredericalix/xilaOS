@@ -1137,6 +1137,9 @@ with Xila(net="e1000e", forward=forwarded) as x:
     check("remote: a long answer comes whole, as on the serial port", far.cmd("help c") == x.cmd("help c") and len(x.cmd("help c")[1]) > 30)
     check("remote: a table too", far.cmd("select name from commands") == x.cmd("select name from commands"))
     check("remote: an error is an error", far.cmd("frobnicate") == (False, ["Unknown command: frobnicate"]))
+    answer = far.cmd("net ping 10.0.2.2")
+    check("remote: a command that waits for the network is carried to its end there, as before",
+          answer[0] and len(answer[1]) == 1 and answer[1][0].startswith("10.0.2.2 answered in "), answer)
     check("remote: the code without its dash, in small letters", Machine("127.0.0.1", code.replace("-", "").lower(), forwarded).cmd("uptime")[0] is True)
     check("remote: install is refused there", far.cmd("install 1 yes") == (False, ["install takes a disk: it is typed at the machine itself."]))
     check("remote: and so is opening the prompt", far.cmd("remote on") == (False, ["remote on is typed at the machine itself."]))
@@ -1317,6 +1320,9 @@ class Served(http.server.BaseHTTPRequestHandler):
             if self.path == "/chunks":
                 self.wfile.write(b"0\r\nX-After: the last chunk\r\n\r\n")
             return
+        if self.path.startswith("/slow"):
+            # a machine that takes its time
+            time.sleep(2)
         if self.path == "/long":
             body = LONG
         else:
@@ -1423,6 +1429,70 @@ with Xila(net="e1000e") as x:
     ok, lines = x.cmd("net get no where")
     check("net get: wants a place to ask", not ok and lines == ["Type net get and where to ask: net get 192.168.1.20:8000/page"], lines)
     check("net get: the rest of the network is as it was", x.cmd("net ping 10.0.2.2")[1][0].startswith("10.0.2.2 answered in "))
+
+    # What waits for the network holds nothing: the wait belongs to its job,
+    # and several go on side by side. The machine asked takes two seconds.
+    for name in ("first", "second"):
+        for line in ("program " + name, "net get %s/slow-%s" % (there, name), "say '%s is back'" % name, "end"):
+            x.cmd(line)
+    began = time.time()
+    numbers = [re.sub(r"\D", "", x.cmd("submit " + name)[1][0].split(" submitted")[0]) for name in ("first", "second")]
+    lives = x.cmd("say 1 + 1")
+    quick = time.time() - began
+    states = {row["job"]: row["state"] for row in x.table("jobs")}
+    check("a job that waits for the network holds nothing: the prompt answers at once",
+          lives == (True, ["2"]) and quick < 1.0 and [states.get(number) for number in numbers] == ["waiting", "waiting"], (lives, quick, states))
+    x.type("say 'the screen too'")
+    x.key("ret")
+    check("and so does the screen", body(x)[-2].strip() == "the screen too", body(x)[-3:])
+    for _ in range(60):
+        states = {row["job"]: row["state"] for row in x.table("jobs")}
+        if all(states.get(number) == "done" for number in numbers):
+            break
+        time.sleep(0.1)
+    both = time.time() - began
+    said = [x.cmd("job " + number)[1][2:] for number in numbers]
+    check("two jobs ask two machines side by side: both are answered in the time of one",
+          said == [[there + " answered 200.", "hello from the host", "you asked for /slow-%s" % name, name + " is back"] for name in ("first", "second")] and 2.0 <= both < 3.6, (both, said))
+    # a line typed alone waits the same way: at the screen the row says so, and the rest lives
+    x.type("net get %s/slow-screen" % there)
+    x.key("ret")
+    time.sleep(0.5)
+    running = body(x)[-1].strip()
+    lives = x.cmd("say 'alive'")
+    time.sleep(2.5)
+    check("a command that waits for the network, typed at the screen, is waited for while the system lives",
+          running.startswith("Running net get 10.0.2.2. [Esc] stops it") and lives == (True, ["alive"]) and "you asked for /slow-screen" in [row.strip() for row in body(x)[-4:]], (running, lives, body(x)[-4:]))
+    # at the serial port Ctrl+C gives the question up, and what is typed ahead is run after
+    began = time.time()
+    x.begin("net get %s/slow-stopped" % there)
+    time.sleep(0.5)
+    ok, lines = x.stop()
+    after = x.cmd("net get %s/after" % there)
+    check("Ctrl+C gives up a question that waits, and the next one is answered",
+          not ok and lines == ["Stopped."] and time.time() - began < 1.8 and after == (True, [there + " answered 200.", "hello from the host", "you asked for /after"]), (ok, lines, after))
+    x.serial.sendall(("net get %s/slow-ahead\rsay 'typed ahead'\r" % there).encode())
+    first = x.cmd(None, timeout=20)
+    second = x.cmd(None, timeout=20)
+    check("what is typed ahead of a command that waits is run after it",
+          first == (True, [there + " answered 200.", "hello from the host", "you asked for /slow-ahead"]) and second == (True, ["typed ahead"]), (first, second))
+    # three pings nobody answers, a second each: side by side they take one
+    for line in ("program lost", "net ping 10.0.2.99", "end"):
+        x.cmd(line)
+    began = time.time()
+    numbers = [re.sub(r"\D", "", x.cmd("submit lost")[1][0].split(" submitted")[0]) for _ in range(3)]
+    for _ in range(60):
+        states = {row["job"]: row["state"] for row in x.table("jobs")}
+        if all(states.get(number) == "failed" for number in numbers):
+            break
+        time.sleep(0.1)
+    lost = time.time() - began
+    said = [x.cmd("job " + number)[1][2:] for number in numbers]
+    check("three pings that nobody answers wait their second side by side",
+          said == [["10.0.2.99 did not answer within a second."]] * 3 and lost < 2.6, (lost, said))
+    for name in ("first", "second", "lost"):
+        x.cmd("drop program " + name)
+    x.cmd("drop table job_log")
 
     # Names. The network QEMU makes up names a name server (10.0.2.3, which
     # passes the questions on to this machine's own). To check without the

@@ -120,6 +120,7 @@ storage engine allocates.
 | `code.rs` | 431 | XilaScript compiled: the instructions, the compiler, the faults of form. |
 | `machine.rs` | 921 | The virtual machine that runs them: units, programs three deep with names of their own, loops over rows; turns, and the rooms it runs in. |
 | `jobs.rs` | 897 | Jobs: programs that run turn by turn as who started them, what they said, `job_log`. |
+| `waits.rs` | 330 | What jobs asked of the network and wait for: a ping, a name, a page, a fetched system, a step at a time. |
 | `tcp.rs` | 1,305 | TCP as a state machine with no hardware. |
 | `net.rs` | 1,015 | Ethernet, ARP, IPv4, ICMP, UDP, the DHCP client. |
 | `sql.rs` | 1,523 | Lexer, `SELECT`, values, the `Source` trait, the cursor a loop reads its rows through. |
@@ -205,8 +206,12 @@ own before the status line, and a second queue feeds the `on` programs.
 
 **Kernel requests.** A command cannot call the kernel. It leaves a
 `shell::Request` in `System`; the task that ran it calls `serve`, and
-when there is an answer, `shell::served` words it. See
-[The kernel](07-kernel.md).
+when there is an answer, `shell::served` words it. A request that
+waits for the network (`net get`, `install from`) is not served there:
+it becomes a wait of the job that asked (`waits.rs`), which the kernel
+moves a step at each pass of the card while the job waits and the
+others run. See [The kernel](07-kernel.md) and
+[Networking](10-networking.md#what-waits-for-the-network).
 
 **Shared state.** `Ui`, `System` and the screen live behind one lock.
 A task locks it, does its work, unlocks, then sleeps one tick.

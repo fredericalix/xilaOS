@@ -35,6 +35,7 @@ use xila_core::ask;
 use xila_core::dns;
 use xila_core::remote;
 use xila_core::tftp;
+use xila_core::waits;
 use xila_core::shell::{self, Measure, Out, Pictures, Request, Style, System, Table, FRAME_TICKS, PROMPT};
 use xila_core::text::FixedStr;
 use xila_core::theme::{role, THEMES};
@@ -64,6 +65,18 @@ struct Shared {
     /// for what is sent and what comes back, made at the first question.
     call: Option<Thinking>,
     room: Option<(Box<[u8]>, Box<[u8]>)>,
+    /// What the waits for the network need of the kernel.
+    carried: Carried,
+}
+
+/// What the kernel keeps for the waits of jobs (`xila_core::waits`): the
+/// TLS client of each page that is asked in secret, 37 KB on the heap
+/// for as long as its wait goes on, and a command for the prompt over
+/// the network that came while another task than the interface's read
+/// the card, for that task to run.
+struct Carried {
+    tls: [Option<Box<xila_tls::Client>>; waits::PLACES],
+    call: Option<Call>,
 }
 
 /// A question to the companion's model on its way: the asking, the TLS
@@ -121,7 +134,7 @@ const SLICE: u64 = 3_000;
 const SLICE_WAITED: u64 = 8_000;
 
 static SHARED: task::Mutex<Shared> =
-    task::Mutex::new(Shared { ui: Ui::new(), sys: System::new(), stage: None, disks: disk::Disks::new(), system: &[], nic: None, answer: xila_core::remote::Answer::new(), page: xila_core::web::Page::new(), call: None, room: None });
+    task::Mutex::new(Shared { ui: Ui::new(), sys: System::new(), stage: None, disks: disk::Disks::new(), system: &[], nic: None, answer: xila_core::remote::Answer::new(), page: xila_core::web::Page::new(), call: None, room: None, carried: Carried { tls: [const { None }; waits::PLACES], call: None } });
 
 /// A value written once while the kernel starts, before any other task
 /// exists, and only read afterwards.
@@ -406,7 +419,7 @@ extern "C" fn interface(boot: usize) -> ! {
     loop {
         {
             let mut shared = SHARED.lock();
-            let Shared { ui, sys, stage, disks, system, nic, answer, page, call, room } = &mut *shared;
+            let Shared { ui, sys, stage, disks, system, nic, answer, page, call, room, carried } = &mut *shared;
             let Some(stage) = stage else {
                 fatal(format_args!("the screen is gone"));
             };
@@ -419,7 +432,7 @@ extern "C" fn interface(boot: usize) -> ! {
                     observe(sys);
                     counted(sys, nic.as_mut());
                     ui.key(sys, event);
-                    serve(sys, ui, Some(stage), disks, system, nic.as_mut());
+                    serve(sys, ui, Some(stage), disks, system, nic.as_mut(), carried, None);
                     ui.served(sys);
                     next = decoder.rest();
                 }
@@ -440,13 +453,20 @@ extern "C" fn interface(boot: usize) -> ! {
             // what a command typed here asks.
             let began = arch::micros();
             ui.work(sys, &mut || arch::micros().wrapping_sub(began) >= SLICE_WAITED);
+            let waited = xila_core::jobs::watched(sys, xila_core::jobs::Watch::Screen);
             if xila_core::jobs::asks(sys) {
-                serve(sys, ui, Some(stage), disks, system, nic.as_mut());
+                serve(sys, ui, Some(stage), disks, system, nic.as_mut(), carried, waited);
                 ui.served(sys);
             }
-            // The network: the frames that came, and the time that passes.
+            // what it asked of the network has come: said here, and it goes on
+            if waited.is_some_and(|at| collected(sys, carried, at)) {
+                ui.served(sys);
+            }
+            // The network: the frames that came, the time that passes, and
+            // a step for what jobs wait for.
             if let Some(nic) = nic {
-                if let Some(call) = network(sys, nic) {
+                network(sys, nic, carried, system, true, sys.ticks);
+                if let Some(call) = carried.call.take() {
                     // a command from another machine: run as one typed here would be
                     if let Some(line) = call.line {
                         answer.clear();
@@ -459,7 +479,7 @@ extern "C" fn interface(boot: usize) -> ! {
                         }
                         let ok = shell::exec(sys, line.bytes(), answer);
                         answer.events(sys);
-                        serve(sys, ui, Some(stage), disks, system, Some(nic));
+                        serve(sys, ui, Some(stage), disks, system, Some(nic), carried, None);
                         // a request the kernel could not meet makes the command a failure
                         let ok = shell::served(sys, answer) && ok;
                         ui.dirty = true;
@@ -605,7 +625,34 @@ fn pictured(sys: &System, rows: usize) -> (usize, usize) {
 }
 
 /// Does what a command asked of the kernel.
-fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &mut disk::Disks, system: &mut &'static [u8], nic: Option<&mut e1000::Nic>) {
+fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &mut disk::Disks, system: &mut &'static [u8], mut nic: Option<&mut e1000::Nic>, carried: &mut Carried, asker: Option<usize>) {
+    // What waits for the network becomes the wait of the job that asked,
+    // and this returns: the job waits, nothing else does. With no job
+    // behind it (the prompt over the network, what the companion runs, a
+    // system with no rooms) the wait is carried to its end here and now.
+    let at = asker.unwrap_or(waits::AT_ONCE);
+    if waits::begin(sys, at, arch::micros()) {
+        let Some(nic) = nic.as_deref_mut() else {
+            waits::fail(sys, at, waits::Trouble::NoCard);
+            if asker.is_none() {
+                waits::take(sys, at);
+            }
+            return;
+        };
+        secret(sys, at, carried);
+        if asker.is_none() {
+            // the time of the network, which stands still while a command is served
+            let (start, ticks) = (arch::micros(), sys.ticks);
+            while waits::going(sys, at) {
+                // a command from the network that comes meanwhile is not
+                // run: who sent it asks again
+                network(sys, nic, carried, system, false, ticks + (arch::micros() - start) / 10_000);
+                core::hint::spin_loop();
+            }
+            collected(sys, carried, at);
+        }
+        return;
+    }
     match sys.request.take() {
         Some(Request::NetRegisters) => sys.net_registers = nic.map(|nic| nic.registers()),
         Some(Request::NetRestart) => {
@@ -614,22 +661,6 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
                 sys.net.start(nic.mac, sys.ticks);
                 sys.net_card = Some(card(nic));
                 sys.net_restarted = Some(back);
-            }
-        }
-        Some(Request::Ping(to)) => {
-            if let Some(nic) = nic {
-                // sent, then a second for the answer to come
-                let start = arch::micros();
-                sys.net.ping(to, sys.ticks, nic);
-                let mut took = None;
-                while took.is_none() && arch::micros() - start < 1_000_000 {
-                    // a command from the network that comes meanwhile is not
-                    // run: who sent it asks again
-                    let _ = network(sys, nic);
-                    took = sys.net.ping.and_then(|ping| ping.took).map(|_| (arch::micros() - start) as u32);
-                    core::hint::spin_loop();
-                }
-                sys.pinged = Some((to, took));
             }
         }
         Some(Request::Light(wish)) => {
@@ -657,26 +688,8 @@ fn serve(sys: &mut System, ui: &mut Ui, mut stage: Option<&mut Stage>, disks: &m
                 sys.chip = Some((chip::look(&card, generation), registers));
             }
         }
-        Some(Request::Ask { to, port, secret, post }) => {
-            let got = match nic {
-                Some(nic) => get(sys, nic, to, port, secret, post),
-                None => Err(ask::Failed::NoAnswer),
-            };
-            sys.got = Some((port, got));
-        }
-        Some(Request::Name) => {
-            sys.named = Some(match nic {
-                Some(nic) => named(sys, nic, arch::micros()),
-                None => Err(dns::Failed::NoServer),
-            });
-        }
-        Some(Request::Fetch(server)) => {
-            let fetched = match nic {
-                Some(nic) => fetch(sys, nic, server, system),
-                None => Err(tftp::Failed::NoWay),
-            };
-            sys.fetched = Some((server, fetched));
-        }
+        // taken above: they wait for the network
+        Some(Request::Ping(_) | Request::Ask { .. } | Request::Name | Request::Fetch(_)) => {}
         Some(Request::Install { disk, whole }) => {
             // The machine does nothing else meanwhile, a second or two on a
             // real disk: a bar on the last row of the screen says how far it is.
@@ -794,140 +807,49 @@ fn companion(sys: &mut System, nic: &mut e1000::Nic, call: &mut Option<Thinking>
     }
 }
 
-/// Finds the address of the machine named `System::asked_machine`: in
-/// what is known, or by asking the name server and waiting for its
-/// answer. The machine does nothing else meanwhile, three seconds at
-/// most. `start` is when the command began to be served, by `micros`.
-fn named(sys: &mut System, nic: &mut e1000::Nic, start: u64) -> Result<xila_core::net::Ip, dns::Failed> {
-    // the time of the network, which stands still while a command is served
-    let now = |sys: &System| sys.ticks + (arch::micros() - start) / 10_000;
-    let name = sys.asked_machine;
-    let mut frame = [0u8; 2048];
-    loop {
-        while let Some(length) = nic.receive(&mut frame) {
-            let at = now(sys);
-            // a command from the network that comes meanwhile is not run: who sent it asks again
-            let _ = sys.net.receive(&frame[..length], at, nic);
-        }
-        let at = now(sys);
-        sys.net.tick(at, nic);
-        match sys.net.name(name.bytes(), at, nic) {
-            dns::Lookup::Found(ip) => return Ok(ip),
-            dns::Lookup::Asking => core::hint::spin_loop(),
-            dns::Lookup::Failed(why) => return Err(why),
-        }
+/// Takes what came of the wait of a place, to be said, and gives back
+/// the memory the kernel kept for it. False when nothing came yet.
+fn collected(sys: &mut System, carried: &mut Carried, at: usize) -> bool {
+    let came = waits::take(sys, at);
+    if came {
+        carried.tls[at] = None;
     }
+    came
 }
 
-/// Asks a machine for a page, or with `post` sends it the text of
-/// `System::asked_text`, and waits for its answer: how it went, the
-/// start of what it said and how much it said in all. The machine does
-/// nothing else meanwhile: until the answer is whole, or until five
-/// seconds have passed without a byte, after the three at most that
-/// finding its address may take when it is asked by its name (`to` is
-/// then None). With `secret` it is asked through TLS: the client is made
-/// here, on the heap (it is 37 KB), and lives as long as the question.
-fn get(sys: &mut System, nic: &mut e1000::Nic, to: Option<xila_core::net::Ip>, port: u16, secret: bool, post: bool) -> Result<shell::Got, ask::Failed> {
-    let start = arch::micros();
-    // the time of the network, which stands still while a command is served
-    let now = |sys: &System| sys.ticks + (arch::micros() - start) / 10_000;
-    // what TLS needs is looked at before anything is asked of anyone
-    let mut tls = match secret {
-        false => None,
-        true => {
-            let mut chance = [0u8; 64];
-            if !arch::random(&mut chance) {
-                return Err(ask::Failed::NoChance);
-            }
-            // the clock counts from the year 2000, certificates from 1970
-            let date = sys.now().ok_or(ask::Failed::NoClock)? + 946_684_800;
-            Some(Box::new(xila_tls::Client::new(sys.asked_machine.bytes(), &chance, date, xila_tls::public_roots())))
-        }
+/// Makes the TLS client of the wait of a place, when it asks a page in
+/// secret: what TLS needs is looked at before anything is asked of
+/// anyone. The client is on the heap (it is 37 KB) and lives as long as
+/// the wait goes on.
+fn secret(sys: &mut System, at: usize, carried: &mut Carried) {
+    carried.tls[at] = None;
+    let Some(machine) = waits::secret(sys, at) else {
+        return;
     };
-    let to = match to {
-        Some(to) => to,
-        None => named(sys, nic, start).map_err(ask::Failed::Name)?,
-    };
-    let (machine, path, text) = (sys.asked_machine, sys.asked_path, sys.asked_text);
-    let place = ask::Place { machine: machine.bytes(), ip: Some(to), port, path: path.bytes(), secret };
-    let question = if post { ask::Question::post(text.bytes()) } else { ask::Question::GET };
-    let at = now(sys);
-    let mut asking = ask::Ask::start(&mut sys.net.tcp, to, &place, &question, at)?;
-    // the start of what they say is kept; the rest is counted
-    let mut start = [0u8; 640];
-    let mut frame = [0u8; 2048];
-    loop {
-        while let Some(length) = nic.receive(&mut frame) {
-            let at = now(sys);
-            // a command from the network that comes meanwhile is not run: who sent it asks again
-            let _ = sys.net.receive(&frame[..length], at, nic);
-        }
-        let at = now(sys);
-        sys.net.tick(at, nic);
-        let step = asking.step(&mut sys.net.tcp, tls.as_deref_mut(), question.bytes, &mut start, at);
-        sys.net.speak(at, nic);
-        match step {
-            ask::Step::Going => core::hint::spin_loop(),
-            ask::Step::Done(status) => return Ok(shell::Got { status, start: FixedStr::from_bytes(&start[..asking.kept]), total: asking.total }),
-            ask::Step::Failed(why) => return Err(why),
-        }
+    let mut chance = [0u8; 64];
+    if !arch::random(&mut chance) {
+        return waits::fail(sys, at, waits::Trouble::NoChance);
     }
+    let Some(date) = sys.now() else {
+        return waits::fail(sys, at, waits::Trouble::NoClock);
+    };
+    // the clock counts from the year 2000, certificates from 1970
+    carried.tls[at] = Some(Box::new(xila_tls::Client::new(machine.bytes(), &chance, date + 946_684_800, xila_tls::public_roots())));
 }
 
-/// Fetches the system from a machine that serves it, into memory kept
-/// for that, and makes it the system `install` puts on a disk. Returns
-/// its size and its check number. The machine does nothing else
-/// meanwhile, a few seconds at most.
-fn fetch(sys: &mut System, nic: &mut e1000::Nic, server: xila_core::net::Ip, system: &mut &'static [u8]) -> Result<(usize, u32), tftp::Failed> {
-    /// Room for a system: several times what it weighs today.
-    const ROOM: usize = 8 << 20;
+/// The room a fetched system is kept in, several times what one weighs
+/// today: pages taken once, at the first fetch, and kept. None when
+/// there is no memory for it.
+fn room() -> Option<*mut u8> {
     static KEPT: AtomicUsize = AtomicUsize::new(0);
     if KEPT.load(Ordering::Relaxed) == 0 {
-        KEPT.store(memory::pages(ROOM / 4096).ok_or(tftp::Failed::NoMemory)?, Ordering::Relaxed);
+        KEPT.store(memory::pages(ROOM / 4096)?, Ordering::Relaxed);
     }
-    let kept = KEPT.load(Ordering::Relaxed);
-    if system.as_ptr() as usize == kept {
-        // the system fetched before is about to be written over
-        *system = &[];
-        sys.system_bytes = 0;
-    }
-    // Safety: the pages are this function's alone, and nothing else reads
-    // them while it writes: `system` was just taken off them.
-    let into = unsafe { core::slice::from_raw_parts_mut(kept as *mut u8, ROOM) };
-    let start = arch::micros();
-    // the time of the network, which stands still while a command is served
-    let now = |sys: &System| sys.ticks + (arch::micros() - start) / 10_000;
-    let mut fetch = tftp::Fetch::start(server, now(sys), &mut sys.net, nic);
-    let mut frame = [0u8; 2048];
-    let length = loop {
-        let mut step = tftp::Step::Going;
-        while let Some(length) = nic.receive(&mut frame) {
-            let at = now(sys);
-            if let Some(message) = sys.net.receive(&frame[..length], at, nic) {
-                step = fetch.message(&message, into, at, &mut sys.net, nic);
-            }
-        }
-        let at = now(sys);
-        sys.net.tick(at, nic);
-        if step == tftp::Step::Going {
-            step = fetch.tick(at, &mut sys.net, nic);
-        }
-        match step {
-            tftp::Step::Done(length) => break length,
-            tftp::Step::Failed(why) => return Err(why),
-            // a minute is far more than a system takes on a local network
-            tftp::Step::Going if arch::micros() - start > 60_000_000 => return Err(tftp::Failed::Silent),
-            tftp::Step::Going => core::hint::spin_loop(),
-        }
-    };
-    let fetched: &'static [u8] = &into[..length];
-    if !tftp::is_system(fetched) {
-        return Err(tftp::Failed::NotASystem);
-    }
-    *system = fetched;
-    sys.system_bytes = length;
-    Ok((length, xila_core::gpt::crc32(0, fetched)))
+    Some(KEPT.load(Ordering::Relaxed) as *mut u8)
 }
+
+/// Room for a system that is fetched.
+const ROOM: usize = 8 << 20;
 
 /// What `net` shows of the card.
 fn card(nic: &mut e1000::Nic) -> shell::NetCard {
@@ -944,22 +866,51 @@ struct Call {
     line: Option<FixedStr<{ remote::LINE }>>,
 }
 
-/// Takes the frames that came from the cable and lets the network answer
-/// them, then lets it do what the passing time asks for. Returns the
-/// command for the prompt that came among them, if one did: one at a time.
-fn network(sys: &mut System, nic: &mut e1000::Nic) -> Option<Call> {
+/// One pass of the network: takes the frames that came from the cable
+/// and lets the network answer them, lets it do what the passing time
+/// asks for, and moves every wait a step (`xila_core::waits`). A command
+/// for the prompt over the network that came among the frames is kept
+/// in `carried.call` when `calls` says so, one at a time, for the
+/// interface task to run. `now` is the time of the network, in ticks.
+/// Returns whether frames came: there may be more to do at once.
+fn network(sys: &mut System, nic: &mut e1000::Nic, carried: &mut Carried, system: &mut &'static [u8], calls: bool, now: u64) -> bool {
+    // The room of a fetched system, while one is asked for: the system
+    // that was there is no longer one to install.
+    let mut none = [0u8; 0];
+    let mut kept: &mut [u8] = &mut none;
+    if waits::fetching(sys) {
+        match room() {
+            Some(pages) => {
+                if system.as_ptr() == pages as *const u8 {
+                    *system = &[];
+                    sys.system_bytes = 0;
+                }
+                // Safety: the pages are kept for this alone, the lock of
+                // `SHARED` is held by whoever is here, and `system` was
+                // just taken off them: nothing else reads or writes them.
+                kept = unsafe { core::slice::from_raw_parts_mut(pages, ROOM) };
+            }
+            None => waits::no_room(sys),
+        }
+    }
+    let mut fetched = None;
     let mut frame = [0u8; 2048];
-    let mut call = None;
+    let mut came = false;
     // no more at once than the card holds
     for _ in 0..32 {
         let Some(length) = nic.receive(&mut frame) else {
             break;
         };
-        // a message for a port of this machine: only the prompt has one
-        let Some(message) = sys.net.receive(&frame[..length], sys.ticks, nic) else {
+        came = true;
+        // a message for a port of this machine: a fetch has one, the prompt another
+        let Some(message) = sys.net.receive(&frame[..length], now, nic) else {
             continue;
         };
-        if message.port != remote::PORT || call.is_some() {
+        if message.port == tftp::PORT {
+            fetched = fetched.or(waits::heard(sys, &message, kept, now, nic));
+            continue;
+        }
+        if message.port != remote::PORT || !calls || carried.call.is_some() {
             continue;
         }
         let local = sys.net.local(message.from);
@@ -972,10 +923,25 @@ fn network(sys: &mut System, nic: &mut e1000::Nic) -> Option<Call> {
                 (number, Some(kept))
             }
         };
-        call = Some(Call { from: message.from, port: message.from_port, number, line });
+        carried.call = Some(Call { from: message.from, port: message.from_port, number, line });
     }
-    sys.net.tick(sys.ticks, nic);
-    call
+    sys.net.tick(now, nic);
+    for at in 0..waits::PLACES {
+        if !waits::going(sys, at) {
+            // its client, if it had one, has nothing more to say
+            carried.tls[at] = None;
+            continue;
+        }
+        fetched = fetched.or(waits::step(sys, at, nic, now, arch::micros(), carried.tls[at].as_deref_mut(), kept));
+    }
+    sys.net.speak(now, nic);
+    if let Some(length) = fetched {
+        // a system came whole and has the shape of one: it is what `install` writes
+        let whole: &'static [u8] = unsafe { core::slice::from_raw_parts(kept.as_ptr(), length) };
+        *system = whole;
+        sys.system_bytes = length;
+    }
+    came
 }
 
 /// Changes how pictures get to the screen. The screen is written directly
@@ -1050,18 +1016,35 @@ extern "C" fn jobs(_: usize) -> ! {
     loop {
         let worked = {
             let mut shared = SHARED.lock();
-            let Shared { ui, sys, stage, disks, system, nic, .. } = &mut *shared;
-            if xila_core::jobs::idle(sys) || sys.request.is_some() {
-                false
-            } else {
+            let Shared { ui, sys, stage, disks, system, nic, carried, .. } = &mut *shared;
+            let mut worked = false;
+            // What jobs wait for from the network: the card is read here
+            // too while something is asked, so that an answer is not kept
+            // waiting for the next tick. Without rest while frames come or
+            // a wait is in a hurry (a ping, whose time is told; a fetch,
+            // which goes a block at each answer); at each tick otherwise.
+            if waits::any(sys) {
+                observe(sys);
+                if let Some(nic) = nic.as_mut() {
+                    worked |= network(sys, nic, carried, system, true, sys.ticks) || waits::hurried(sys);
+                }
+            }
+            // an answer has come for a job nobody waits for: said where it says
+            while let Some(at) = xila_core::jobs::answer_ready(sys) {
+                collected(sys, carried, at);
+                ui.carried(sys, at);
+                worked = true;
+            }
+            if !xila_core::jobs::idle(sys) && sys.request.is_none() {
                 observe(sys);
                 let began = arch::micros();
                 if let Some(at) = ui.carry(sys, &mut || arch::micros().wrapping_sub(began) >= SLICE) {
-                    serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut());
+                    serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut(), carried, Some(at));
                     ui.carried(sys, at);
                 }
-                true
+                worked = true;
             }
+            worked
         };
         if worked {
             arch::yield_now();
@@ -1105,7 +1088,7 @@ extern "C" fn serial_shell(_: usize) -> ! {
                     serial.write(b"\n");
                     let ok = {
                         let mut shared = SHARED.lock();
-                        let Shared { ui, sys, stage, disks, system, nic, .. } = &mut *shared;
+                        let Shared { ui, sys, stage, disks, system, nic, carried, .. } = &mut *shared;
                         observe(sys);
                         counted(sys, nic.as_mut());
                         sys.serial_bytes += line.len() as u64 + 40;
@@ -1132,7 +1115,7 @@ extern "C" fn serial_shell(_: usize) -> ! {
                             let _ = write!(note, "#lost {lost}\n");
                             serial.write(note.bytes());
                         }
-                        serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut());
+                        serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut(), carried, None);
                         // a request the kernel could not meet makes the command a failure
                         let ok = shell::served(sys, &mut SerialOut { serial: &serial }) && ok;
                         ui.dirty = true;
@@ -1148,7 +1131,7 @@ extern "C" fn serial_shell(_: usize) -> ! {
                     loop {
                         {
                             let mut shared = SHARED.lock();
-                            let Shared { ui, sys, stage, disks, system, nic, .. } = &mut *shared;
+                            let Shared { ui, sys, stage, disks, system, nic, carried, .. } = &mut *shared;
                             let watch = xila_core::jobs::Watch::Serial;
                             let Some(at) = xila_core::jobs::watched(sys, watch) else {
                                 break;
@@ -1168,7 +1151,12 @@ extern "C" fn serial_shell(_: usize) -> ! {
                             let began = arch::micros();
                             xila_core::jobs::turn(sys, at, &mut SerialOut { serial: &serial }, &mut || arch::micros().wrapping_sub(began) >= SLICE_WAITED);
                             if xila_core::jobs::asks(sys) {
-                                serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut());
+                                serve(sys, ui, stage.as_mut(), disks, system, nic.as_mut(), carried, Some(at));
+                                let answered = shell::served(sys, &mut SerialOut { serial: &serial });
+                                xila_core::jobs::answered(sys, at, answered);
+                            }
+                            // what it asked of the network has come: said here, and it goes on
+                            if collected(sys, carried, at) {
                                 let answered = shell::served(sys, &mut SerialOut { serial: &serial });
                                 xila_core::jobs::answered(sys, at, answered);
                             }
