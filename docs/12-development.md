@@ -30,10 +30,10 @@ python3 tools/docs.py                        # this documentation as one PDF: do
 | `tools/build.sh` | Builds the kernel with the local cargo when it has the UEFI target, else in the Docker image `xilaos-build`, which it makes if missing. |
 | `tools/run.sh` | Builds, then QEMU with a window, 256 MB, a virtio disk on `build/data.img`, the serial port on the terminal. |
 | `tools/xq.py` | The `Xila` class and a small command line over it. |
-| `tools/check.py` | About 400 checks of the whole system, in more than forty starts of QEMU. |
+| `tools/check.py` | About 600 checks of the whole system, in more than forty starts of QEMU. |
 | `tools/usb.sh` | The image of a USB stick, made on the host by the code of `install` itself (`core/examples/usb.rs`). |
 | `tools/netboot.py` | A proxy DHCP and TFTP server that hands the kernel to a PC starting from the network, and to `install from`. |
-| `tools/remote.py` | The client of the prompt over the network. |
+| `tools/remote.py` | The client of the prompt over the network; `--play FILE` types every line of a file there (`apps/stock.xs`). |
 | `tools/qr.swift` | Reads a QR code in a screenshot with the reader of macOS, to check the `qr` command against code that did not draw it. |
 | `tools/docs.py` | Assembles the chapters of `docs/` into `docs/xilaos.pdf` (needs pandoc and weasyprint). |
 

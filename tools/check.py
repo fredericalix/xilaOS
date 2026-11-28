@@ -1412,6 +1412,114 @@ with Xila(net="e1000e", forward=forwarded) as x:
     again = lines[0].split()[-1].rstrip(".")
     check("remote on: a new code each time", ok and again != code and far.cmd("uptime", wait=0.7, tries=1) == (None, []), lines)
     far = Machine("127.0.0.1", again, forwarded)
+    # An application made of statements is put on the machine through that
+    # prompt: the stock, a text of the repository. Then it is used at the
+    # screen of the machine, with the keys.
+    from remote import play
+    stock, said = os.path.join(ROOT, "apps", "stock.xs"), []
+    played = play(far, stock, say=said.append)
+    made = [row["name"] for row in x.table("panels")]
+    check("remote --play: every line of the stock is typed at the prompt of the machine, and its panels are kept",
+          played and made == ["categories", "moves", "articles", "items"] and said[2:3] == ["Check added to items: every row holds it."] and said[-1:] == ["Panel items kept: 9 lines."] and len(x.table("select name from categories")) == 4, (played, made, said[-3:]))
+    said = []
+    played = play(far, stock, say=said.append)
+    check("remote --play: it stops at the first line the machine refuses, and says which",
+          not played and said == ["Line 13 was refused: create table categories (name text not null unique)", "    A table of that name exists."], said)
+    # a file whose last block is not closed is refused, by the command line too, and leaves no block open
+    with open(os.path.join(ROOT, "build", "open.xs"), "w") as text:
+        text.write("# a block with no end\nprogram never\nsay 'x'\n")
+    tool = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "remote.py"), "127.0.0.1", again, "--port", str(forwarded), "--play", os.path.join(ROOT, "build", "open.xs")],
+                          capture_output=True, text=True)
+    check("remote --play: a file whose last block is not closed is refused, and no block is left open at the prompt",
+          tool.returncode == 1 and tool.stdout == "The block opened at line 2 is not closed: nothing of it was kept.\n" and far.cmd("say 2") == (True, ["2"]), (tool.returncode, tool.stdout))
+    with open(os.path.join(ROOT, "build", "odd.xs"), "w", encoding="utf-8") as text:
+        text.write("create table odd (n int)\nsay 'caf\u00e9'\n")
+    said = []
+    played = play(far, os.path.join(ROOT, "build", "odd.xs"), say=said.append)
+    check("remote --play: a file with a line the prompt cannot take is named, and nothing of it is sent",
+          not played and said == ["Line 2 holds \u00e9: this tool sends ASCII only, for now. Nothing was sent."] and not x.cmd("select n from odd")[0], said)
+    x.type("articles")
+    x.key("ret")
+    opening = body(x)
+    x.key("f6")
+    x.type("Cat6 cable 5m")
+    x.key("tab")
+    x.key("f4")
+    time.sleep(0.3)
+    proposed = [row.strip() for row in body(x)[1:5]]
+    x.key("ret")
+    x.key("tab")
+    x.type("shelf B")
+    x.key("tab")
+    x.type("5")
+    x.key("ret")
+    time.sleep(0.4)
+    article = x.table("select label, category, place, qty, least from articles")
+    check("the stock: an article is added in its panel, its category picked among those of the table, its quantity not typed",
+          proposed == ["cables", "tools", "measure", "parts"] and article == [{"label": "Cat6 cable 5m", "category": "cables", "place": "shelf B", "qty": "0", "least": "5"}], (proposed, article))
+    x.key("down")
+    x.type("8")
+    x.key("ret")
+    time.sleep(0.4)
+    opened = body(x)[0].strip()
+    for count, (amount, why) in enumerate((("12", "bought"), ("-8", "lent to the lab")), 1):
+        x.key("f6")
+        x.type(amount)
+        x.key("tab")
+        x.type(why)
+        x.key("ret")
+        # its program runs a moment after the row is stored, and dates it last
+        for _ in range(20):
+            time.sleep(0.25)
+            if x.table("select count(*) from movements where day is not null") == [{"count": str(count)}]:
+                break
+    moved, today = x.table("select article, day, qty, why from movements"), x.cmd("say today")[1][0]
+    x.key("f3")
+    time.sleep(1.2)
+    listed = " ".join(body(x)[3].split())
+    check("the stock: the movements of an article are typed in a panel opened from it, dated by a program, and its quantity follows",
+          opened.startswith("Movements  (article = 1)") and listed == "_ Cat6 cable 5m cables 4 5 shelf B"
+          and moved == [{"article": "1", "day": today, "qty": "12", "why": "bought"}, {"article": "1", "day": today, "qty": "-8", "why": "lent to the lab"}], (opened, listed, moved, today))
+    x.key("f8")
+    time.sleep(1.5)
+    short = body(x)[-3].strip()
+    check("the stock: F8 says how many articles are under what they should have", short == "Articles under their least: 1", short)
+    # a movement that is changed does not change the quantity: F9 counts every quantity again
+    x.cmd("update movements set qty = 20 where qty = 12")
+    before = x.table("select qty from articles")
+    x.key("f9")
+    for _ in range(20):
+        time.sleep(0.25)
+        if x.table("select qty from articles") != before:
+            break
+    time.sleep(1.2)
+    counted, said = x.table("select qty from articles"), body(x)[-3].strip()
+    check("the stock: F9 counts the quantities again from the movements",
+          before == [{"qty": "4"}] and counted == [{"qty": "12"}] and said == "Quantities counted again from the movements.", (before, counted, said))
+    x.key("f3")
+    x.type("items")
+    x.key("ret")
+    opening = body(x)
+    x.key("f6")
+    x.type("Oscilloscope")
+    for _ in range(4):
+        x.key("tab")
+    x.type("lost")
+    x.key("ret")
+    time.sleep(0.4)
+    refused = body(x)[-2].strip()
+    for _ in range(4):
+        x.key("backspace")
+    x.key("f4")
+    time.sleep(0.3)
+    x.key("down")
+    x.key("ret")
+    x.key("ret")
+    time.sleep(0.4)
+    thing = x.table("select label, state from items")
+    check("the stock: the state of a thing is one of those its table allows, which the form says and F4 proposes",
+          "state in ('good', 'worn', 'broken', 'lent')" in refused and thing == [{"label": "Oscilloscope", "state": "worn"}], (refused, thing))
+    x.key("f3")
     check("remote off: closes it, also from afar", far.cmd("remote off") == (True, ["This prompt is closed to the network."]) and far.cmd("uptime", wait=0.7, tries=1) == (None, []))
     raw.close()
 

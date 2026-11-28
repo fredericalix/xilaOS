@@ -6,6 +6,8 @@ and shows a code and the address to use. Then, from here:
 
     python3 tools/remote.py 192.168.1.11 K7QD-2MXP            # a prompt
     python3 tools/remote.py 192.168.1.11 K7QD-2MXP net        # one command
+    python3 tools/remote.py 192.168.1.11 K7QD-2MXP --play apps/stock.xs
+                                                              # every line of a file
 
 Nothing is encrypted: the code and the commands cross the network as
 they are. It is for a network one trusts; `remote off` closes the door.
@@ -21,6 +23,8 @@ import sys
 import time
 
 PORT = 4000
+# what a line of the prompt over the network holds at most (remote::LINE)
+LINE = 240
 
 
 class Machine:
@@ -100,15 +104,73 @@ def show(lines):
     return more
 
 
+def play(machine, path, say=print):
+    """Types every line of a file at the prompt of a machine, in their order:
+    how an application made of statements is put on a machine. Empty lines
+    are left out, and so are notes outside a block (inside one they are
+    part of what is kept). Stops at the first line the machine refuses.
+    Nothing is sent of a file the prompt could not take whole, and no block
+    is left open there. Returns whether every line went well."""
+    with open(path, encoding="utf-8") as text:
+        lines = [line.strip() for line in text]
+    for number, line in enumerate(lines, 1):
+        odd = [letter for letter in line if not " " <= letter <= "~"]
+        if odd:
+            say("Line %d holds %s: this tool sends ASCII only, for now. Nothing was sent." % (number, odd[0]))
+            return False
+        if len(line) > LINE:
+            say("Line %d is %d characters long: a prompt takes %d at most. Nothing was sent." % (number, len(line), LINE))
+            return False
+    # a block left open there by a play that was cut short would take the first lines for its own
+    ok, said = machine.cmd("")
+    if ok is None:
+        say("No answer from the machine. Is its prompt open (remote on), and is the code right?")
+        return False
+    if "#more" in said:
+        machine.cmd("cancel")
+    inside, opened = False, 0
+    for number, line in enumerate(lines, 1):
+        if not line or (line.startswith("#") and not inside):
+            continue
+        ok, said = machine.cmd(line)
+        if ok is None:
+            say("No answer from the machine at line %d: %s" % (number, line))
+            if inside:
+                # if it hears this, the block is dropped; else the next play drops it
+                machine.cmd("cancel", tries=1)
+            return False
+        # a block is open while the machine asks for more
+        if "#more" in said and not inside:
+            opened = number
+        inside = "#more" in said
+        shown = [text for text in said if not text.startswith("#")]
+        shown += ["[the answer was too long: %s characters were left out]" % text[5:] for text in said if text.startswith("#cut ")]
+        if not ok:
+            say("Line %d was refused: %s" % (number, line))
+            for text in shown:
+                say("    " + text)
+            return False
+        for text in shown:
+            say(text)
+    if inside:
+        machine.cmd("cancel")
+        say("The block opened at line %d is not closed: nothing of it was kept." % opened)
+        return False
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Type at the prompt of a XilaOS machine over the local network.")
     parser.add_argument("address", help="the address of the machine, as its `remote on` shows it")
     parser.add_argument("code", help="the code its `remote on` shows")
     parser.add_argument("command", nargs="*", help="one command to run; without it, a prompt")
     parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--play", metavar="FILE", help="type every line of a file there, as an application made of statements is sent")
     arguments = parser.parse_args()
     machine = Machine(arguments.address, arguments.code, arguments.port)
     silent = "No answer from %s. Is its prompt open (remote on), and is the code right?" % arguments.address
+    if arguments.play:
+        sys.exit(0 if play(machine, arguments.play) else 1)
     if arguments.command:
         ok, lines = machine.cmd(" ".join(arguments.command))
         if ok is None:

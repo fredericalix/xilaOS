@@ -236,6 +236,7 @@ On the other computer, with Python 3 and this repository:
 ```sh
 python3 tools/remote.py 10.0.2.15 V3MX-SHTF                 # a prompt: xila>
 python3 tools/remote.py 10.0.2.15 V3MX-SHTF tasks           # one command
+python3 tools/remote.py 10.0.2.15 V3MX-SHTF --play apps/stock.xs   # every line of a file
 ```
 
 ```

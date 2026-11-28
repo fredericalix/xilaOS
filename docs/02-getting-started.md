@@ -241,7 +241,11 @@ It shows a code and the line to type on the other computer:
 ```sh
 python3 tools/remote.py 192.168.1.11 K7QD-2MXP          # a prompt
 python3 tools/remote.py 192.168.1.11 K7QD-2MXP net      # one command
+python3 tools/remote.py 192.168.1.11 K7QD-2MXP --play apps/stock.xs
 ```
+
+The last types every line of a file there: it is how an application
+made of statements is put on a machine ([the stock](16-the-stock.md)).
 
 `remote off` closes the door; it is closed at every start.
 

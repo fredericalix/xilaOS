@@ -33,6 +33,9 @@ The same content as one file: [xilaos.pdf](xilaos.pdf) (rebuild it with
     sees and does, what holds it, what is kept, how it is built.
 15. [Panels](15-panels.md): the screens of applications, described on
     a table: the list, its keys, its limits.
+16. [A first application: the stock](16-the-stock.md): equipment
+    followed one by one and by its quantity, made of four tables and
+    four panels; how it is put on a machine.
 
 ## Working on it
 

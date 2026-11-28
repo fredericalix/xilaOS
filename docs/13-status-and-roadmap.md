@@ -42,6 +42,7 @@ were also tried on the real machine.
 | Programs that take values (`program restock(item, count)`, `restock('cable', 5)`, `submit restock(...)`) and have names of their own | yes | not tried |
 | Commands that wait for the network (`net ping`, `net name`, `net get`, `net post`, `install from`) as waits of a job: the system lives, several go on side by side | yes | not tried |
 | Panels, the screens of applications: described on a table, kept and listed; opened as virtual screens that list their rows page by page, with a line to find; a form to add, change, display and remove a row through SQL, values to pick at `F4`; panels opened from a row on the rows that belong to it; programs run from a key or an option with the values of the row; function keys | yes | not tried |
+| A first application made of panels, the stock (`apps/stock.xs`): things followed one by one, articles by their quantity with their movements; sent to a machine by `tools/remote.py --play` | yes | not tried |
 | Clock, `now` and `today`, `every day at` | yes | yes |
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
@@ -64,7 +65,7 @@ were also tried on the real machine.
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
 about 300 system checks. On 28 November 2026: about 45,000 lines, 431
-unit tests, 586 system checks.
+unit tests, 595 system checks.
 
 ## Known limits of what is done
 
@@ -859,8 +860,19 @@ In four steps, each merged when its unit tests and its checks pass:
    every repeat (a panel now runs one at a time), and options that
    did not fit their row acted without being shown (such a panel is
    no longer kept).
-4. The stock: its text in the repository, the tool that sends it, its
-   chapter of the documentation.
+4. Done on 28 November 2026: the stock ([A first application: the
+   stock](16-the-stock.md)): `apps/stock.xs`, sixty lines that make
+   four tables, four panels and three programs, and `tools/remote.py
+   --play`, which types a file of statements at the prompt of a
+   machine. It played and worked as it was first written: nothing in
+   the system had to change for it. What its review showed, for
+   batch work: a number kept by a program that hears of rows is only
+   right while rows come one at a time. Sixteen changes wait for the
+   `on` programs, of every table, and a movement makes three; more
+   are stored and not heard of, and so is one whose program had not
+   run when the power went. The stock has a program that counts
+   again; rows imported in number will need the system to do better
+   (a queue that is kept, or programs run inside the statement).
 
 ### A memory by meaning for the companion
 

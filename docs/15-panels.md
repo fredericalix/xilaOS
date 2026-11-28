@@ -85,7 +85,7 @@ closes it. The table is a stored one, and must be there.
   as a command. `panel` is a word of the language as `program` is: no
   value and no program can be named so.
 - **The companion may not change the table `panels`**, nor drop a
-  panel: a later step lets a panel run programs at a key.
+  panel: a panel runs programs at a key, for who sits at the machine.
 - **With no `field` line, every column but `id` is a field**, under its
   name. With some, the form has those and no other: a column without a
   field is not shown there, and takes its value by default when a row
