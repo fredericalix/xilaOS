@@ -140,6 +140,8 @@ pub struct Message<'a> {
 }
 
 const KNOWN: usize = 8;
+/// Pings whose answers are waited for at one time.
+pub const PINGS: usize = 8;
 
 /// The network as this machine sees it.
 pub struct Net {
@@ -158,7 +160,8 @@ pub struct Net {
     /// One packet that waits for the address of a card.
     waiting: Option<(Ip, usize)>,
     held: [u8; FRAME],
-    pub ping: Option<Ping>,
+    /// The pings that are followed: the last that were sent.
+    followed: [Option<Ping>; PINGS],
     pings: u16,
     /// The conversations with other machines.
     pub tcp: crate::tcp::Tcp,
@@ -181,7 +184,7 @@ impl Net {
             known: [(NOWHERE, [0; 6], 0); KNOWN],
             waiting: None,
             held: [0; FRAME],
-            ping: None,
+            followed: [None; PINGS],
             pings: 0,
             tcp: crate::tcp::Tcp::new(),
             names: crate::dns::Names::new(),
@@ -347,11 +350,12 @@ impl Net {
         state
     }
 
-    /// Sends a ping. Its answer, when it comes, is in `ping`.
-    pub fn ping(&mut self, to: Ip, now: u64, wire: &mut dyn Wire) -> bool {
-        let Some(from) = self.ip else {
-            return false;
-        };
+    /// Sends a ping, and returns the number it is followed by, or None
+    /// when it could not be sent. `pinged` then says whether its answer
+    /// came. Several are followed side by side; one more takes the place
+    /// of the oldest.
+    pub fn ping(&mut self, to: Ip, now: u64, wire: &mut dyn Wire) -> Option<u16> {
+        let from = self.ip?;
         self.pings = self.pings.wrapping_add(1);
         let mut frame = [0u8; FRAME];
         // an echo request, ours by the two numbers that follow the checksum
@@ -359,8 +363,21 @@ impl Net {
         frame[42..58].copy_from_slice(b"XilaOS says ping");
         let sum = checksum(add(0, &frame[34..58]));
         frame[36..38].copy_from_slice(&sum.to_be_bytes());
-        self.ping = Some(Ping { to, number: self.pings, sent: now, took: None });
-        self.packet(&mut frame, to, ICMP, 24, from, now, wire)
+        let at = (0..PINGS).min_by_key(|at| self.followed[*at].map_or(0, |ping| ping.sent + 1)).unwrap_or(0);
+        self.followed[at] = Some(Ping { to, number: self.pings, sent: now, took: None });
+        self.packet(&mut frame, to, ICMP, 24, from, now, wire).then_some(self.pings)
+    }
+
+    /// What became of a ping: None when it is no longer followed, else
+    /// the ticks its answer took, if it came.
+    pub fn pinged(&self, number: u16) -> Option<Option<u64>> {
+        self.followed.iter().flatten().find(|ping| ping.number == number).map(|ping| ping.took)
+    }
+
+    /// Whether a packet waits for the address of a card: one more that
+    /// had to wait would take its place.
+    pub fn holding(&self) -> bool {
+        self.waiting.is_some()
     }
 
     /// Asks the network for an address, or to have the one it offered.
@@ -616,7 +633,7 @@ impl Net {
                             }
                             // the answer to ours
                             0 => {
-                                if let Some(ping) = &mut self.ping {
+                                for ping in self.followed.iter_mut().flatten() {
                                     if ping.took.is_none() && ping.to == from && be16(data, 4) == 0x5869 && be16(data, 6) == ping.number {
                                         ping.took = Some(now.saturating_sub(ping.sent));
                                     }
@@ -808,11 +825,50 @@ pub(crate) mod tests {
         assert_eq!(wire.0.len(), 1);
     }
 
+    /// The answer to a ping that was sent: the same back, as type 0.
+    fn echo(sent: &[u8], from: Ip) -> Vec<u8> {
+        let mut data = sent[34..58].to_vec();
+        data[0] = 0;
+        data[2..4].fill(0);
+        let sum = sum_of(&data);
+        data[2..4].copy_from_slice(&sum.to_be_bytes());
+        packet(OURS, THEIRS, from, US, 1, &data)
+    }
+
+    #[test]
+    fn pings_are_followed_side_by_side() {
+        let mut net = settled();
+        let mut wire = Kept::default();
+        // the card of the gateway is known: nothing waits for it
+        net.receive(&arp(false, THEIRS, BOX, US), 1, &mut wire);
+        assert!(!net.holding());
+        let first = net.ping([8, 8, 8, 8], 100, &mut wire).unwrap();
+        let second = net.ping([9, 9, 9, 9], 105, &mut wire).unwrap();
+        assert_ne!(first, second);
+        let sent: Vec<Vec<u8>> = wire.0.clone();
+        // the answers cross: each ping has its own, counted from when it left
+        net.receive(&echo(&sent[1], [9, 9, 9, 9]), 110, &mut wire);
+        assert_eq!((net.pinged(first), net.pinged(second)), (Some(None), Some(Some(5))));
+        // an answer from another machine than the one that was asked is none
+        net.receive(&echo(&sent[0], [9, 9, 9, 9]), 115, &mut wire);
+        assert_eq!(net.pinged(first), Some(None));
+        net.receive(&echo(&sent[0], [8, 8, 8, 8]), 120, &mut wire);
+        assert_eq!(net.pinged(first), Some(Some(20)));
+        // eight are followed: one more takes the place of the oldest
+        for n in 0..PINGS as u64 - 1 {
+            net.ping([8, 8, 4, 4], 200 + n, &mut wire).unwrap();
+        }
+        assert_eq!((net.pinged(first), net.pinged(second)), (None, Some(Some(5))));
+        // a packet that waits for a card is said, so that a ping does not take its place
+        net.ping([192, 168, 1, 7], 300, &mut wire);
+        assert!(net.holding());
+    }
+
     #[test]
     fn a_ping_is_sent_through_the_gateway_once_its_card_is_known() {
         let mut net = settled();
         let mut wire = Kept::default();
-        assert!(net.ping([8, 8, 8, 8], 100, &mut wire));
+        let number = net.ping([8, 8, 8, 8], 100, &mut wire).unwrap();
         // elsewhere: whose card is the gateway? The ping waits for the answer
         assert_eq!(wire.0.len(), 1);
         assert_eq!((&wire.0[0][..6], &wire.0[0][12..14], &wire.0[0][20..22], &wire.0[0][38..42]), (&EVERYONE[..], &[8u8, 6][..], &[0u8, 1][..], &BOX[..]));
@@ -823,7 +879,7 @@ pub(crate) mod tests {
         // a whole frame: from our card, and an IP packet
         assert_eq!((&sent[6..12], &sent[12..14]), (&OURS[..], &[8u8, 0][..]));
         assert_eq!((sum_of(&sent[14..34]), sum_of(&sent[34..58])), (0, 0));
-        assert_eq!(net.ping.unwrap().took, None);
+        assert_eq!(net.pinged(number), Some(None));
         // the answer: the same back, as type 0
         let mut data = sent[34..58].to_vec();
         data[0] = 0;
@@ -837,9 +893,9 @@ pub(crate) mod tests {
         let sum = sum_of(&other);
         other[2..4].copy_from_slice(&sum.to_be_bytes());
         net.receive(&packet(OURS, THEIRS, [8, 8, 8, 8], US, 1, &other), 130, &mut wire);
-        assert_eq!(net.ping.unwrap().took, None);
+        assert_eq!(net.pinged(number), Some(None));
         net.receive(&packet(OURS, THEIRS, [8, 8, 8, 8], US, 1, &data), 131, &mut wire);
-        assert_eq!(net.ping.unwrap().took, Some(31));
+        assert_eq!(net.pinged(number), Some(Some(31)));
         // a machine on the cable is asked for directly, and the next ping needs no asking
         net.ping([192, 168, 1, 7], 200, &mut wire);
         assert_eq!(wire.0[2][38..42], [192, 168, 1, 7]);
@@ -848,9 +904,9 @@ pub(crate) mod tests {
         // without an address, or a gateway, nothing leaves
         let mut new = Net::new();
         new.start(OURS, 0);
-        assert!(!new.ping([8, 8, 8, 8], 0, &mut Kept::default()));
+        assert!(new.ping([8, 8, 8, 8], 0, &mut Kept::default()).is_none());
         net.gateway = NOWHERE;
-        assert!(!net.ping([8, 8, 8, 8], 300, &mut wire));
+        assert!(net.ping([8, 8, 8, 8], 300, &mut wire).is_none());
     }
 
     /// What a server of addresses says: an offer (2), a yes (5) or a no (6).
