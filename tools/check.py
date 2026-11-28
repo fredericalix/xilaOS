@@ -810,6 +810,45 @@ with Xila(disk=disk) as x:
           proposed == ["door", "window", "roof"] and numbers == ["0", "10", "20"] and picked == ["Label :", "Place : window", "In stock :"], (proposed, numbers, picked))
     x.key("f3")
     x.cmd("drop panel pick")
+    # an option opens another panel on the rows that belong to a row; a key runs a program with its values
+    x.cmd("create table notes_of (thing int, note text)")
+    x.cmd("insert into notes_of values (1, 'first of one'), (2, 'of two'), (1, 'second of one')")
+    for line in ("program double(which, had)", "update shelf set qty = had * 2 + 1 where id = which", "say 'doubled ' + which", "end",
+                 "panel notes on notes_of", "end",
+                 "panel linked on shelf", "option 8 'Notes' open notes where thing = id", "key f8 'Double' run double(id, qty)", "end"):
+        x.cmd(line)
+    x.type("linked")
+    x.key("ret")
+    offered = body(x)[-2].strip()
+    x.key("down")
+    x.type("8")
+    x.key("ret")
+    time.sleep(0.3)
+    rows = body(x)
+    notes = [" ".join(row[4:].split()) for row in rows[3:5]]
+    check("an option of a panel opens another on the rows that belong to the row",
+          offered == "2=Change  4=Remove  5=Display  8=Notes  F8=Double" and title(x) == "NOTES" and rows[0].strip().startswith("notes  (thing = 1)")
+          and notes == ["1 first of one", "1 second of one"], (offered, rows[:5]))
+    x.key("f6")
+    x.key("tab")
+    x.type("third")
+    x.key("ret")
+    time.sleep(0.3)
+    added = x.table("select thing from notes_of where note = 'third'")
+    x.key("f3")
+    check("a row added there belongs to that row, and F3 goes back to the panel it was opened from", added == [{"thing": "1"}] and title(x) == "LINKED", (added, title(x)))
+    x.key("f8")
+    time.sleep(1.5)
+    said, doubled = body(x)[-3].strip(), x.table("select qty from shelf where id = 1")
+    ran = [row for row in x.table("select program, by, state from jobs") if row["program"].startswith("double")]
+    check("a key of a panel runs a program with the values of the row, as a job, and says its last line",
+          said == "doubled 1" and doubled == [{"qty": "1"}] and ran == [{"program": "double(1, 0)", "by": "screen", "state": "done"}], (said, doubled, ran))
+    x.key("f3")
+    for name in ("notes", "linked"):
+        x.cmd("drop panel " + name)
+    x.cmd("drop program double")
+    x.cmd("drop table notes_of")
+    x.cmd("drop table job_log")
     x.cmd("drop panel stock")
     x.cmd("drop panel edit")
     x.cmd("drop table shelf")

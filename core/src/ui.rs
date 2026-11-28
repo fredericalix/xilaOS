@@ -1851,6 +1851,142 @@ mod tests {
         assert_eq!(form(&mut ui, &mut sys).1, "Unknown table: kinds. Type tables to list them.");
     }
 
+    /// A stock: articles, their movements, a panel on each, and what keeps the quantities.
+    fn with_stock() -> (Box<Ui>, Box<System>) {
+        let (mut ui, mut sys) = start();
+        for line in [
+            "create table articles (label text, qty int default 0)",
+            "create table movements (article int, qty int, why text)",
+            "insert into articles values ('cable', 4), ('screw', 100)",
+            "insert into movements values (1, 4, 'first'), (2, 100, 'first'), (1, 0, 'count')",
+            "on insert into movements",
+            "update articles set qty = qty + new.qty where id = new.article",
+            "end",
+            "program recount(which, had)",
+            "update articles set qty = had * 2 where id = which",
+            "say 'recounted ' + which",
+            "end",
+            "program broken(which)",
+            "say 1 / (which - which)",
+            "end",
+            "panel moves on movements",
+            "title 'Moves'",
+            "end",
+            "panel articles on articles",
+            "option 8 'Moves' open moves where article = id",
+            "option 9 'Nowhere' open nothing where article = id",
+            "option 7 'Wrong' open moves where colour = id",
+            "option 6 'Itself' open articles where qty = id",
+            "key f8 'Count' run recount(id, qty)",
+            "key f9 'Break' run broken(id)",
+            "end",
+            "let id = 'the prompt''s'",
+            "articles",
+        ] {
+            ui.run(&mut sys, line.as_bytes());
+        }
+        listed(&mut ui, &mut sys);
+        (ui, sys)
+    }
+
+    #[test]
+    fn an_option_opens_another_panel_on_the_rows_of_a_row() {
+        let (mut ui, mut sys) = with_stock();
+        ui.render(&mut sys);
+        assert_eq!(row(&ui, ui.grid.rows - 2), " 2=Change  4=Remove  5=Display  8=Moves  9=Nowhere  7=Wrong  6=Itself  F8=Count");
+        // it is for a row: typed before one, as the system's own
+        type_text(&mut ui, &mut sys, "8");
+        assert_eq!(listed(&mut ui, &mut sys).0.len(), 2, "on the line to find it is a character to look for");
+        keys(&mut ui, &mut sys, &[Key::Backspace, Key::Down]);
+        type_text(&mut ui, &mut sys, "x");
+        assert_eq!(listed(&mut ui, &mut sys).1, "Before a row: one of the digits of the line below.");
+        type_text(&mut ui, &mut sys, "8");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        // the other panel, as a screen of its own, on the rows of that article only
+        assert_eq!(sys.screen, 4);
+        ui.render(&mut sys);
+        assert_eq!(row(&ui, BODY_TOP + 1).split("page").next().unwrap().trim_end(), " Moves  (article = 1)");
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)).0, ["1 4 first", "1 0 count"]);
+        // a row added there is of that article, whatever is typed in its place
+        keys(&mut ui, &mut sys, &[Key::F(6)]);
+        assert_eq!(form(&mut ui, &mut sys).0, ["article: 1", "qty:", "why:"]);
+        keys(&mut ui, &mut sys, &[Key::Backspace]);
+        type_text(&mut ui, &mut sys, "2");
+        keys(&mut ui, &mut sys, &[Key::Tab]);
+        type_text(&mut ui, &mut sys, "6");
+        keys(&mut ui, &mut sys, &[Key::Tab]);
+        type_text(&mut ui, &mut sys, "bought");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["1 4 first".to_string(), "1 0 count".into(), "1 6 bought".into()], "1 row added to movements, with id 4.".to_string()));
+        // the line to find still narrows them
+        type_text(&mut ui, &mut sys, "bou");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)).0, ["1 6 bought"]);
+        // F3 leaves it for the panel it was opened from, where the program that hears of movements has done its work
+        ui.tick(&mut sys, 150);
+        keys(&mut ui, &mut sys, &[Key::F(3)]);
+        assert_eq!((sys.screen, crate::panel::place_of(&sys, 4)), (3, None));
+        ui.tick(&mut sys, 150);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)).0, ["cable 10", "screw 100"]);
+        // opened again on another row, the one that is open is that panel still
+        type_text(&mut ui, &mut sys, "8");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        ui.key(&mut sys, alt_digit(3));
+        keys(&mut ui, &mut sys, &[Key::Down]);
+        type_text(&mut ui, &mut sys, "8");
+        keys(&mut ui, &mut sys, &[Key::Enter]);
+        assert_eq!(sys.screen, 4);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)).0, ["2 100 first"]);
+        assert_eq!(crate::panel::place_of(&sys, 5), None);
+        // what cannot be opened says why, on the panel that asked
+        ui.key(&mut sys, alt_digit(3));
+        for (digit, message) in [("9", "Unknown panel: nothing. Type panels to list them."), ("7", "The panel moves is on a table with no column colour."), ("6", "A panel does not open itself.")] {
+            type_text(&mut ui, &mut sys, digit);
+            keys(&mut ui, &mut sys, &[Key::Enter]);
+            assert_eq!((sys.screen, listed(&mut ui, &mut sys).1.as_str()), (3, message));
+        }
+    }
+
+    #[test]
+    fn a_key_or_an_option_runs_a_program_with_the_values_of_the_row() {
+        let (mut ui, mut sys) = with_stock();
+        // on a system with no rooms for jobs it runs at once: its last line is the message
+        keys(&mut ui, &mut sys, &[Key::Down, Key::Down, Key::F(8)]);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["cable 4".to_string(), "screw 200".into()], "recounted 2".to_string()));
+        // the names of the prompt of the screen are its own again
+        assert_eq!(typed(&mut ui, &mut sys, "say id"), ["the prompt's"]);
+        // with no row the keys are on, the columns of a row are no names
+        keys(&mut ui, &mut sys, &[Key::Up, Key::Up, Key::F(8)]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Unknown name: id");
+        // a program that fails says where
+        keys(&mut ui, &mut sys, &[Key::Down, Key::F(9)]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Stopped at line 1 of broken.");
+        // a row that went meanwhile
+        typed(&mut ui, &mut sys, "delete from articles where id = 1");
+        keys(&mut ui, &mut sys, &[Key::F(8)]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "This row is no longer there.");
+        // with rooms it is a job nobody waits for: the keys are free, and its last line is said when it has ended
+        crate::machine::tests::rooms(&mut sys, crate::jobs::PLACES + 1);
+        ui.tick(&mut sys, 150);
+        keys(&mut ui, &mut sys, &[Key::Down, Key::F(8)]);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Job 1 runs: its last line will be said here.");
+        let job = &sys.jobs.list()[0];
+        assert_eq!((job.program.bytes(), job.watch, job.by), (&b"recount(2, 200)"[..], crate::jobs::Watch::Nobody, events::SCREEN));
+        for _ in 0..50 {
+            crate::jobs::work(&mut sys, &mut shell::tests::Lines::default(), &mut || true);
+        }
+        ui.tick(&mut sys, 1);
+        assert_eq!(squeezed(listed(&mut ui, &mut sys)), (vec!["screw 400".to_string()], "recounted 2".to_string()));
+        assert_eq!(typed(&mut ui, &mut sys, "say id"), ["the prompt's"]);
+        // one that fails is said in its last words too
+        keys(&mut ui, &mut sys, &[Key::F(9)]);
+        for _ in 0..50 {
+            crate::jobs::work(&mut sys, &mut shell::tests::Lines::default(), &mut || true);
+        }
+        ui.tick(&mut sys, 1);
+        assert_eq!(listed(&mut ui, &mut sys).1, "Stopped at line 1 of broken.");
+    }
+
     #[test]
     fn four_panels_are_open_at_one_time_each_a_screen() {
         let (mut ui, mut sys) = with_panel(3);

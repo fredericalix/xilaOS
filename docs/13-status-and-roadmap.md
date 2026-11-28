@@ -41,7 +41,7 @@ were also tried on the real machine.
 | Programs as jobs that hold nothing: the screen and the serial port wait for a program while the system lives (`Esc`, `Alt`+`B`, Ctrl+C); `submit`, `jobs`, `job`; the programs that run by themselves as jobs; `job_log` | yes | not tried |
 | Programs that take values (`program restock(item, count)`, `restock('cable', 5)`, `submit restock(...)`) and have names of their own | yes | not tried |
 | Commands that wait for the network (`net ping`, `net name`, `net get`, `net post`, `install from`) as waits of a job: the system lives, several go on side by side | yes | not tried |
-| Panels, the screens of applications: described on a table, kept and listed; opened as virtual screens that list their rows page by page, with a line to find; a form to add, change, display and remove a row through SQL, values to pick at `F4`; function keys | yes | not tried |
+| Panels, the screens of applications: described on a table, kept and listed; opened as virtual screens that list their rows page by page, with a line to find; a form to add, change, display and remove a row through SQL, values to pick at `F4`; panels opened from a row on the rows that belong to it; programs run from a key or an option with the values of the row; function keys | yes | not tried |
 | Clock, `now` and `today`, `every day at` | yes | yes |
 | Settings kept between starts | yes | yes |
 | QR codes for output | yes, read back by another reader | yes |
@@ -63,7 +63,7 @@ were also tried on the real machine.
 | `install from` (TFTP), `tools/netboot.py` | yes | yes, again on 27 November 2026 with the kernel of that day |
 
 Numbers at version 0.1: about 25,000 lines of Rust, 229 unit tests,
-about 300 system checks. On 28 November 2026: about 45,000 lines, 428
+about 300 system checks. On 28 November 2026: about 44,000 lines, 428
 unit tests, 580 system checks.
 
 ## Known limits of what is done
@@ -853,7 +853,8 @@ In four steps, each merged when its unit tests and its checks pass:
    another column, and with an unclosed quote every row), and a
    change must write only what was changed, since a form shows less
    of a row than the row holds.
-3. Panels opened from a row, and programs on a key or an option.
+3. Done on 28 November 2026: panels opened from a row, and programs
+   on a key or an option, run as jobs for who sits at the machine.
 4. The stock: its text in the repository, the tool that sends it, its
    chapter of the documentation.
 

@@ -6,9 +6,9 @@ is described in a few lines, on a table, and the system gives the rest:
 the pages, the line to find, the keys. It is what a display file and a
 "work with" screen are on an AS/400, with less to write.
 
-What is built is the list and the form (28 November 2026). Panels
-opened from a row and programs on a key are the next steps of the plan
-in [Status and roadmap](13-status-and-roadmap.md#application-screens-panels).
+It was built on 28 November 2026, in three steps: the list, the form,
+then the options and keys of a panel's own
+([Status and roadmap](13-status-and-roadmap.md#application-screens-panels)).
 
 ## At a glance
 
@@ -67,6 +67,9 @@ closes it. The table is a stored one, and must be there.
 | `field column 'Label' shown` | A column the form shows and does not let type: it is never written by the panel. |
 | `field column 'Label' among 'a', 'b'` | The values the field proposes at `F4`: texts between quotes, numbers. |
 | `field column 'Label' among select ...` | The same, read from a table when `F4` is pressed: the first column of the `select`. |
+| `option 8 'Label' open PANEL where COLUMN = id` | A digit typed before a row opens another panel on the rows that belong to it: those whose `COLUMN` holds the `id` of this row. |
+| `option 8 'Label' run PROGRAM(values)` | The same digit runs a program instead. |
+| `key f8 'Label' run PROGRAM(values)` | A function key runs a program. |
 | `# ...` | A note. |
 
 - **A panel is an object of the system as a program is.** Its lines are
@@ -87,6 +90,10 @@ closes it. The table is a stored one, and must be there.
   name. With some, the form has those and no other: a column without a
   field is not shown there, and takes its value by default when a row
   is added.
+- **Options and keys of its own**, eight in all: the digits 1, 3, 6, 7,
+  8 and 9 (2, 4 and 5 are the system's), the keys F1, F2 and F7 to F11.
+  Their labels, 12 characters at most, are shown with the system's on
+  the row before last.
 - **A panel is read again each time it opens**, on its table as it is
   then. If a listed column is gone, or the table, it says so and does
   not open.
@@ -169,6 +176,46 @@ In the form:
 - **A form that is being typed is not disturbed** by what others store:
   the list is read again when it is shown again.
 
+**A panel opened from a row.** `8` before an article, then `Enter`,
+opens the panel of its movements, on its own screen, with what it is
+opened on beside its title:
+
+```
+ Moves  (article = 3)                                                   page 1
+```
+
+- **Only the rows of that row are listed**, and the line to find
+  narrows them further.
+- **A row that is added there belongs to that row**: its column takes
+  that value, whatever the form holds in its place.
+- **`F3` goes back to the panel it was opened from**, if that one is
+  still open.
+- **Opened again from another row**, the panel that is open under that
+  name is opened on those rows: there is one of each name.
+- What cannot be opened says why on the panel that asked: a panel that
+  is not kept, a table with no such column, four panels open.
+
+**A program run from a panel.** `key f8 'Count' run recount(id, qty)`
+runs the program when `F8` is pressed; `option 9 'Zero' run zero(id)`
+when `9` is typed before a row and `Enter` pressed.
+
+- **The values are worked out with the columns of the row as names**:
+  `id`, and each column of the table. A key pressed with the keys on no
+  row has no such names: `Unknown name: id`.
+- **It runs as a job nobody waits for**, started by the screen: the
+  message says `Job 7 runs: its last line will be said here.`, the keys
+  stay free, and when it has ended its last line is the message, in red
+  if it failed, and the list is read again. `jobs` and `job 7` show it,
+  and it is written in `job_log`, as any such job.
+- **A program gives nothing back**: what it has to say to the panel is
+  its last `say`.
+- **It runs for who sits at the machine.** A panel, as a program, may
+  have been written from the prompt over the network, where what takes
+  a disk or opens the machine is refused; run from a key at the
+  machine, its program is refused nothing of that. Read a panel
+  (`show panel`) and the programs it names before pressing its keys,
+  as one reads a program before running it.
+
 - **A panel that is open is a virtual screen**: the first has `Alt`+`3`,
   after the overview, the log and the companion's. Four may be open at
   one time; a fifth is refused (`Four panels are open: leave one with
@@ -205,14 +252,16 @@ In the form:
 | Columns of a list | 8 (a table has no more) |
 | Rows of a page | What the screen has under the head of the panel: 37 on a screen of 50 rows |
 | Fields of a form | 7 (a table has eight columns, `id` among them), of 48 characters |
+| Options and keys of a panel's own | 8, with labels of 12 characters |
 | Values `F4` proposes | 40; 32 when its `select` sorts them, and it says so when there are more |
 | A label in the form | Its first 26 characters |
 | The line to find | 40 characters, in three text columns |
 | A title, a label | 32 characters |
 
-What is not there yet: panels opened from a row; programs on a key;
-sorting; several rows acted on at one `Enter`; a field that is checked
-before `Enter`; a panel on a view of the system or on two tables.
+What is not there yet: sorting; several rows acted on at one `Enter`; a
+field that is checked before `Enter`; a program that fills a field or
+decides what a form shows; a panel on a view of the system or on two
+tables.
 
 ## How it is implemented
 
@@ -240,6 +289,16 @@ the function behind every `insert`, `update` and `delete` of the
 prompt, as the session of the screen; what it says back is the message.
 `F4` reads the line of the field again from the table `panels` and
 takes what follows `among`.
+
+An option or a key of the panel's own keeps its trigger, its label and
+its line (`Action`); what it does is read again from that line when it
+is used (`does`). Opening a panel from a row gives the new one the
+column and the value it is opened on (`Open::only`), which its list
+adds to its `where` and its form to its `insert`, and the place it came
+from (`Open::from`). Running a program reads the row, makes its columns
+the names of the screen's prompt for the time of the call, and starts
+the program as a job (`jobs::begin`, nobody waiting), whose number the
+panel keeps until the job has ended.
 
 A page is read at the tick of the interface, and nowhere else, and so
 is everything a key asks of the tables: the row of a form, the

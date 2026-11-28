@@ -334,7 +334,7 @@ fn missing(number: u32) -> Message {
     message
 }
 
-fn about(number: u32, what: &str) -> Message {
+pub(crate) fn about(number: u32, what: &str) -> Message {
     let mut message = Message::new();
     let _ = write!(message, "Job {number} {what}");
     message
