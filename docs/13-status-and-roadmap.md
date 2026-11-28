@@ -257,7 +257,7 @@ it. Its steps are [below](#the-companion).
 | 4. The encrypted channel | Step 1 of the protocol, as a library tested on the development machine | Waits for the author's agreement on the design. Outside code is there since TLS, with the algorithms the channel needs |
 | 5. The virtual machine | The machine, XilaScript compiled for it, and programs as jobs that hold nothing; with it what phase 3 had of parameters, names of a program's own and commands that wait | Designed on 27 November 2026 ([below](#the-virtual-machine-and-the-jobs)), put ahead by the author. The machine and the compiler, then jobs, were built that day, parameters and names of a program's own on 28 November; the commands that wait for the network on 28 November too: the phase is built. Then application screens, batch work and the scheduling of jobs, each with a design of its own |
 | 6. The mirror | Two disks, repair by the checksum, degraded mode, rebuilding | After 5, or earlier if a decision is awaited |
-| 7. A memory by meaning for the companion | What it remembers found by what it means and not only by its last lines: vectors kept with the facts, a search by distance | Asked for by the author on 28 November 2026, as the piece of work that follows the panels ([below](#a-memory-by-meaning-for-the-companion)). Not designed |
+| 7. A memory by meaning for the companion | A search by meaning in the database (`create index ... by meaning`, `where text means '...'`), whose vectors a model of the Internet makes, and the companion's memory as its first user | Asked for by the author on 28 November 2026, as the piece of work that follows the panels; designed with the author that day ([below](#a-memory-by-meaning-for-the-companion)), in four steps. Not built |
 
 **Tried on the T430, and what still waits.** On 27 November 2026 the
 T430 was started from its network cable with the kernel of that day.
@@ -877,8 +877,7 @@ In four steps, each merged when its unit tests and its checks pass:
 ### A memory by meaning for the companion
 
 Asked for by the author on 28 November 2026: the piece of work that
-follows the panels, before batch work and the scheduling of jobs. It
-gets a design of its own, with the author, before anything is built.
+follows the panels, before batch work and the scheduling of jobs.
 
 **What is there today.** The companion remembers through three plain
 tables that are read again at every question: `remembered` (a fact of
@@ -889,32 +888,118 @@ lost, but the model sees it only if it thinks of asking for it with
 `select`, and it then looks for words (`like`), not for what is meant.
 There is no vector and no search by distance anywhere in the system.
 
-**What is asked.** That what the companion is told of its memory be
-what bears on the question, however old, found by its meaning.
+**What the author decided on 28 November 2026**, question by question:
 
-**What the design has to settle**, none of it decided:
+- **It is wider than the companion.** What must be found by its
+  meaning: old facts, past conversations, what the companion did, and
+  the user's own tables. So the system gets a search by meaning, and
+  the companion's memory is its first user.
+- **A model of the Internet makes the vectors**: the provider of the
+  companion's model, with the same key. The search itself is done on
+  the machine.
+- **In SQL it is an index**, asked for as the other kind is, on a
+  column of text: `create index on notes (text) by meaning`. The
+  system makes and keeps the vectors itself; nobody writes one.
+- **Vectors are made after the row is written, in the background.** A
+  statement never waits for the network; a row is found by its
+  meaning a moment later, and with no network it waits and is caught
+  up with.
+- **The companion uses it both ways**: the facts nearest to the
+  question are sent to the model beside the last ones, and it has a
+  tool to search its conversations and its acts itself.
+- **Its memory by meaning is on from the start, and said**: those
+  texts go to the model already. A user's table leaves the machine
+  column by column only, where such an index was asked for.
+- **`companion off` means nothing leaves**: no vector is made, for
+  the user's indexes either, and a search by meaning says so.
+  Everything is caught up with at `companion on`.
+- **A search gives the nearest rows, with how near**: no threshold
+  the system would choose. `nearness`, from 0 to 100, can be asked
+  for and compared.
 
-- **Who makes the vectors.** A model of the Internet, reached as the
-  companion's own is (one more call for each fact that is kept and
-  for each question, each with its cost, and the text of the fact
-  leaves the machine once more), or something small enough to run on
-  the machine itself, which has no vector instructions in its kernel
-  today.
-- **Where a vector is kept.** A value of a table is a number or a
-  text of 48 characters and a table has eight columns: a vector of a
-  few hundred numbers is neither. A kind of column of its own in the
-  storage engine, or a table apart that only the companion reads, as
-  `kept_keys` is apart.
-- **How it is searched.** By reading them all, which a few thousand
-  facts allow, or through an index made for distances.
-- **What is given a vector**: the facts of `remembered` only, or the
-  turns of `talk` too.
-- **What the model is then sent**: the nearest facts beside the last
-  ones, how many, and what it is told of where they come from.
-- **What the user sees and holds**: the tables stay the user's to
-  read and to empty; a fact that is removed must take its vector with
-  it; and what leaves the machine to become a vector is said, as what
-  is not encrypted is said.
+The design:
+
+```
+create index on notes (text) by meaning
+
+select text, nearness from notes
+    where text means 'a cord for the network' limit 3
+
+  text                 nearness
+  cable RJ45 3 m             71
+  wall socket, lounge        48
+  the plumber's bill         12
+```
+
+- **An index by meaning is one more tree of the table**, from the
+  `id` of a row to its vector: 256 numbers of one byte each, with the
+  name of the model that made them kept in the catalog. It is kept in
+  step inside the transaction that changes the row: a row that is
+  removed takes its vector with it, a text that is changed loses its
+  vector and waits for a new one, `drop index on notes (text)` frees
+  them all. `disk check` reads it against its table. A volume that
+  has one is of version 4 of the format; older volumes are read as
+  they are.
+- **A row waits until it has a vector.** A task of the system looks
+  for rows that wait, a few at a time, asks the provider for their
+  vectors in one question (`POST` to the companion's place, with
+  `/embeddings` where it has `/chat/completions`), reduces each
+  number to a byte and keeps them. After a failure it waits a minute.
+  The `index` column of the view `columns` says `meaning`, and how
+  many rows wait; `companion` says the total.
+- **The model of the vectors** is named in a column of `companions`
+  (`meaning`, `openai/text-embedding-3-small` at first, asked for 256
+  numbers), changed at the machine only as that table is. When it
+  changes, every vector is made again: vectors of two models do not
+  compare.
+- **`means` is a condition of a SELECT**, once, on a column that has
+  such an index, with a text or a name: the vector of that text is
+  asked of the provider first (the statement is then a wait, as `net
+  get` is: a job that asks stays `waiting`, and the system is not
+  held), then the vectors of the table are read, all of them, and the
+  nearest rows are given, nearest first, eight without `limit`. The
+  other conditions hold: the nearest among the rows that pass them.
+  `nearness` is a name of such a SELECT, in its list and in its
+  conditions (`and nearness > 60`). A row that still waits for its
+  vector is not found, and the answer says how many wait.
+- **Reading them all is the search**: a few thousand vectors are a
+  few hundred pages and whole numbers only, which the kernel has. An
+  index made for distances waits for a table that needs it.
+- **The companion's memory is three such indexes**, on
+  `remembered (text)`, `talk (text)` and `acts (command)`, made with
+  the tables. At a question, its vector is asked first; the eight
+  facts nearest to it that are not among the last twelve are told to
+  the model after those, under words of their own. A fourth tool,
+  `recall`, takes what to look for and where (`remembered`, `talk`,
+  `acts`) and gives the five nearest rows with their turn or their
+  time. `companion memory off`, kept between starts, stops both and
+  the making of vectors for those three tables.
+- **What holds.** `create index ... by meaning` is refused to the
+  companion: what leaves the machine is the user's to choose. No such
+  index on the tables kept apart or held (`kept_keys`, `companions`).
+  The documentation says what leaves: the text of every row of such
+  a column, once, and the text of every search.
+- **Limits said beforehand**: texts as they are today (48 characters
+  in a user's table); one `means` in a SELECT, on its first table,
+  not in UPDATE or DELETE; the cost of a call for each handful of
+  rows and for each search; nothing found while the network or the
+  companion is off.
+
+In four steps, each merged when its unit tests and its checks pass:
+
+1. The index as an object: the statement, the tree of vectors in the
+   storage engine with its transactions, `disk check`, the version of
+   the format, the cuts of power; `show table` and the view `columns`.
+   Vectors are given by the tests.
+2. Making vectors: the question to the provider and its answer, the
+   task that catches up, `companion off`, what waits. In
+   `tools/check.py` the provider is made up on the host, with vectors
+   worked out from the words so that what is near is known.
+3. Searching: `means` and `nearness`, the wait for the vector of the
+   question, in a program and in a job.
+4. The companion: its three indexes, the nearest facts told, the
+   tool `recall`, `companion memory`; [the companion](14-the-companion.md)
+   brought in step, and a trial with the real provider.
 
 ### Loose ends of what exists
 
