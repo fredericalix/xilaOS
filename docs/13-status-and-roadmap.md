@@ -610,6 +610,57 @@ nine: the author decided on 27 November 2026 that it takes no block
 there. A job is a block of the `tasks` plot, since it is what runs,
 as high as what it has run.
 
+**Parameters, and names of a program's own** (step 3; the author's
+choices of 28 November 2026).
+
+```
+program restock(item, count)
+    update stock set qty = qty + count where label = item
+end
+
+restock('cable', n + 1)
+run restock('cable', 5)
+submit restock('cable', 5)
+```
+
+- **Between parentheses**, as the functions of a calculation are
+  written. A program that takes nothing is written and typed as
+  before (`program report`, `report`); `report()` says the same.
+- **Every parameter gets a value**: eight at most, none by default
+  for now (that can come later without a kept program changing). A
+  call that gives too few or too many is refused before any line of
+  the program runs: `restock takes 2 values: item, count.`
+- **A value given is a calculation**, worked out with the names of
+  who calls, when the call is made: a job that is submitted leaves
+  with its values. A `select` is kept with `let` first, as in any
+  calculation.
+- **A program gives nothing back.** What it makes goes into a table,
+  or is said; `return` takes no value.
+- **A program sees its own names only**: its parameters and what it
+  makes with `let` or `for`. It neither reads nor changes the names
+  of the prompt or of the program that called it, and its names are
+  gone when it ends. So a program behaves the same typed at a
+  prompt, submitted, started by another and, later, by a screen. The
+  lines of a block typed at a prompt (`if`, `while`, `for` outside a
+  program) still use the names of that prompt.
+- **A program that runs by itself** is given its names by the system
+  as before (`channel`, `id`, `new.column`, `text`): they are its
+  parameters.
+- **In a statement of SQL a column still wins over a name**, so a
+  parameter named like a column of the table is not seen there.
+- **What changes for what exists**: a program kept before that read a
+  name of the prompt stops with `Unknown name`, and is typed again
+  with a parameter; the row of a `for` in a program no longer stays
+  at the prompt after it.
+- **Kept and shown**: the parameters are line 0 of the program in the
+  table `programs`, where a program that runs by itself has the line
+  that says when. `programs` and `show` give them back, and a job is
+  listed with the values it was given (`restock('cable', 6)`), in
+  `jobs`, `job n` and `job_log`.
+- **In the machine**: when a program is entered, the names of who
+  called it are put aside in the room of the machine, and come back
+  when it leaves, however it leaves.
+
 **The steps.** Each is merged when its unit tests and its checks
 pass.
 
@@ -640,10 +691,9 @@ pass.
    start each other was not cut through `submit`, and that a program
    by the clock that took longer than its rhythm kept the others from
    running.
-3. What the machine makes possible in the language: parameters, and
-   names that belong to one program. How they are written, and how a
-   program gives a value back, is chosen with the author before this
-   step starts: it ends up in programs kept on disks.
+3. Parameters, and names that belong to one program, as chosen with
+   the author on 28 November 2026 (above): it ends up in programs
+   kept on disks.
 4. The commands that wait for the network (`net get`, `net ping`,
    `install from`) as waits of a job, so that they hold nothing
    either.
