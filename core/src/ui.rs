@@ -1254,7 +1254,7 @@ mod tests {
     fn with_jobs() -> (Box<Ui>, Box<System>) {
         let (mut ui, mut sys) = (Box::new(Ui::new()), Box::new(System::new()));
         crate::machine::tests::rooms(&mut sys, 3);
-        for line in ["program count", "let n = 0", "while n < to", "let n = n + 1", "if n % 100 = 0", "say n", "end", "end", "say 'counted'", "end", "let to = 300"] {
+        for line in ["program count(to)", "let n = 0", "while n < to", "let n = n + 1", "if n % 100 = 0", "say n", "end", "end", "say 'counted'", "end", "let to = 300"] {
             ui.run(&mut sys, line.as_bytes());
         }
         (ui, sys)
@@ -1269,12 +1269,12 @@ mod tests {
     #[test]
     fn the_screen_waits_for_a_program_and_lives() {
         let (mut ui, mut sys) = with_jobs();
-        type_text(&mut ui, &mut sys, "count");
+        type_text(&mut ui, &mut sys, "count(to)");
         ui.key(&mut sys, key(Key::Enter));
         // it has not run: it is the job the screen waits for
         assert!(crate::jobs::watched(&sys, crate::jobs::Watch::Screen).is_some());
         let shown = rows(&mut ui, &mut sys);
-        assert_eq!(shown.last().unwrap().trim_end(), "Running count. [Esc] stops it, [Alt]+[B] sends it to the background.");
+        assert_eq!(shown.last().unwrap().trim_end(), "Running count(300). [Esc] stops it, [Alt]+[B] sends it to the background.");
         assert!(!shown.iter().any(|text| text.trim() == "100"));
         // what is typed meanwhile is not taken, and nothing is run twice
         type_text(&mut ui, &mut sys, "say 'typed too soon'");
@@ -1295,16 +1295,21 @@ mod tests {
             }
         }
         assert!(!seen.is_empty(), "a line it said was on the screen before it ended");
-        assert!(seen.last().unwrap().starts_with("Running count."));
+        assert!(seen.last().unwrap().starts_with("Running count(300)."));
         assert_ne!(ui.grid.pulse, level, "the cursor still moved");
         // ended: the prompt is back, and the keyboard is the prompt's again
         let shown = rows(&mut ui, &mut sys);
         assert_eq!(shown[shown.len() - 2].trim(), "counted");
         assert!(shown.last().unwrap().starts_with(core::str::from_utf8(shell::PROMPT).unwrap()));
         assert!(!shown.iter().any(|text| text.contains("typed too soon")));
+        // what it counted with was its own: the prompt never had that name
         type_text(&mut ui, &mut sys, "say n");
         ui.key(&mut sys, key(Key::Enter));
+        assert_eq!(rows(&mut ui, &mut sys).iter().rev().nth(1).unwrap().trim(), "Unknown name: n");
+        type_text(&mut ui, &mut sys, "say to");
+        ui.key(&mut sys, key(Key::Enter));
         assert_eq!(rows(&mut ui, &mut sys).iter().rev().nth(1).unwrap().trim(), "300");
+        ui.run(&mut sys, b"let n = 300");
         // a single line that is no program is not a job: it has run when Enter comes back
         assert!(crate::jobs::watched(&sys, crate::jobs::Watch::Screen).is_none());
         // a block typed at the prompt is one
@@ -1325,7 +1330,7 @@ mod tests {
     fn esc_stops_it_and_alt_b_sends_it_aside() {
         let (mut ui, mut sys) = with_jobs();
         ui.run(&mut sys, b"let to = 1000000");
-        type_text(&mut ui, &mut sys, "count");
+        type_text(&mut ui, &mut sys, "count(to)");
         ui.key(&mut sys, key(Key::Enter));
         for _ in 0..50 {
             ui.work(&mut sys, &mut || true);
@@ -1340,7 +1345,7 @@ mod tests {
         assert_eq!(sys.jobs.list()[0].state, crate::jobs::State::Stopped);
         assert_eq!(sys.screen, 0);
         // Alt+B sends it to the background: the prompt is back and the job goes on
-        type_text(&mut ui, &mut sys, "count");
+        type_text(&mut ui, &mut sys, "count(to)");
         ui.key(&mut sys, key(Key::Enter));
         ui.work(&mut sys, &mut || true);
         ui.key(&mut sys, alt(b'b', None));

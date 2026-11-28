@@ -12,6 +12,16 @@
 //! the prompt over the network, to a program that runs by itself and to
 //! the companion is refused to their jobs.
 //!
+//! Names. A program has names of its own, and the machine puts those
+//! of who called it aside while it runs (`machine.rs`). The names in
+//! use are those of the session, unless the job in its turn has its own
+//! (`names`, behind `System::names`): a job nobody waits for does, so
+//! that it never touches those of a prompt; a job a prompt waits for
+//! uses the names of its session, where a block typed finds those of
+//! the prompt and a program has its own for as long as it runs. A job
+//! that is stopped from outside its turns is stopped as itself
+//! (`as_itself`), since the programs that leave give names back.
+//!
 //! A system that was given no rooms has no jobs: everything runs at
 //! once, in the machine it has of its own.
 
@@ -127,10 +137,12 @@ pub enum Watch {
 }
 
 /// What a job runs.
+#[derive(Clone, Copy)]
 pub enum What<'a> {
     /// A block typed at a prompt.
     Lines(&'a [Line]),
-    /// A program, by its name.
+    /// A program, as it is called: its name, and the values it is given
+    /// between parentheses if it takes some.
     Program(&'a [u8]),
 }
 
@@ -149,7 +161,7 @@ pub struct Job {
     /// Statements it ran.
     pub statements: u64,
     /// Its names, when they are its own and not those of its session:
-    /// they are in the session's place for the time of a turn.
+    /// they are the names in use for the time of a turn (`Jobs::names`).
     vars: Vars,
     own: bool,
     /// Whether the prompt that waited for it took how it went.
@@ -184,11 +196,14 @@ pub struct Jobs {
     next: usize,
     /// The place of the job that is in its turn, while it is.
     turn: Option<usize>,
+    /// The place of the job whose names are the ones in use, when they
+    /// are its own: in its turn, and while it is stopped from outside.
+    names: Option<usize>,
 }
 
 impl Jobs {
     pub const fn new() -> Jobs {
-        Jobs { list: [const { Job::new() }; PLACES + 1], last: 0, next: 0, turn: None }
+        Jobs { list: [const { Job::new() }; PLACES + 1], last: 0, next: 0, turn: None, names: None }
     }
 
     /// The places, used or not: one that nothing took has the number 0.
@@ -201,6 +216,34 @@ impl Default for Jobs {
     fn default() -> Jobs {
         Jobs::new()
     }
+}
+
+/// The names in use on a system, from its parts: those of the job whose
+/// own names are in use, else those of the session (`System::names`).
+pub(crate) fn names<'a>(vars: &'a [Vars], jobs: &'a Jobs, session: usize) -> &'a Vars {
+    match jobs.names {
+        Some(at) => &jobs.list[at].vars,
+        None => &vars[session],
+    }
+}
+
+pub(crate) fn names_mut<'a>(vars: &'a mut [Vars], jobs: &'a mut Jobs, session: usize) -> &'a mut Vars {
+    match jobs.names {
+        Some(at) => &mut jobs.list[at].vars,
+        None => &mut vars[session],
+    }
+}
+
+/// Does something as a job: as the session that started it, with the
+/// companion's mark if it had it, and with its names in use when they
+/// are its own. Its turns are run so, and so is it stopped from outside
+/// them: the programs that leave give back names, which must be its.
+fn as_itself<R>(sys: &mut System, at: usize, run: impl FnOnce(&mut System) -> R) -> R {
+    let (by, acting, own) = (sys.jobs.list[at].by, sys.jobs.list[at].acting, sys.jobs.list[at].own);
+    let before = (core::mem::replace(&mut sys.session, by), core::mem::replace(&mut sys.acting, acting), core::mem::replace(&mut sys.jobs.names, own.then_some(at)));
+    let came = run(sys);
+    (sys.session, sys.acting, sys.jobs.names) = before;
+    came
 }
 
 /// How many places people's jobs have on this system: a room each, the
@@ -225,14 +268,14 @@ pub fn free(sys: &System, place: usize) -> bool {
 /// those of what happened, become the job's. It keeps the limits of a
 /// program nobody watches. Why it could not start is said.
 pub(crate) fn begin_system(sys: &mut System, place: usize, program: &[u8], depth: u8, out: &mut dyn Out) {
-    if machine::start_program(sys, Room::Given(place), program, out).is_none() {
+    if machine::start_program(sys, Room::Given(place), program, machine::Given::Ready, out).is_none() {
         return;
     }
     if let Some(rooms) = &mut sys.rooms {
         rooms[place].unbound(false);
     }
     sys.jobs.last += 1;
-    let names = sys.vars[sys.session].clone();
+    let names = sys.names().clone();
     let job = &mut sys.jobs.list[place];
     *job = Job::new();
     (job.number, job.program, job.state, job.by, job.watch) = (sys.jobs.last, Text::from_bytes(program), State::Ready, sys.session, Watch::Nobody);
@@ -324,11 +367,16 @@ pub fn begin(sys: &mut System, what: What<'_>, watch: Watch, out: &mut dyn Out) 
     let room = Room::Given(at);
     let (started, program) = match what {
         What::Lines(lines) => (machine::start_lines(sys, room, lines, out), lines.first().map_or(Text::new(), |line| Text::from_bytes(crate::text::trim(line.bytes())))),
-        What::Program(name) => (machine::start_program(sys, room, name, out), Text::from_bytes(name)),
+        What::Program(call) => {
+            let (name, written) = crate::lang::call_of(call).unwrap_or((call, b""));
+            (machine::start_program(sys, room, name, machine::Given::Written(written), out), Text::from_bytes(name))
+        }
     };
     if started.is_none() {
         return Err(Message::new());
     }
+    // a program is listed with the values it was given: its names, just made
+    let program = if matches!(what, What::Program(_)) { called(program.bytes(), sys.names()) } else { program };
     // a job that is listed can be stopped: the limits of a program nobody watches are not its own
     if let Some(rooms) = &mut sys.rooms {
         rooms[at].unbound(true);
@@ -341,8 +389,46 @@ pub fn begin(sys: &mut System, what: What<'_>, watch: Watch, out: &mut dyn Out) 
     (job.began, job.own, job.taken) = (sys.clock.map(|(seconds, at)| seconds + sys.ticks.saturating_sub(at) / 100), own, own);
     // started by a program that runs by itself, it is one step down the chain of those that start each other
     job.depth = sys.events.depth;
-    job.vars.clock = job.began;
-    Ok(job.number)
+    let (number, began) = (job.number, job.began);
+    // A program has its names, made of the values it was given, and those
+    // of who started it wait in its room. Nobody waits for it: it leaves
+    // with its own, and who started it has theirs back at once.
+    let outer = sys.rooms.as_ref().and_then(|rooms| rooms[at].outer()).filter(|_| own).cloned();
+    if let Some(outer) = outer {
+        let mine = core::mem::replace(sys.names_mut(), outer);
+        sys.jobs.list[at].vars = mine;
+    }
+    sys.jobs.list[at].vars.clock = began;
+    Ok(number)
+}
+
+/// A program as it is listed: its name, and between parentheses the
+/// values it was given, which are the names it starts with, in the
+/// order of its parameters. Cut when it is longer than what a list shows.
+fn called(name: &[u8], names: &Vars) -> Text {
+    let mut whole = Line::from_bytes(name);
+    whole.lower();
+    for (at, (_, value)) in names.each().enumerate() {
+        whole.push_bytes(if at == 0 { b"(" } else { b", " });
+        match value {
+            crate::sql::Value::Null => whole.push_bytes(b"null"),
+            crate::sql::Value::Text(text) => {
+                whole.push(b'\'');
+                whole.push_bytes(text.bytes());
+                whole.push(b'\'');
+            }
+            number => whole.push_bytes(number.shown().bytes()),
+        }
+    }
+    if names.each().next().is_some() {
+        whole.push(b')');
+    }
+    // what a text of a list holds
+    let room = 48;
+    if whole.len() <= room {
+        return Text::from_bytes(whole.bytes());
+    }
+    Text::from_bytes(&whole.bytes()[..room - 4]).also(b"...)")
 }
 
 /// Gives the job at a place a turn: instructions until it ends or until
@@ -353,29 +439,23 @@ pub fn turn(sys: &mut System, at: usize, out: &mut dyn Out, spent: &mut dyn FnMu
         return;
     }
     // it is who started it, with its names, for the time of the turn
-    let (by, acting, own) = (sys.jobs.list[at].by, sys.jobs.list[at].acting, sys.jobs.list[at].own);
-    let before = (core::mem::replace(&mut sys.session, by), core::mem::replace(&mut sys.acting, acting));
-    if own {
-        core::mem::swap(&mut sys.vars[by], &mut sys.jobs.list[at].vars);
-    }
-    // what it causes is as far down a chain of programs that start each
-    // other as it is; a program that runs by itself is known by its name
-    // to what it asks of the companion
-    let depth = core::mem::replace(&mut sys.events.depth, sys.jobs.list[at].depth);
-    if sys.jobs.list[at].system {
-        sys.firing = crate::sql::Name::from_bytes(sys.jobs.list[at].program.bytes());
-    }
-    sys.jobs.turn = Some(at);
-    let came = machine::turn(sys, Room::Given(at), 0, out, spent);
-    sys.jobs.turn = None;
-    if sys.jobs.list[at].system {
-        sys.firing.clear();
-    }
-    sys.events.depth = depth;
-    if own {
-        core::mem::swap(&mut sys.vars[by], &mut sys.jobs.list[at].vars);
-    }
-    (sys.session, sys.acting) = before;
+    let came = as_itself(sys, at, |sys| {
+        // what it causes is as far down a chain of programs that start each
+        // other as it is; a program that runs by itself is known by its name
+        // to what it asks of the companion
+        let depth = core::mem::replace(&mut sys.events.depth, sys.jobs.list[at].depth);
+        if sys.jobs.list[at].system {
+            sys.firing = crate::sql::Name::from_bytes(sys.jobs.list[at].program.bytes());
+        }
+        sys.jobs.turn = Some(at);
+        let came = machine::turn(sys, Room::Given(at), 0, out, spent);
+        sys.jobs.turn = None;
+        if sys.jobs.list[at].system {
+            sys.firing.clear();
+        }
+        sys.events.depth = depth;
+        came
+    });
     let statements = sys.rooms.as_ref().map_or(0, |rooms| rooms[at].statements());
     let asked = sys.request.is_some();
     let job = &mut sys.jobs.list[at];
@@ -414,14 +494,22 @@ pub fn outcome(sys: &mut System, watch: Watch) -> Option<bool> {
 }
 
 /// The job a prompt waited for goes on with nobody waiting: it leaves
-/// with a copy of the names of its session. Returns its number.
+/// with the names in use there, a program's own or a copy of those of
+/// its session, and the session has its own. Returns its number.
 pub fn aside(sys: &mut System, watch: Watch) -> Option<u32> {
     let at = watched(sys, watch)?;
-    let names = sys.vars[sys.jobs.list[at].by].clone();
-    let job = &mut sys.jobs.list[at];
-    if job.ended() {
+    if sys.jobs.list[at].ended() {
         return None;
     }
+    let by = sys.jobs.list[at].by;
+    let names = match sys.rooms.as_ref().and_then(|rooms| rooms[at].outer()).cloned() {
+        // a program runs: the names in use there are its own and go with
+        // it, and the session has back those it put aside, of which the
+        // job keeps a copy for the lines that called the program, if any
+        Some(outer) => core::mem::replace(&mut sys.vars[by], outer),
+        None => sys.vars[by].clone(),
+    };
+    let job = &mut sys.jobs.list[at];
     (job.watch, job.taken, job.own, job.vars) = (Watch::Nobody, true, true, names);
     Some(job.number)
 }
@@ -436,7 +524,7 @@ pub fn stop_watched(sys: &mut System, watch: Watch) -> Option<Message> {
         message.clear();
         let _ = write!(message, "Stopped at line {line} of {program}.");
     }
-    machine::stop(sys, Room::Given(at));
+    as_itself(sys, at, |sys| machine::stop(sys, Room::Given(at)));
     sys.jobs.list[at].state = State::Stopped;
     Some(message)
 }
@@ -467,7 +555,7 @@ pub fn end(sys: &mut System, number: u32) -> Result<(), Message> {
     if sys.jobs.list[at].ended() {
         return Err(about(number, "has ended."));
     }
-    machine::stop(sys, Room::Given(at));
+    as_itself(sys, at, |sys| machine::stop(sys, Room::Given(at)));
     sys.jobs.list[at].state = State::Stopped;
     if sys.jobs.list[at].watch == Watch::Nobody && !sys.jobs.list[at].system {
         record(sys, at);
@@ -637,7 +725,7 @@ mod tests {
     fn ready() -> Box<System> {
         let mut sys = Box::new(System::new());
         rooms(&mut sys, PLACES + 1);
-        typed(&mut sys, &["program count", "let n = 0", "while n < to", "let n = n + 1", "end", "say n", "end", "let to = 5"]);
+        typed(&mut sys, &["program count(to)", "let n = 0", "while n < to", "let n = n + 1", "end", "say n", "end", "let to = 5"]);
         sys
     }
 
@@ -689,46 +777,126 @@ mod tests {
         assert_eq!(sys.jobs.list()[place].state, State::Done);
     }
 
-    #[test]
-    fn a_job_nobody_waits_for_has_names_of_its_own() {
-        let mut sys = ready();
-        // the program counts to `to`, a name of the session: a job nobody waits for does not see it
-        let number = begin(&mut sys, What::Program(b"count"), Watch::Nobody, &mut Lines::default()).unwrap();
-        let place = place_of(&sys, number);
-        assert_eq!(finish(&mut sys, place), ["Unknown name: to", "Stopped at line 2 of count."]);
-        // and what it names is not the session's
-        let number = begin(&mut sys, What::Lines(&lines(&["let to = 99", "let made = 1", "say to"])), Watch::Nobody, &mut Lines::default()).unwrap();
-        let place = place_of(&sys, number);
-        assert_eq!(finish(&mut sys, place), ["99"]);
+    /// What a line typed at the prompt says.
+    fn says(sys: &mut System, line: &str) -> Vec<String> {
         let mut out = Lines::default();
-        assert!(!crate::shell::exec(&mut sys, b"say made", &mut out));
-        assert!(crate::shell::exec(&mut sys, b"say to", &mut out));
-        assert_eq!(out.lines, ["Unknown name: made", "5"]);
-        // a job the screen waits for sees the names of the screen, and changes them
-        let number = begin(&mut sys, What::Program(b"count"), Watch::Screen, &mut Lines::default()).unwrap();
+        crate::shell::exec(sys, line.as_bytes(), &mut out);
+        out.lines
+    }
+
+    #[test]
+    fn a_job_nobody_waits_for_leaves_with_the_values_it_was_given() {
+        let mut sys = ready();
+        // worked out when it is started, with the names of who starts it
+        let number = begin(&mut sys, What::Program(b"count(to + 1)"), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        assert_eq!(sys.jobs.list()[place].program.bytes(), b"count(6)");
+        // who started it has their names at once, and changing them changes nothing of the job
+        assert_eq!(says(&mut sys, "say to"), ["5"]);
+        typed(&mut sys, &["let to = 99"]);
+        assert_eq!(finish(&mut sys, place), ["6"]);
+        assert_eq!(says(&mut sys, "say to"), ["99"]);
+        assert_eq!(says(&mut sys, "say n"), ["Unknown name: n"]);
+        // without its value it does not start, and no job is made of it
+        let mut out = Lines::default();
+        assert!(begin(&mut sys, What::Program(b"count"), Watch::Nobody, &mut out).is_err());
+        assert_eq!(out.lines, ["count takes 1 value: to."]);
+        assert_eq!(sys.jobs.last, 1);
+        assert_eq!(says(&mut sys, "say to"), ["99"]);
+        // texts are listed between quotes, and a long list is cut
+        typed(&mut sys, &["program tell(what, more, n)", "say what", "end"]);
+        let number = begin(&mut sys, What::Program(b"tell('cable', null, 2.50)"), Watch::Nobody, &mut Lines::default()).unwrap();
+        assert_eq!(sys.jobs.list()[place_of(&sys, number)].program.bytes(), b"tell('cable', null, 2.50)");
+        let number = begin(&mut sys, What::Program(b"tell('a text of some length', 'and another one as long', 3)"), Watch::Nobody, &mut Lines::default()).unwrap();
+        assert_eq!(sys.jobs.list()[place_of(&sys, number)].program.bytes(), b"tell('a text of some length', 'and another o...)");
+        // lines nobody waits for begin with no name, and what they name is not the session's
+        let number = begin(&mut sys, What::Lines(&lines(&["say to"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        assert_eq!(finish(&mut sys, place), ["Unknown name: to"]);
+        let number = begin(&mut sys, What::Lines(&lines(&["let to = 1", "let made = 1", "say to"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        assert_eq!(finish(&mut sys, place), ["1"]);
+        assert_eq!(says(&mut sys, "say made"), ["Unknown name: made"]);
+        assert_eq!(says(&mut sys, "say to"), ["99"]);
+    }
+
+    #[test]
+    fn a_prompt_has_its_names_back_however_its_program_ends() {
+        let mut sys = ready();
+        typed(&mut sys, &["program deep(to)", "let n = 'deep'", "count(to)", "say n", "end", "let n = 1000"]);
+        let names = |sys: &mut System| (says(sys, "say to"), says(sys, "say n"));
+        let mine = (vec!["5".to_string()], vec!["1000".to_string()]);
+        // a program the screen waits for neither sees nor changes the names of the screen
+        let number = begin(&mut sys, What::Program(b"deep(to)"), Watch::Screen, &mut Lines::default()).unwrap();
         let place = place_of(&sys, number);
         assert_eq!(watched(&sys, Watch::Screen), Some(place));
         assert_eq!(outcome(&mut sys, Watch::Screen), None, "it has not ended");
-        assert_eq!(finish(&mut sys, place), ["5"]);
+        assert_eq!(finish(&mut sys, place), ["5", "deep"]);
         assert_eq!(outcome(&mut sys, Watch::Screen), Some(true));
         assert_eq!((watched(&sys, Watch::Screen), outcome(&mut sys, Watch::Screen)), (None, None), "taken once");
-        let mut out = Lines::default();
-        crate::shell::exec(&mut sys, b"say n", &mut out);
-        assert_eq!(out.lines, ["5"]);
-        // sent aside, it goes on with a copy: the session's names are its own again
-        typed(&mut sys, &["let to = 50"]);
-        let number = begin(&mut sys, What::Program(b"count"), Watch::Screen, &mut Lines::default()).unwrap();
+        assert_eq!(names(&mut sys), mine);
+        // stopped by a key while it is two programs deep
+        let number = begin(&mut sys, What::Program(b"deep(1000000)"), Watch::Screen, &mut Lines::default()).unwrap();
         let place = place_of(&sys, number);
-        for _ in 0..20 {
+        for _ in 0..30 {
+            turn(&mut sys, place, &mut Lines::default(), &mut || true);
+        }
+        assert!(String::from_utf8_lossy(stop_watched(&mut sys, Watch::Screen).unwrap().bytes()).ends_with(" of count."));
+        assert_eq!(outcome(&mut sys, Watch::Screen), Some(false));
+        assert_eq!(names(&mut sys), mine);
+        // ended from the serial port while the screen waits for it
+        let number = begin(&mut sys, What::Program(b"deep(1000000)"), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        for _ in 0..30 {
+            turn(&mut sys, place, &mut Lines::default(), &mut || true);
+        }
+        sys.session = SERIAL;
+        typed(&mut sys, &["let n = 'serial'"]);
+        end(&mut sys, number).unwrap();
+        assert_eq!(says(&mut sys, "say n"), ["serial"]);
+        sys.session = SCREEN;
+        assert_eq!(outcome(&mut sys, Watch::Screen), Some(false));
+        assert_eq!(names(&mut sys), mine);
+        // ended by a job that has names of its own, started from the same screen
+        let number = begin(&mut sys, What::Program(b"deep(1000000)"), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        for _ in 0..30 {
+            turn(&mut sys, place, &mut Lines::default(), &mut || true);
+        }
+        let ends = lines(&["let n = 'ender'", &format!("job {number} end"), "say n"]);
+        let ender = begin(&mut sys, What::Lines(&ends), Watch::Nobody, &mut Lines::default()).unwrap();
+        let ender = place_of(&sys, ender);
+        assert_eq!(finish(&mut sys, ender), [format!("Job {number} is stopped."), "ender".to_string()]);
+        assert_eq!(sys.jobs.list()[place].state, State::Stopped);
+        assert_eq!(outcome(&mut sys, Watch::Screen), Some(false));
+        assert_eq!(names(&mut sys), mine);
+        // sent aside, it goes on with its own: the screen has its names at once
+        typed(&mut sys, &["let to = 50"]);
+        let number = begin(&mut sys, What::Program(b"deep(to)"), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        for _ in 0..30 {
             turn(&mut sys, place, &mut Lines::default(), &mut || true);
         }
         assert_eq!(aside(&mut sys, Watch::Screen), Some(number));
         assert_eq!(watched(&sys, Watch::Screen), None);
-        typed(&mut sys, &["let to = 3", "let n = 1000"]);
-        assert_eq!(finish(&mut sys, place), ["50"]);
-        let mut out = Lines::default();
-        crate::shell::exec(&mut sys, b"say n", &mut out);
-        assert_eq!(out.lines, ["1000"]);
+        assert_eq!(names(&mut sys), (vec!["50".to_string()], mine.1.clone()));
+        typed(&mut sys, &["let to = 3", "let n = 1"]);
+        assert_eq!(finish(&mut sys, place), ["50", "deep"]);
+        assert_eq!(names(&mut sys), (vec!["3".to_string()], vec!["1".to_string()]));
+        // a block typed shares the names of its prompt; sent aside while a
+        // program it called runs, it goes on with a copy of them
+        typed(&mut sys, &["let to = 7", "let n = 1000"]);
+        let block = lines(&["let seen = to", "count(100)", "say seen + n"]);
+        let number = begin(&mut sys, What::Lines(&block), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        for _ in 0..30 {
+            turn(&mut sys, place, &mut Lines::default(), &mut || true);
+        }
+        assert_eq!(aside(&mut sys, Watch::Screen), Some(number));
+        assert_eq!((says(&mut sys, "say to"), says(&mut sys, "say seen")), (vec!["7".to_string()], vec!["7".to_string()]));
+        typed(&mut sys, &["let n = 1"]);
+        assert_eq!(finish(&mut sys, place), ["100", "1007"]);
+        assert_eq!(says(&mut sys, "say n"), ["1"]);
         // the serial port has its own
         sys.session = SERIAL;
         let number = begin(&mut sys, What::Lines(&lines(&["let mine = 7", "say mine"])), Watch::Serial, &mut Lines::default()).unwrap();

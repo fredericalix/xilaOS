@@ -605,7 +605,7 @@ fn net(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         let mut said = Text::new();
         if post {
             let mut lexer = crate::sql::Lexer::new(text);
-            let names = crate::expr::Names::without(&sys.vars[sys.session], b"Put the text between quotes, or give a name that has a value, not: ");
+            let names = crate::expr::Names::without(sys.names(), b"Put the text between quotes, or give a name that has a value, not: ");
             let value = crate::expr::parse(&mut lexer, names).and_then(|text| lexer.end().map(|_| text)).and_then(|text| text.eval(&[crate::sql::Value::Null; TABLE_COLS]));
             match value {
                 Ok(value) => said = value.shown(),
@@ -890,7 +890,8 @@ pub struct System {
     pub spare: Option<xila_db::Volume>,
     /// Who listens to what, and the events that wait for them.
     pub events: Events,
-    /// What each session keeps under a name (`let`).
+    /// What each session keeps under a name (`let`), or what the program
+    /// that runs for it does while one runs: read through `names`.
     /// The last ones are those of the programs that run by themselves.
     pub vars: [crate::expr::Vars; crate::events::SESSIONS + 1],
     /// The programs that run by themselves, and when.
@@ -1005,6 +1006,18 @@ pub struct System {
 }
 
 impl System {
+    /// The names in use: those of the session, which are those of the
+    /// program that runs for it while one does, or those of the job in
+    /// its turn when it has names of its own. Whatever reads or gives a
+    /// name goes through here.
+    pub fn names(&self) -> &crate::expr::Vars {
+        crate::jobs::names(&self.vars, &self.jobs, self.session)
+    }
+
+    pub fn names_mut(&mut self) -> &mut crate::expr::Vars {
+        crate::jobs::names_mut(&mut self.vars, &mut self.jobs, self.session)
+    }
+
     /// The time by the clock of the machine, in seconds since the year
     /// 2000: what it said when it was last read, and what the timer has
     /// counted since. None if that clock tells no time.
@@ -1275,7 +1288,8 @@ const HELP_KEYS: [&[u8]; 10] = [
 pub fn exec(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     let line = trim(line);
     // `now` and `today` are the moment the line was given
-    sys.vars[sys.session].clock = sys.now();
+    let now = sys.now();
+    sys.names_mut().clock = now;
     // A program that runs by itself and the companion have no prompt, so no
     // block to collect lines in: a command of theirs that types a line (`qr`)
     // types one that is whole.
@@ -1407,7 +1421,7 @@ pub(crate) fn show(sys: &mut System, out: &mut dyn Out, table: &Table) {
 
 /// Runs a SELECT typed at the prompt.
 fn query(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
-    match crate::sql::query(&*sys, &sys.vars[sys.session], line).map(|rows| rows.table()) {
+    match crate::sql::query(&*sys, sys.names(), line).map(|rows| rows.table()) {
         Ok(table) => {
             // the city lights the table that was read
             let now = sys.ticks.max(1);
@@ -1447,7 +1461,7 @@ fn change(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
         }
     }
     let now = sys.ticks.max(1);
-    let (events, vars) = (&mut sys.events, &sys.vars[sys.session]);
+    let (events, vars) = (&mut sys.events, crate::jobs::names(&sys.vars, &sys.jobs, sys.session));
     // those who listen to the table hear of every row, once the change is certain
     let mut tell = |table: &[u8], change: xila_db::Change, id: u64| {
         let what = match change {
@@ -1553,7 +1567,7 @@ fn notify(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
         Ok(Text::new())
     } else {
         let mut lexer = crate::sql::Lexer::new(rest);
-        let names = crate::expr::Names::without(&sys.vars[sys.session], b"Put the text between quotes, or give a name that has a value, not: ");
+        let names = crate::expr::Names::without(sys.names(), b"Put the text between quotes, or give a name that has a value, not: ");
         crate::expr::parse(&mut lexer, names).and_then(|text| lexer.end().map(|_| text)).and_then(|text| text.eval(&[crate::sql::Value::Null; TABLE_COLS]))
             .map(|value| value.shown())
     };
@@ -2086,19 +2100,21 @@ fn not_its_jobs(sys: &System, out: &mut dyn Out) -> bool {
     sys.acting
 }
 
-/// `submit name`: runs a program as a job nobody waits for.
+/// `submit name`, `submit name(values)`: runs a program as a job nobody
+/// waits for. Its values are worked out now, with the names of who asks.
 fn submit(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
     if not_its_jobs(sys, out) {
         return false;
     }
-    if arg.is_empty() || arg.contains(&b' ') {
-        out.line(Style::Error, b"Type submit and the name of a program: submit report");
+    if arg.is_empty() || crate::lang::call_of(arg).is_none() {
+        out.line(Style::Error, b"Type submit and a program: submit report, submit restock('cable', 5)");
         return false;
     }
     match crate::jobs::begin(sys, crate::jobs::What::Program(arg), crate::jobs::Watch::Nobody, out) {
         Ok(number) => {
             let mut line = FixedStr::<COLS>::new();
-            let _ = write!(line, "Job {number} submitted: {}.", Text::from_bytes(arg));
+            let program = crate::jobs::find(sys, number).map_or(Text::new(), |at| sys.jobs.list()[at].program);
+            let _ = write!(line, "Job {number} submitted: {program}.");
             out.line(Style::Done, line.bytes());
             true
         }
@@ -2587,7 +2603,7 @@ fn ask(sys: &mut System, arg: &[u8], out: &mut dyn Out) -> bool {
             break;
         };
         let mut lexer = crate::sql::Lexer::new(&rest[open + 1..open + length]);
-        let names = crate::expr::Names::without(&sys.vars[sys.session], b"Between { and } goes a name that has a value, or a calculation, not: ");
+        let names = crate::expr::Names::without(sys.names(), b"Between { and } goes a name that has a value, or a calculation, not: ");
         let value = crate::expr::parse(&mut lexer, names).and_then(|value| lexer.end().map(|_| value)).and_then(|value| value.eval(&[crate::sql::Value::Null; TABLE_COLS]));
         match value {
             Ok(value) => {
@@ -4317,6 +4333,52 @@ pub mod tests {
     }
 
     #[test]
+    fn submit_and_the_prompt_give_a_program_its_values() {
+        let mut sys = Box::new(System::new());
+        crate::machine::tests::rooms(&mut sys, crate::jobs::PLACES + 1);
+        let said = |sys: &mut System, line: &str| run_line(sys, line).1.lines;
+        for line in ["program tally(to, label)", "let n = 0", "while n < to", "let n = n + 1", "end", "say label + n", "end", "let n = 3"] {
+            run_line(&mut sys, line);
+        }
+        // worked out when it is submitted, with the names of the prompt
+        assert_eq!(said(&mut sys, "submit tally(n * 2, 'did ')"), ["Job 1 submitted: tally(6, 'did ')."]);
+        run_line(&mut sys, "let n = 100");
+        for _ in 0..100 {
+            crate::jobs::work(&mut sys, &mut Lines::default(), &mut || true);
+        }
+        let shown = said(&mut sys, "job 1");
+        assert_eq!((shown[0].as_str(), shown.last().unwrap().as_str()), ("Job 1 is done: tally(6, 'did ')", "did 6"));
+        assert_eq!(said(&mut sys, "select program from jobs"), ["   program", "   tally(6, 'did ')"]);
+        assert_eq!(said(&mut sys, "select program, went from job_log"), ["   program           went", "   tally(6, 'did ')  done"]);
+        assert_eq!(said(&mut sys, "say n"), ["100"]);
+        // what is wrong with the call is said at once, and no job is made
+        assert_eq!(said(&mut sys, "submit tally(1)"), ["tally takes 2 values: to, label."]);
+        assert_eq!(said(&mut sys, "submit tally"), ["tally takes 2 values: to, label."]);
+        assert_eq!(said(&mut sys, "submit tally(1, )"), ["A value is missing between the parentheses."]);
+        assert_eq!(said(&mut sys, "submit tally(missing, 'x')"), ["Unknown name: missing"]);
+        assert_eq!(said(&mut sys, "select count(*) from jobs"), ["   count", "   1"]);
+        // called at the prompt, with or without `run`, it is the job the prompt waits for
+        for (line, listed, says) in [("tally(2, 'a ')", "tally(2, 'a ')", "a 2"), ("run tally(n - 97, 'b ')", "tally(3, 'b ')", "b 3")] {
+            let (ok, out) = run_line(&mut sys, line);
+            assert!(ok && out.lines.is_empty(), "{line}: {:?}", out.lines);
+            let at = crate::jobs::watched(&sys, crate::jobs::Watch::Screen).unwrap();
+            assert_eq!(sys.jobs.list()[at].program.bytes(), listed.as_bytes());
+            let mut out = Lines::default();
+            while crate::jobs::outcome(&mut sys, crate::jobs::Watch::Screen).is_none() {
+                crate::jobs::turn(&mut sys, at, &mut out, &mut || true);
+            }
+            assert_eq!(out.lines, [says]);
+        }
+        assert_eq!(said(&mut sys, "say n"), ["100"]);
+        // one that takes none is called as before, or with nothing between parentheses
+        for line in ["program plain", "say 'plain'", "end"] {
+            run_line(&mut sys, line);
+        }
+        assert_eq!(said(&mut sys, "submit plain()"), ["Job 4 submitted: plain."]);
+        assert_eq!(said(&mut sys, "submit plain"), ["Job 5 submitted: plain."]);
+    }
+
+    #[test]
     fn jobs_are_started_listed_shown_and_ended() {
         let mut sys = Box::new(System::new());
         let said = |sys: &mut System, line: &str| run_line(sys, line).1.lines;
@@ -4330,7 +4392,9 @@ pub mod tests {
         assert_eq!((ok, out.lines), (false, vec!["This machine has no room for jobs.".to_string()]));
         crate::machine::tests::rooms(&mut sys, crate::jobs::PLACES + 1);
         // what is typed wrong
-        assert_eq!(said(&mut sys, "submit"), ["Type submit and the name of a program: submit report"]);
+        assert_eq!(said(&mut sys, "submit"), ["Type submit and a program: submit report, submit restock('cable', 5)"]);
+        assert_eq!(said(&mut sys, "submit count now"), ["Type submit and a program: submit report, submit restock('cable', 5)"]);
+        assert_eq!(said(&mut sys, "submit count(1)"), ["count takes no value."]);
         assert_eq!(said(&mut sys, "submit nowhere"), ["Unknown program: nowhere. Type programs to list them."]);
         assert_eq!(said(&mut sys, "job"), ["Type job and its number: job 3, job 3 end, job 3 hold, job 3 release"]);
         assert_eq!(said(&mut sys, "job 9"), ["There is no job 9. Type jobs to list them."]);

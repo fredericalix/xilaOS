@@ -10,3 +10,12 @@ rustflags = [
     '--cfg', 'sha2_backend="soft"',
     '--cfg', 'curve25519_dalek_backend="serial"',
 ]
+
+# A unit test makes a whole System on its stack, more than once when a
+# helper returns one: 454 KB each since a machine keeps the names of who
+# called each program. The 2 MB a test thread gets by default no longer
+# hold that, so the tests are given 8 MB. This says nothing of the
+# kernel, whose System is not on a stack: its task stacks are tried by
+# tools/check.py.
+[env]
+RUST_MIN_STACK = "8388608"

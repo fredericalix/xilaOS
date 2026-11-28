@@ -21,6 +21,12 @@
 //!     let count = select count(*) from expenses
 //!     say 'Expenses: ' + count
 //! end
+//!
+//! program restock(item, count)
+//!     update stock set qty = qty + count where label = item
+//! end
+//!
+//! restock('cable', 5)
 //! ```
 //!
 //! - One statement per line. A block starts with `if`, `while`, `for` or
@@ -38,14 +44,19 @@
 //!   the others, under a name made from its first line, which is its line 0
 //!   in the table.
 //!
+//! - A program takes values, eight at most, named between parentheses
+//!   after its name and kept as its line 0 (`(item, count)`). A call
+//!   gives one for each, worked out with the names of who calls. A
+//!   program sees its own names only: those, and what it makes.
+//!
 //! Nothing here runs a line: a block typed at a prompt and the lines of a
 //! program are compiled (`code.rs`) and run by the virtual machine
 //! (`machine.rs`). What is wrong with the form of a program is told when
 //! it is kept, and it is then not kept. This module collects the lines
 //! of a block, keeps programs in their table, and starts those that run
-//! by themselves. A program runs in the session that started it, with
-//! the names of that session, and still holds the system until it ends;
-//! this is why loops and programs are stopped after a number of
+//! by themselves. A program runs as the session that started it. Where
+//! the system has rooms for jobs it runs as one (`jobs.rs`) and holds
+//! nothing; what still runs at once is stopped after a number of
 //! statements.
 
 use core::fmt::Write;
@@ -243,18 +254,17 @@ pub fn line(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
         out.line(Style::Error, b"A line takes 240 characters at most.");
         return false;
     }
-    // the name of a program, alone or after `run`, is a job where the prompt can wait for one
+    // a program that is called, by its name or after `run`, with or
+    // without values, is a job where the prompt can wait for one
     let (word, rest) = word_of(line);
-    let (name, more) = split_word(trim(line));
-    let program = if word.bytes() == b"run" {
-        Some(rest)
-    } else {
+    let (ran, written) = if word.bytes() == b"run" { (true, rest) } else { (false, trim(line)) };
+    let program = call_of(written).is_some_and(|(name, _)| {
         let mut lower = shell::Text::from_bytes(name);
         lower.lower();
-        (!shell::knows(lower.bytes()) && more.is_empty() && !name.is_empty() && exists(&sys.db, name)).then_some(name)
-    };
-    if let (Some(program), Some(watch)) = (program, waits(sys)) {
-        return begin(sys, crate::jobs::What::Program(program), watch, out);
+        (ran || !shell::knows(lower.bytes())) && exists(&sys.db, name)
+    });
+    if let (true, Some(watch)) = (program, waits(sys)) {
+        return begin(sys, crate::jobs::What::Program(written), watch, out);
     }
     crate::machine::lines(sys, &[Line::from_bytes(line)], out)
 }
@@ -760,7 +770,7 @@ pub fn remove(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
 pub fn vars(sys: &mut System, out: &mut dyn Out) -> bool {
     let mut table = Table::new(b"vars", &[b"name", b"value"]);
     let mut hidden = 0;
-    for (name, value) in sys.vars[sys.session].each() {
+    for (name, value) in sys.names().each() {
         if table.rows == shell::TABLE_ROWS {
             hidden += 1;
         }
@@ -1433,22 +1443,21 @@ mod tests {
     #[test]
     fn programs_run_programs_and_say_where_they_fail() {
         let mut sys = System::new();
-        type_lines(&mut sys, &["program inner", "say 'in'", "if depth > 1", "return", "end", "let x = 1 / zero", "say 'not reached'", "end"]);
-        type_lines(&mut sys, &["program outer", "say 'out'", "inner", "say 'back'", "end"]);
-        type_lines(&mut sys, &["let depth = 2", "let zero = 0"]);
+        type_lines(&mut sys, &["program inner(depth, zero)", "say 'in'", "if depth > 1", "return", "end", "let x = 1 / zero", "say 'not reached'", "end"]);
+        type_lines(&mut sys, &["program outer(depth)", "say 'out'", "inner(depth, 0)", "say 'back'", "end"]);
         // `return` leaves the program it is in, not the one that ran it
-        assert_eq!(type_lines(&mut sys, &["outer"]), (true, vec!["out".to_string(), "in".to_string(), "back".to_string()]));
-        type_lines(&mut sys, &["let depth = 0"]);
-        let (ok, out) = type_lines(&mut sys, &["outer"]);
+        assert_eq!(type_lines(&mut sys, &["outer(2)"]), (true, vec!["out".to_string(), "in".to_string(), "back".to_string()]));
+        let (ok, out) = type_lines(&mut sys, &["outer(0)"]);
         assert!(!ok);
         assert_eq!(out, ["out", "in", "Division by zero.", "Stopped at line 5 of inner.", "Stopped at line 2 of outer."]);
         // a program that runs itself is stopped
-        type_lines(&mut sys, &["program again", "let depth = depth + 1", "run again", "end"]);
-        let (ok, out) = type_lines(&mut sys, &["again"]);
+        type_lines(&mut sys, &["program again(depth)", "say depth", "run again(depth + 1)", "end"]);
+        let (ok, out) = type_lines(&mut sys, &["again(1)"]);
         assert!(!ok);
-        assert_eq!(out[0], "Programs run programs three deep at most.");
-        assert_eq!(out.len(), 4);
-        assert_eq!(said(&mut sys, &["say depth"]), ["3"]);
+        assert_eq!(out[..4], ["1", "2", "3", "Programs run programs three deep at most."]);
+        assert_eq!(out.len(), 7);
+        // and the prompt has its names, which no program saw
+        assert_eq!(said(&mut sys, &["let depth = 9", "again(2)", "say depth"]), ["9"]);
         // programs are made at the prompt
         assert_eq!(said(&mut sys, &["if 1 = 1", "program nested", "end", "end"]), ["A program is made at the prompt, not inside another.", "Line 2 is not right: nothing was run."]);
     }
@@ -1515,6 +1524,25 @@ mod tests {
         a_program_runs_every_day_at_its_time();
         the_first_line_of_a_program_that_runs_by_itself_is_checked();
         programs_that_start_each_other_keep_their_order_and_their_limit();
+        a_program_that_runs_by_itself_gives_what_it_knows_to_another();
+    }
+
+    #[test]
+    fn a_program_that_runs_by_itself_gives_what_it_knows_to_another() {
+        let mut sys = books();
+        type_lines(&mut sys, &["program audit(what, row)", "say 'audit ' + what + ' ' + row", "end"]);
+        type_lines(&mut sys, &["on insert into expenses", "audit(new.label, id)", "say 'back ' + new.label", "end", "insert into expenses values ('milk', 1.5)"]);
+        assert_eq!(in_background(&mut sys), ["on_insert_expenses: audit milk 4", "on_insert_expenses: back milk"]);
+        // what the system gave the first is its own: a program it runs does not see it
+        type_lines(&mut sys, &["program peeks", "say text", "end", "on notify peek", "peeks", "end", "notify peek, 'this'"]);
+        assert_eq!(
+            in_background(&mut sys),
+            ["on_notify_peek: Unknown name: text", "on_notify_peek: Stopped at line 1 of peeks.", "on_notify_peek: Stopped at line 1 of on_notify_peek."]
+        );
+        // and the prompt's names are no more its own than before
+        type_lines(&mut sys, &["let id = 'mine'", "insert into expenses values ('tea', 2)"]);
+        assert_eq!(in_background(&mut sys), ["on_insert_expenses: audit tea 5", "on_insert_expenses: back tea"]);
+        assert_eq!(said(&mut sys, &["say id"]), ["mine"]);
     }
 
     #[test]

@@ -22,9 +22,9 @@
 //! needs (the name of a `let`, a SELECT, a command) are read from its
 //! line, which the code keeps.
 
-use crate::expr::{self, Kept, Names, Pool};
-use crate::lang::{free_name, whole_select, word_of, Line, MAX_LINES};
-use crate::sql::{Lexer, Message};
+use crate::expr::{self, Expr, Kept, Names, Pool};
+use crate::lang::{call_of, free_name, whole_select, word_of, Line, MAX_LINES, PARAMS};
+use crate::sql::{Lexer, Message, Token};
 use crate::text::{split_word, trim};
 
 /// Loops over rows open one inside the other.
@@ -68,9 +68,11 @@ pub(crate) enum Op {
     /// jump when there is none.
     Next(u8, u8),
     Close(u8),
-    /// `run name`.
+    /// `run name`, `run name(values)`, `name(values)`: the name and the
+    /// values are read from the line (`call_parts`) when it runs.
     Call,
-    /// Any other line: a command of the prompt, or the name of a program.
+    /// Any other line: a command of the prompt, or the name of a program
+    /// alone.
     Command,
     Return,
 }
@@ -110,6 +112,42 @@ pub(crate) fn for_parts(line: &[u8]) -> Option<(&[u8], &[u8])> {
 /// of `run`.
 pub(crate) fn rest(line: &[u8]) -> &[u8] {
     word_of(line).1
+}
+
+/// The name of the program a line calls, and the values it gives it as
+/// they are written between the parentheses (nothing for none). Empty
+/// names for a line that calls nothing.
+pub(crate) fn call_parts(line: &[u8]) -> (&[u8], &[u8]) {
+    let (word, after) = word_of(line);
+    call_of(if word.bytes() == b"run" { after } else { line }).unwrap_or((b"", b""))
+}
+
+/// Reads the values a call gives, calculations with commas between
+/// them, and hands each to `each` as it is read. Returns how many there
+/// are. A name in them is looked up when the calculation is worked out.
+pub(crate) fn arguments(written: &[u8], each: &mut dyn FnMut(&Expr) -> Result<(), Message>) -> Result<usize, Message> {
+    let mut lexer = Lexer::new(written);
+    let mut count = 0;
+    if lexer.peek() == Token::End {
+        return Ok(0);
+    }
+    loop {
+        if matches!(lexer.peek(), Token::End | Token::Symbol(b",")) {
+            return Err(Message::from_bytes(b"A value is missing between the parentheses."));
+        }
+        if count == PARAMS {
+            return Err(Message::from_bytes(b"A program takes eight values at most."));
+        }
+        // a SELECT there reads as a name with something after it
+        let select = |message| whole_select(written).unwrap_or(message);
+        let read = expr::parse(&mut lexer, Names::late()).map_err(select)?;
+        count += 1;
+        each(&read)?;
+        if lexer.peek() == Token::End {
+            return Ok(count);
+        }
+        lexer.expect(b",").map_err(select)?;
+    }
 }
 
 /// Lines compiled: one unit of what the machine runs.
@@ -333,12 +371,24 @@ fn translate(lines: &[Line], code: &mut Code) -> Result<(), Fault> {
                 code.emit(Op::Return, at, true);
             }
             b"run" => {
+                let Some((_, given)) = call_of(after).filter(|_| !after.is_empty()) else {
+                    return Err(fault(b"A program is run like this: run report, or run restock('cable', 5)"));
+                };
+                arguments(given, &mut |_| Ok(())).map_err(told)?;
                 code.emit(Op::Call, at, true);
             }
             b"program" | b"on" | b"every" => return Err(fault(b"A program is made at the prompt, not inside another.")),
-            _ => {
-                code.emit(Op::Command, at, true);
-            }
+            _ => match call_of(text) {
+                // values between parentheses after a name that is no
+                // command and no word of the language: a program is called
+                Some((name, given)) if text.ends_with(b")") && free_name(name) => {
+                    arguments(given, &mut |_| Ok(())).map_err(told)?;
+                    code.emit(Op::Call, at, true);
+                }
+                _ => {
+                    code.emit(Op::Command, at, true);
+                }
+            },
         }
     }
     match depth.checked_sub(1) {

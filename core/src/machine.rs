@@ -18,6 +18,12 @@
 //! the prompt from inside a program (`qr`) enters the machine again: it
 //! takes the next unit and gives it back.
 //!
+//! A program has names of its own: its parameters, with the values the
+//! call gave them, and what it makes. They are the names in use while
+//! it runs (`System::names`), and those of who called it wait in the
+//! room (`aside`) until it leaves, however it leaves. Lines typed have
+//! none of their own: they use the names in use where they run.
+//!
 //! An instruction copies what it needs out of the machine (it is a few
 //! numbers, its line 240 bytes) before it calls anything that takes the
 //! whole `System`, a command above all.
@@ -25,7 +31,7 @@
 use core::fmt::Write;
 
 use crate::code::{self, Code, Instr, Op, What, LOOPS, WHILES};
-use crate::expr::VAR_NAME;
+use crate::expr::{Vars, VAR_NAME};
 use crate::grid::COLS;
 use crate::lang::{self, Line, MAX_LINES};
 use crate::shell::{self, Out, Style, System, Table, Text};
@@ -81,11 +87,14 @@ pub struct Machine {
     unbound: bool,
     /// The loops over rows that are open, in all the units together.
     cursors: [Cursor; LOOPS],
+    /// For each unit that is a program, the names of who called it, put
+    /// aside while it runs with its own: they come back when it leaves.
+    aside: [Vars; UNITS],
 }
 
 impl Machine {
     pub const fn new() -> Machine {
-        Machine { units: [const { Code::new() }; UNITS], calls: [Call::NONE; UNITS], depth: 0, programs: 0, steps: 0, ran: 0, unbound: false, cursors: [const { Cursor::new() }; LOOPS] }
+        Machine { units: [const { Code::new() }; UNITS], calls: [Call::NONE; UNITS], depth: 0, programs: 0, steps: 0, ran: 0, unbound: false, cursors: [const { Cursor::new() }; LOOPS], aside: [const { Vars::new() }; UNITS] }
     }
 }
 
@@ -104,6 +113,23 @@ impl Machine {
     pub fn busy(&self) -> bool {
         self.depth > 0
     }
+
+    /// The names of who started the lowest program that runs here, which
+    /// wait for it to end. None when no program runs here.
+    pub(crate) fn outer(&self) -> Option<&Vars> {
+        (0..self.depth).find(|unit| !self.calls[*unit].program.is_empty()).map(|unit| &self.aside[unit])
+    }
+}
+
+/// The names a program starts with.
+#[derive(Clone, Copy)]
+pub(crate) enum Given<'a> {
+    /// The values of a call as they are written between its parentheses:
+    /// worked out with the names of who calls, one for each parameter.
+    Written(&'a [u8]),
+    /// The names in use as they stand: what the system gives a program
+    /// that runs by itself.
+    Ready,
 }
 
 /// Where a machine is: the one a system has of its own, in which what is
@@ -196,7 +222,7 @@ pub fn start_lines(sys: &mut System, room: Room, lines: &[Line], out: &mut dyn O
         }
         return None;
     }
-    enter(sys, room, Text::new(), lines.len());
+    enter(sys, room, Text::new(), lines.len(), None);
     Some(unit)
 }
 
@@ -213,21 +239,21 @@ pub fn check(sys: &mut System, lines: &[Line]) -> Result<(), code::Fault> {
 }
 
 /// Runs a program kept in the database to the end, as the system does
-/// for one that runs by itself. Says what failed, and returns whether
-/// all went well.
+/// for one that runs by itself: the names in use are the ones it starts
+/// with. Says what failed, and returns whether all went well.
 pub fn program(sys: &mut System, name: &[u8], out: &mut dyn Out) -> bool {
-    match start_program(sys, Room::Own, name, out) {
+    match start_program(sys, Room::Own, name, Given::Ready, out) {
         Some(base) => turn(sys, Room::Own, base, out, &mut || false) == Turn::Ended(true),
         None => false,
     }
 }
 
-/// Makes a program kept in the database what runs in a room. Returns the
-/// unit it is, to give to `turn`; None when it cannot start, with why
-/// said.
-pub fn start_program(sys: &mut System, room: Room, name: &[u8], out: &mut dyn Out) -> Option<usize> {
+/// Makes a program kept in the database what runs in a room, with the
+/// names it is given. Returns the unit it is, to give to `turn`; None
+/// when it cannot start, with why said.
+pub(crate) fn start_program(sys: &mut System, room: Room, name: &[u8], given: Given<'_>, out: &mut dyn Out) -> Option<usize> {
     let base = vm(sys, room).depth;
-    match call(sys, room, name, out) {
+    match call(sys, room, name, given, out) {
         Ok(()) => Some(base),
         Err(message) => {
             if !message.is_empty() {
@@ -257,23 +283,29 @@ pub fn at(sys: &System, room: Room) -> Option<(Text, usize)> {
 }
 
 /// Starts a program: its lines are read from the database and compiled
-/// into the next unit, which is then the one that runs. Programs are
-/// three deep at most, whoever started the first.
+/// into the next unit, which is then the one that runs, with names of
+/// its own made of what it is given. Programs are three deep at most,
+/// whoever started the first.
 ///
 /// Never part of `step`: the lines it reads are 12 KB on the stack, and
 /// `step` is below every command a program runs.
 #[inline(never)]
-fn call(sys: &mut System, room: Room, name: &[u8], out: &mut dyn Out) -> Result<(), Message> {
+fn call(sys: &mut System, room: Room, name: &[u8], given: Given<'_>, out: &mut dyn Out) -> Result<(), Message> {
     if vm(sys, room).programs == MAX_LEVELS || vm(sys, room).depth == UNITS {
         return Err(Message::from_bytes(b"Programs run programs three deep at most."));
     }
     // read here and given to the compiler, which keeps them: not held while the program runs
     let mut lines = [Line::new(); MAX_LINES];
-    let Some(lang::Loaded { count, .. }) = lang::load(&sys.db, name, &mut lines)? else {
+    let Some(loaded) = lang::load(&sys.db, name, &mut lines)? else {
         return Err(crate::sql::error(b"Unknown program: ", name).also(b". Type programs to list them."));
     };
+    // its names, worked out with those of who calls, before anything of it is there
+    let names = match given {
+        Given::Written(written) => bind(sys, name, loaded.takes.bytes(), written)?,
+        Given::Ready => sys.names().clone(),
+    };
     let unit = vm(sys, room).depth;
-    if let Err(fault) = code::compile(&lines[..count], &mut vm_mut(sys, room).units[unit]) {
+    if let Err(fault) = code::compile(&lines[..loaded.count], &mut vm_mut(sys, room).units[unit]) {
         // kept by a system that did not compile what it kept: nothing of it runs
         out.line(Style::Error, fault.message.bytes());
         let mut place = FixedStr::<COLS>::new();
@@ -281,12 +313,60 @@ fn call(sys: &mut System, room: Room, name: &[u8], out: &mut dyn Out) -> Result<
         out.line(Style::Error, place.bytes());
         return Err(said());
     }
-    enter(sys, room, Text::from_bytes(name), count);
+    enter(sys, room, Text::from_bytes(name), loaded.count, Some(names));
     Ok(())
 }
 
+/// What to say of a call that does not give a program as many values as
+/// it takes.
+fn takes(name: &[u8], params: &lang::Params) -> Message {
+    let mut lower = Text::from_bytes(name);
+    lower.lower();
+    let mut message = Message::new();
+    let _ = match params.names().len() {
+        0 => write!(message, "{lower} takes no value."),
+        1 => write!(message, "{lower} takes 1 value: "),
+        count => write!(message, "{lower} takes {count} values: "),
+    };
+    for (at, param) in params.names().iter().enumerate() {
+        message.push_bytes(if at > 0 { b", " } else { b"" });
+        message.push_bytes(param.bytes());
+    }
+    if !params.names().is_empty() {
+        message.push(b'.');
+    }
+    message
+}
+
+/// The names a program starts with: each of its parameters (`takes`, as
+/// they are kept) with the value the call gives it (`written`), worked
+/// out with the names of who calls, and the moment that caller knows as
+/// `now`. A call that does not give as many values as the program takes
+/// is refused before any of them is worked out.
+#[inline(never)]
+fn bind(sys: &System, name: &[u8], takes_these: &[u8], written: &[u8]) -> Result<Vars, Message> {
+    // kept right, unless its row was changed by hand: then this says how
+    let params = lang::Params::read(takes_these)?;
+    if code::arguments(written, &mut |_| Ok(()))? != params.names().len() {
+        return Err(takes(name, &params));
+    }
+    let caller = sys.names();
+    let mut names = Vars::new();
+    names.clock = caller.clock;
+    let mut at = 0;
+    code::arguments(written, &mut |value| {
+        names.set(params.names()[at].bytes(), value.eval_with(&[], caller)?);
+        at += 1;
+        Ok(())
+    })?;
+    Ok(names)
+}
+
 /// Takes the next unit, whose code is ready, for a program or for lines.
-fn enter(sys: &mut System, room: Room, program: Text, lines: usize) {
+/// A program comes with its names, which become the ones in use: those
+/// of who called it wait in the room. Lines typed have none of their own.
+fn enter(sys: &mut System, room: Room, program: Text, lines: usize, names: Option<Vars>) {
+    let caller = names.map(|names| core::mem::replace(sys.names_mut(), names));
     let machine = vm_mut(sys, room);
     if machine.depth == 0 {
         (machine.steps, machine.ran) = (0, 0);
@@ -294,22 +374,31 @@ fn enter(sys: &mut System, room: Room, program: Text, lines: usize) {
     // its cursors come after those of who called it
     let cursors = machine.depth.checked_sub(1).map_or(0, |caller| machine.calls[caller].cursors + machine.calls[caller].open);
     machine.calls[machine.depth] = Call { program, lines, cursors, ..Call::NONE };
+    if let Some(caller) = caller {
+        machine.aside[machine.depth] = caller;
+    }
     machine.depth += 1;
     if !program.is_empty() {
         machine.programs += 1;
     }
 }
 
-/// Gives the unit at the top back, and the cursors it left open.
+/// Gives the unit at the top back, and the cursors it left open. When it
+/// is a program, the names of who called it are the ones in use again.
 fn leave(sys: &mut System, room: Room) {
     let machine = vm_mut(sys, room);
     machine.depth -= 1;
     let call = machine.calls[machine.depth];
+    let mut caller = None;
     if !call.program.is_empty() {
         machine.programs -= 1;
+        caller = Some(core::mem::take(&mut machine.aside[machine.depth]));
     }
     for cursor in machine.cursors.iter_mut().skip(call.cursors).take(call.open) {
         cursor.close();
+    }
+    if let Some(caller) = caller {
+        *sys.names_mut() = caller;
     }
 }
 
@@ -380,7 +469,7 @@ pub fn turn(sys: &mut System, room: Room, base: usize, out: &mut dyn Out, spent:
 /// Works out the value an instruction asks for.
 fn value(sys: &System, room: Room, unit: usize, what: What, text: &[u8]) -> Result<Value, Message> {
     match what {
-        What::Value(kept) => vm(sys, room).units[unit].pool().eval(kept, &sys.vars[sys.session]),
+        What::Value(kept) => vm(sys, room).units[unit].pool().eval(kept, sys.names()),
         What::Select => selected(sys, text),
     }
 }
@@ -393,7 +482,7 @@ fn value(sys: &System, room: Room, unit: usize, what: What, text: &[u8]) -> Resu
 /// What a SELECT gives as a value: its first column of its first row.
 #[inline(never)]
 fn selected(sys: &System, text: &[u8]) -> Result<Value, Message> {
-    let rows = sql::query(sys, &sys.vars[sys.session], text)?;
+    let rows = sql::query(sys, sys.names(), text)?;
     Ok(if rows.count > 0 && rows.cols > 0 { rows.rows[0][0] } else { Value::Null })
 }
 
@@ -403,7 +492,7 @@ fn selected(sys: &System, text: &[u8]) -> Result<Value, Message> {
 fn open(sys: &mut System, room: Room, at: usize, query: &[u8]) -> Result<(), Message> {
     let mut cursor = Cursor::new();
     core::mem::swap(&mut cursor, &mut vm_mut(sys, room).cursors[at]);
-    let opened = cursor.open(&*sys, &sys.vars[sys.session], query);
+    let opened = cursor.open(&*sys, sys.names(), query);
     core::mem::swap(&mut cursor, &mut vm_mut(sys, room).cursors[at]);
     opened
 }
@@ -437,7 +526,7 @@ fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn O
         Op::Let(what) => {
             let (name, written) = code::let_parts(text).unwrap_or((b"", b""));
             let value = value(sys, room, unit, what, written)?;
-            if !sys.vars[sys.session].set(name, value) {
+            if !sys.names_mut().set(name, value) {
                 return Err(Message::from_bytes(b"There is no room for one more name: 32 are kept at most."));
             }
         }
@@ -450,7 +539,7 @@ fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn O
         }
         Op::Jump(to) => vm_mut(sys, room).calls[unit].next = to as usize,
         Op::JumpUnless(condition, to) => {
-            if !vm(sys, room).units[unit].pool().holds(condition, &sys.vars[sys.session])? {
+            if !vm(sys, room).units[unit].pool().holds(condition, sys.names())? {
                 vm_mut(sys, room).calls[unit].next = to as usize;
             }
         }
@@ -494,7 +583,7 @@ fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn O
                 }
                 column.push(b'.');
                 column.push_bytes(header.bytes());
-                if !sys.vars[sys.session].set(column.bytes(), value) {
+                if !sys.names_mut().set(column.bytes(), value) {
                     return Err(Message::from_bytes(b"There is no room for one more name: 32 are kept at most."));
                 }
             }
@@ -505,14 +594,17 @@ fn step(sys: &mut System, room: Room, unit: usize, instr: Instr, out: &mut dyn O
             let at = machine.calls[unit].cursors + which as usize;
             machine.cursors[at].close();
         }
-        Op::Call => call(sys, room, code::rest(text), out)?,
+        Op::Call => {
+            let (name, written) = code::call_parts(text);
+            call(sys, room, name, Given::Written(written), out)?;
+        }
         Op::Command => {
             let (name, arguments) = split_word(text);
             let mut lower = Text::from_bytes(name);
             lower.lower();
             if !shell::knows(lower.bytes()) && arguments.is_empty() && lang::exists(&sys.db, name) {
                 // the name of a program is a command
-                call(sys, room, name, out)?;
+                call(sys, room, name, Given::Written(b""), out)?;
             } else {
                 // In a program, what a command did is not announced. Lines
                 // typed say it, those included that a command of a program
@@ -552,6 +644,124 @@ pub(crate) mod tests {
         let mut sys = System::new();
         each(&mut sys, &["create table expenses (label text, amount decimal)", "insert into expenses values ('coffee', 3.5), ('train', 42), ('bread', 1.2)"]);
         sys
+    }
+
+    #[test]
+    fn a_program_is_given_its_values() {
+        let mut sys = System::new();
+        typed(&mut sys, &["program add(a, b)", "say a + b", "end"]);
+        assert_eq!(each(&mut sys, &["add(2, 3)"]), ["5"]);
+        assert_eq!(each(&mut sys, &["run add(2, 3)"]), ["5"]);
+        assert_eq!(each(&mut sys, &["ADD( 2 , 3 )"]), ["5"]);
+        // worked out with the names of who calls, when the call is made
+        assert_eq!(each(&mut sys, &["let n = 4", "add(n, n + 1)"]), ["9"]);
+        assert_eq!(block(&mut sys, &["let k = 1", "while k < 3", "add(k, 10)", "let k = k + 1", "end"]).1, ["11", "12"]);
+        // a text may hold a comma or a parenthesis, and a function has its own
+        typed(&mut sys, &["program tell(what, n)", "say what + n", "end"]);
+        assert_eq!(each(&mut sys, &["tell('a, (b', round(2.4))"]), ["a, (b2"]);
+        typed(&mut sys, &["program nothing(x)", "say x is null", "end"]);
+        assert_eq!(each(&mut sys, &["nothing(null)"]), ["1"]);
+        assert_eq!(each(&mut sys, &["nothing(3)"]), ["0"]);
+    }
+
+    #[test]
+    fn a_program_sees_its_own_names_only() {
+        let mut sys = books();
+        each(&mut sys, &["let floor = 10"]);
+        typed(&mut sys, &["program cheap", "say floor", "end"]);
+        assert_eq!(each(&mut sys, &["cheap"]), ["Unknown name: floor", "Stopped at line 1 of cheap."]);
+        // what it makes is its own, and is gone when it ends
+        typed(&mut sys, &["program makes(floor)", "let floor = floor + 1", "let made = 3", "for row in select label from expenses", "end", "say floor + made", "end"]);
+        assert_eq!(each(&mut sys, &["makes(1)"]), ["5"]);
+        assert_eq!(each(&mut sys, &["say floor"]), ["10"]);
+        assert_eq!(each(&mut sys, &["say made"]), ["Unknown name: made"]);
+        assert_eq!(each(&mut sys, &["say row.label"]), ["Unknown name: row.label"]);
+        // a parameter is a name in SQL as any other...
+        typed(&mut sys, &["program over(least)", "say select count(*) from expenses where amount > least", "end"]);
+        assert_eq!(each(&mut sys, &["over(3)"]), ["2"]);
+        // ...so a column of the table hides it
+        typed(&mut sys, &["program named(label)", "say select count(*) from expenses where label = label", "end"]);
+        assert_eq!(each(&mut sys, &["named('tea')"]), ["3"]);
+        // the names a program lists are its own
+        typed(&mut sys, &["program lists(one)", "vars", "end"]);
+        let listed = each(&mut sys, &["lists(7)"]);
+        assert_eq!(listed.iter().map(|line| line.trim_end()).collect::<Vec<_>>(), ["   name  value", "   one   7"]);
+    }
+
+    #[test]
+    fn the_names_of_who_calls_come_back_however_it_ends() {
+        let mut sys = System::new();
+        typed(&mut sys, &["program inner(x)", "say x", "if x > 5", "return", "end", "if x > 2", "let y = 1 / (x - x)", "end", "end"]);
+        typed(&mut sys, &["program outer(x)", "inner(x + 1)", "say x", "end"]);
+        assert_eq!(each(&mut sys, &["let x = 100", "outer(1)"]), ["2", "1"]);
+        assert_eq!(each(&mut sys, &["say x"]), ["100"]);
+        // left by return
+        assert_eq!(each(&mut sys, &["outer(5)"]), ["6", "5"]);
+        // left by a failure: every level says where it stopped, and the prompt has its names
+        assert_eq!(each(&mut sys, &["outer(2)"]), ["3", "Division by zero.", "Stopped at line 6 of inner.", "Stopped at line 1 of outer."]);
+        assert_eq!(each(&mut sys, &["say x"]), ["100"]);
+        // a block typed uses the names of its prompt, and a call from it changes none
+        assert_eq!(block(&mut sys, &["let x = x + 1", "inner(0)", "say x"]).1, ["0", "101"]);
+        assert_eq!(each(&mut sys, &["say x"]), ["101"]);
+    }
+
+    #[test]
+    fn a_call_with_the_wrong_number_of_values_is_refused_before_it_runs() {
+        let mut sys = System::new();
+        typed(&mut sys, &["program two(item, count)", "say 'ran'", "end", "program one(item)", "say 'ran'", "end", "program plain", "say 'ran'", "end"]);
+        let two = ["two takes 2 values: item, count."];
+        assert_eq!(each(&mut sys, &["two(1)"]), two);
+        assert_eq!(each(&mut sys, &["two(1, 2, 3)"]), two);
+        assert_eq!(each(&mut sys, &["two"]), two);
+        assert_eq!(each(&mut sys, &["run two"]), two);
+        assert_eq!(each(&mut sys, &["TWO(1)"]), two);
+        // said before a value that cannot be worked out
+        assert_eq!(each(&mut sys, &["two(missing)"]), two);
+        assert_eq!(each(&mut sys, &["one()"]), ["one takes 1 value: item."]);
+        assert_eq!(each(&mut sys, &["plain(1)"]), ["plain takes no value."]);
+        assert_eq!(each(&mut sys, &["plain()"]), ["ran"]);
+        assert_eq!(each(&mut sys, &["plain"]), ["ran"]);
+        assert_eq!(each(&mut sys, &["run plain"]), ["ran"]);
+        // a value that cannot be worked out: nothing of the program runs
+        assert_eq!(each(&mut sys, &["one(missing)"]), ["Unknown name: missing"]);
+        // in a program, the line of the call is told
+        typed(&mut sys, &["program calls", "say 'before'", "two(1)", "end"]);
+        assert_eq!(each(&mut sys, &["calls"]), ["before", "two takes 2 values: item, count.", "Stopped at line 2 of calls."]);
+        assert_eq!(each(&mut sys, &["nowhere(1)"]), ["Unknown program: nowhere. Type programs to list them."]);
+    }
+
+    #[test]
+    fn what_is_wrong_with_a_call_is_told_before_anything_runs() {
+        let mut sys = System::new();
+        let not_run = "Line 2 is not right: nothing was run.";
+        assert_eq!(block(&mut sys, &["say 1", "f(1, )"]), (false, vec!["A value is missing between the parentheses.".to_string(), not_run.to_string()]));
+        assert_eq!(block(&mut sys, &["say 1", "f(, 1)"]).1, ["A value is missing between the parentheses.", not_run]);
+        assert_eq!(block(&mut sys, &["say 1", "run f(1) 2"]).1, ["A program is run like this: run report, or run restock('cable', 5)", not_run]);
+        assert_eq!(block(&mut sys, &["say 1", "run"]).1, ["A program is run like this: run report, or run restock('cable', 5)", not_run]);
+        assert_eq!(block(&mut sys, &["say 1", "f(select 1)"]).1, ["A select cannot be part of a calculation: keep it with let first.", not_run]);
+        assert_eq!(block(&mut sys, &["say 1", "run f(1 +)"]).1[1], not_run);
+        assert_eq!(block(&mut sys, &["say 1", "f(1 2)"]).1[1], not_run);
+        assert_eq!(block(&mut sys, &["say 1", "f(1, 2, 3, 4, 5, 6, 7, 8, 9)"]).1, ["A program takes eight values at most.", not_run]);
+        // a program is not kept with such a line
+        let mut out = Lines::default();
+        for line in ["program wrong", "say 1", "f(1, )", "end"] {
+            shell::exec(&mut sys, line.as_bytes(), &mut out);
+        }
+        assert_eq!(out.lines, ["A value is missing between the parentheses.", "Line 2 is not right: the program is not kept."]);
+        // what the prompt has a command or a word for is not a call
+        assert_eq!(each(&mut sys, &["say (1 + 2) * 3"]), ["9"]);
+        assert_eq!(each(&mut sys, &["select (1 + 2) * 3 as n from tables limit 1"])[1].trim(), "9");
+    }
+
+    #[test]
+    fn a_program_calls_itself_with_values_of_its_own() {
+        let mut sys = System::new();
+        typed(&mut sys, &["program down(n)", "say n", "if n > 1", "down(n - 1)", "end", "say n", "end"]);
+        assert_eq!(each(&mut sys, &["down(3)"]), ["3", "2", "1", "1", "2", "3"]);
+        let stopped = "Stopped at line 3 of down.";
+        assert_eq!(each(&mut sys, &["down(4)"]), ["4", "3", "2", "Programs run programs three deep at most.", stopped, stopped, stopped]);
+        // every level gave its names back
+        assert_eq!(each(&mut sys, &["let n = 9", "down(1)", "say n"]), ["9"]);
     }
 
     #[test]
@@ -643,30 +853,29 @@ pub(crate) mod tests {
     #[test]
     fn programs_run_programs_and_say_where_they_fail() {
         let mut sys = System::new();
-        typed(&mut sys, &["program inner", "say 'in'", "if depth > 1", "return", "end", "let x = 1 / zero", "say 'not reached'", "end"]);
-        typed(&mut sys, &["program outer", "say 'out'", "inner", "say 'back'", "end"]);
-        each(&mut sys, &["let depth = 2", "let zero = 0"]);
+        typed(&mut sys, &["program inner(depth, zero)", "say 'in'", "if depth > 1", "return", "end", "let x = 1 / zero", "say 'not reached'", "end"]);
+        typed(&mut sys, &["program outer(depth)", "say 'out'", "inner(depth, 0)", "say 'back'", "end"]);
         // `return` leaves the program it is in, not the one that ran it
-        assert_eq!(block(&mut sys, &["outer"]), (true, texts(&["out", "in", "back"])));
-        each(&mut sys, &["let depth = 0"]);
-        assert_eq!(block(&mut sys, &["outer"]), (false, texts(&["out", "in", "Division by zero.", "Stopped at line 5 of inner.", "Stopped at line 2 of outer."])));
+        assert_eq!(block(&mut sys, &["outer(2)"]), (true, texts(&["out", "in", "back"])));
+        assert_eq!(block(&mut sys, &["outer(0)"]), (false, texts(&["out", "in", "Division by zero.", "Stopped at line 5 of inner.", "Stopped at line 2 of outer."])));
         // run by `run`, from lines that are more than one
         assert_eq!(
-            block(&mut sys, &["say 'first'", "run outer", "say 'not here'"]),
+            block(&mut sys, &["say 'first'", "run outer(0)", "say 'not here'"]),
             (false, texts(&["first", "out", "in", "Division by zero.", "Stopped at line 5 of inner.", "Stopped at line 2 of outer.", "Stopped at line 2."]))
         );
         // a program that runs itself is stopped
-        typed(&mut sys, &["program again", "let depth = depth + 1", "run again", "end"]);
-        let (ok, out) = block(&mut sys, &["again"]);
+        typed(&mut sys, &["program again(depth)", "say depth", "run again(depth + 1)", "end"]);
+        let (ok, out) = block(&mut sys, &["again(1)"]);
         assert!(!ok);
-        assert_eq!(out, ["Programs run programs three deep at most.", "Stopped at line 2 of again.", "Stopped at line 2 of again.", "Stopped at line 2 of again."]);
-        assert_eq!(each(&mut sys, &["say depth"]), ["3"]);
-        // and is three deep whoever started the first
+        assert_eq!(out, ["1", "2", "3", "Programs run programs three deep at most.", "Stopped at line 2 of again.", "Stopped at line 2 of again.", "Stopped at line 2 of again."]);
+        // and is three deep whoever started the first: started as the system
+        // starts one, the names in use are the ones it begins with
         let mut out = Lines::default();
         each(&mut sys, &["let depth = 0"]);
         assert!(!program(&mut sys, b"again", &mut out));
-        assert_eq!(out.lines.len(), 4);
-        assert_eq!(each(&mut sys, &["say depth"]), ["3"]);
+        assert_eq!(out.lines[..4], ["0", "1", "2", "Programs run programs three deep at most."]);
+        assert_eq!(out.lines.len(), 7);
+        assert_eq!(each(&mut sys, &["say depth"]), ["0"]);
         // one that is not there
         assert_eq!(block(&mut sys, &["run nowhere"]), (false, texts(&["Unknown program: nowhere. Type programs to list them."])));
         let mut out = Lines::default();
@@ -892,7 +1101,7 @@ pub(crate) mod tests {
         typed(&mut sys, &["program deep", "for a in select n from hundred", "for b in select n from hundred", "let seen = b.n", "end", "end", "end"]);
         typed(&mut sys, &["program outer", "say 'out'", "deep", "end"]);
         let mut out = Lines::default();
-        let base = start_program(&mut sys, Room::Given(0), b"outer", &mut out).unwrap();
+        let base = start_program(&mut sys, Room::Given(0), b"outer", Given::Written(b""), &mut out).unwrap();
         for _ in 0..40 {
             assert_eq!(turn(&mut sys, Room::Given(0), base, &mut out, &mut || true), Turn::More);
         }
@@ -908,7 +1117,7 @@ pub(crate) mod tests {
         assert_eq!(in_turns(&mut sys, Room::Given(0), &four).1, ["four deep"]);
         // a program that is not there starts nothing, and says so
         let mut out = Lines::default();
-        assert!(start_program(&mut sys, Room::Given(0), b"nowhere", &mut out).is_none());
+        assert!(start_program(&mut sys, Room::Given(0), b"nowhere", Given::Written(b""), &mut out).is_none());
         assert_eq!(out.lines, ["Unknown program: nowhere. Type programs to list them."]);
     }
 
