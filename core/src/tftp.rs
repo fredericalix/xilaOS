@@ -58,6 +58,7 @@ pub enum Step {
     Failed(Failed),
 }
 
+#[derive(Clone, Copy)]
 pub struct Fetch {
     server: Ip,
     /// The port the server answers from: it picks one for each file.

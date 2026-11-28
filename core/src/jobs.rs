@@ -474,6 +474,11 @@ pub fn turn(sys: &mut System, at: usize, out: &mut dyn Out, spent: &mut dyn FnMu
 /// The kernel served what a waiting job asked: it goes on. A failure is
 /// remembered: the job will not have gone well.
 pub fn answered(sys: &mut System, at: usize, ok: bool) {
+    // what it asked of the network is still being asked: it goes on when
+    // the answer has come and was said
+    if crate::waits::going(sys, at) {
+        return;
+    }
     if let Some(job) = sys.jobs.list.get_mut(at).filter(|job| job.state == State::Waiting) {
         job.state = State::Ready;
         job.refused |= !ok;
@@ -528,6 +533,8 @@ pub fn stop_watched(sys: &mut System, watch: Watch) -> Option<Message> {
         let _ = write!(message, "Stopped at line {line} of {program}.");
     }
     as_itself(sys, at, |sys| machine::stop(sys, Room::Given(at)));
+    // what it was asking of the network, nobody wants any more
+    crate::waits::drop(sys, at);
     sys.jobs.list[at].state = State::Stopped;
     Some(message)
 }
@@ -559,6 +566,8 @@ pub fn end(sys: &mut System, number: u32) -> Result<(), Message> {
         return Err(about(number, "has ended."));
     }
     as_itself(sys, at, |sys| machine::stop(sys, Room::Given(at)));
+    // what it was asking of the network, nobody wants any more
+    crate::waits::drop(sys, at);
     sys.jobs.list[at].state = State::Stopped;
     if sys.jobs.list[at].watch == Watch::Nobody && !sys.jobs.list[at].system {
         record(sys, at);
@@ -911,6 +920,98 @@ mod tests {
         assert_eq!(finish(&mut sys, place), ["7"]);
         assert_eq!(outcome(&mut sys, Watch::Serial), Some(true));
         assert!(!crate::shell::exec(&mut sys, b"say mine", &mut Lines::default()));
+    }
+
+    /// Gives a job turns until it leaves a request for the kernel, and
+    /// makes that request its wait, as the kernel does.
+    fn until_it_asks(sys: &mut System, place: usize) -> Vec<String> {
+        let mut out = Lines::default();
+        for _ in 0..100 {
+            turn(sys, place, &mut out, &mut || true);
+            if sys.request.is_some() {
+                break;
+            }
+        }
+        assert_eq!(sys.jobs.list()[place].state, State::Waiting);
+        assert!(crate::waits::begin(sys, place, 0));
+        // who gave the turn asks what the kernel answered: nothing yet
+        assert!(served(sys, place, &mut Lines::default()));
+        out.lines
+    }
+
+    #[test]
+    fn a_job_that_asks_the_network_waits_and_the_others_run() {
+        use crate::net::tests::{echo, Kept};
+        let mut sys = crate::waits::tests::networked();
+        rooms(&mut sys, PLACES + 1);
+        let asks = lines(&["say 'before'", "net ping 8.8.8.8", "say 'after'"]);
+        let number = begin(&mut sys, What::Lines(&asks), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        let counts = lines(&["let n = 0", "while n < 50", "let n = n + 1", "end", "say n"]);
+        let other = begin(&mut sys, What::Lines(&counts), Watch::Nobody, &mut Lines::default()).unwrap();
+        let other = place_of(&sys, other);
+        assert_eq!(until_it_asks(&mut sys, place), ["before"]);
+        // it waits, with the one place for a request free again: it is given no turn, the other runs to its end
+        assert_eq!((sys.jobs.list()[place].state, sys.request), (State::Waiting, None));
+        turn(&mut sys, place, &mut Lines::default(), &mut || true);
+        assert_eq!(finish(&mut sys, other), ["50"]);
+        assert_eq!(sys.jobs.list()[place].state, State::Waiting);
+        // it is not held while it waits, and says why
+        assert!(hold(&mut sys, number).is_err());
+        // the answer comes: it is said where the job says, and the job goes on
+        let mut wire = Kept::default();
+        crate::waits::step(&mut sys, place, &mut wire, 100, 1_000, None, &mut []);
+        let answer = echo(&wire.0[0], [8, 8, 8, 8]);
+        sys.net.receive(&answer, 101, &mut wire);
+        crate::waits::step(&mut sys, place, &mut wire, 101, 3_500, None, &mut []);
+        assert!(crate::waits::take(&mut sys, place));
+        assert!(served(&mut sys, place, &mut Lines::default()));
+        assert_eq!(sys.jobs.list()[place].state, State::Ready);
+        let kept: Vec<String> = sys.jobs.list()[place].said.lines().map(|line| String::from_utf8_lossy(line).into_owned()).collect();
+        assert_eq!(kept, ["8.8.8.8 answered in 2.5 ms."]);
+        assert_eq!(finish(&mut sys, place), ["after"]);
+        assert_eq!(sys.jobs.list()[place].state, State::Done);
+        // an answer that is a failure makes the job one, and stops it there
+        let number = begin(&mut sys, What::Lines(&asks), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        until_it_asks(&mut sys, place);
+        crate::waits::step(&mut sys, place, &mut wire, 200, 0, None, &mut []);
+        crate::waits::step(&mut sys, place, &mut wire, 300, 1_000_000, None, &mut []);
+        assert!(crate::waits::take(&mut sys, place));
+        assert!(!served(&mut sys, place, &mut Lines::default()));
+        finish(&mut sys, place);
+        assert_eq!(sys.jobs.list()[place].state, State::Failed);
+    }
+
+    #[test]
+    fn a_job_stopped_while_it_waits_hangs_up() {
+        use crate::net::tests::Kept;
+        let mut sys = crate::waits::tests::networked();
+        rooms(&mut sys, PLACES + 1);
+        let asks = lines(&["net get 192.168.1.168:8000/", "say 'not here'"]);
+        let mut wire = Kept::default();
+        // ended by its number
+        let number = begin(&mut sys, What::Lines(&asks), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        until_it_asks(&mut sys, place);
+        crate::waits::step(&mut sys, place, &mut wire, 10, 0, None, &mut []);
+        assert_eq!(sys.net.tcp.count(), 1);
+        end(&mut sys, number).unwrap();
+        assert!(!crate::waits::going(&sys, place) && !crate::waits::done(&sys, place));
+        assert_eq!((sys.net.tcp.count(), sys.jobs.list()[place].state), (0, State::Stopped));
+        // stopped by a key at the prompt that waited for it
+        let number = begin(&mut sys, What::Lines(&asks), Watch::Screen, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        until_it_asks(&mut sys, place);
+        crate::waits::step(&mut sys, place, &mut wire, 20, 0, None, &mut []);
+        assert_eq!(sys.net.tcp.count(), 1);
+        assert!(stop_watched(&mut sys, Watch::Screen).is_some());
+        assert_eq!((sys.net.tcp.count(), crate::waits::any(&sys)), (0, false));
+        assert_eq!(outcome(&mut sys, Watch::Screen), Some(false));
+        // the place is another job's: it finds no wait of the one before
+        let number = begin(&mut sys, What::Lines(&lines(&["say 1"])), Watch::Nobody, &mut Lines::default()).unwrap();
+        let place = place_of(&sys, number);
+        assert_eq!(finish(&mut sys, place), ["1"]);
     }
 
     #[test]

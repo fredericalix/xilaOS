@@ -914,6 +914,8 @@ pub struct System {
     pub rooms: Option<&'static mut [crate::machine::Machine]>,
     /// The jobs: what runs in those rooms. See `jobs.rs`.
     pub jobs: crate::jobs::Jobs,
+    /// What jobs asked of the network and wait for (`waits.rs`).
+    pub waits: crate::waits::Waits,
     pub display: Display,
     /// The kernel's answer to `Request::Measure`.
     pub measured: Option<Measure>,
@@ -1072,6 +1074,7 @@ impl System {
             vm: crate::machine::Machine::new(),
             rooms: None,
             jobs: crate::jobs::Jobs::new(),
+            waits: crate::waits::Waits::new(),
             display: Display { shown: Pictures::Direct, every: 0, sweeps: 0, light: None, direct: false, combining: false, whole_us: 0, firmware_us: 0, pictures: 0, longest_us: 0, city_us: 0, skipped: 0 },
             measured: None,
             note: Note::new(),

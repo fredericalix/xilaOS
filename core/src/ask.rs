@@ -126,6 +126,7 @@ enum Stage {
     Over,
 }
 
+#[derive(Clone, Copy)]
 pub struct Ask {
     id: Id,
     /// When something was last said or heard.

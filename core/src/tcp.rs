@@ -59,11 +59,11 @@ const SILENCE: u64 = 60 * SECOND;
 /// last packet that comes again.
 const LINGER: u64 = 2 * SECOND;
 
-const FIN: u8 = 0x01;
-const SYN: u8 = 0x02;
+pub(crate) const FIN: u8 = 0x01;
+pub(crate) const SYN: u8 = 0x02;
 const RST: u8 = 0x04;
-const PUSH: u8 = 0x08;
-const ACK: u8 = 0x10;
+pub(crate) const PUSH: u8 = 0x08;
+pub(crate) const ACK: u8 = 0x10;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
@@ -308,6 +308,11 @@ impl Tcp {
     fn place(&self) -> Option<Id> {
         let free = self.connections.iter().position(|c| c.state == State::Free);
         free.or_else(|| self.connections.iter().position(|c| c.state == State::Lingering))
+    }
+
+    /// Whether one more conversation has a place.
+    pub fn has_room(&self) -> bool {
+        self.place().is_some()
     }
 
     /// Calls a port of another machine. None if there is no place for
@@ -723,17 +728,17 @@ impl Tcp {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::vec::Vec;
 
-    const OURS: Ip = [192, 168, 1, 11];
-    const THEIRS: Ip = [192, 168, 1, 168];
+    pub(crate) const OURS: Ip = [192, 168, 1, 11];
+    pub(crate) const THEIRS: Ip = [192, 168, 1, 168];
 
     /// The other side of a conversation, played by the test.
-    struct Peer {
-        port: u16,
-        to: u16,
+    pub(crate) struct Peer {
+        pub(crate) port: u16,
+        pub(crate) to: u16,
         /// The number of its next byte, and of the next it expects of ours.
         next: u32,
         expected: u32,
@@ -742,16 +747,18 @@ mod tests {
 
     /// A segment of ours, as the other side reads it.
     #[derive(Debug, PartialEq)]
-    struct Got {
-        flags: u8,
-        number: u32,
-        acknowledged: u32,
-        room: u16,
-        bytes: Vec<u8>,
+    pub(crate) struct Got {
+        pub(crate) flags: u8,
+        pub(crate) number: u32,
+        pub(crate) acknowledged: u32,
+        pub(crate) room: u16,
+        pub(crate) bytes: Vec<u8>,
+        /// The port of ours it came from.
+        pub(crate) from: u16,
     }
 
     impl Peer {
-        fn new(port: u16, to: u16) -> Peer {
+        pub(crate) fn new(port: u16, to: u16) -> Peer {
             Peer { port, to, next: 1000, expected: 0, room: 65535 }
         }
 
@@ -771,32 +778,38 @@ mod tests {
         }
 
         /// Sends a segment with its next number, and counts what it sent.
-        fn say(&mut self, tcp: &mut Tcp, flags: u8, bytes: &[u8], now: u64) {
+        pub(crate) fn say(&mut self, tcp: &mut Tcp, flags: u8, bytes: &[u8], now: u64) {
             let segment = self.segment(flags, self.next, bytes);
             tcp.input(THEIRS, OURS, &segment, now);
             self.next = self.next.wrapping_add(bytes.len() as u32 + (flags & (SYN | FIN) != 0) as u32);
         }
 
+        /// Takes a segment of ours if it is for its port, and acknowledges
+        /// in its head what is in order.
+        pub(crate) fn takes(&mut self, segment: &[u8]) -> Option<Got> {
+            if be16(segment, 2) != self.port {
+                return None;
+            }
+            let header = (segment[12] >> 4) as usize * 4;
+            let got = Got { flags: segment[13], number: be32(segment, 4), acknowledged: be32(segment, 8), room: be16(segment, 14), bytes: segment[header..].to_vec(), from: be16(segment, 0) };
+            if got.flags & SYN != 0 {
+                self.expected = got.number.wrapping_add(1);
+            } else if got.number == self.expected {
+                self.expected = self.expected.wrapping_add(got.bytes.len() as u32 + (got.flags & FIN != 0) as u32);
+            }
+            Some(got)
+        }
+
         /// Reads every segment we have to send, and acknowledges in its
         /// head what is for it and in order.
-        fn hear(&mut self, tcp: &mut Tcp, now: u64) -> Vec<Got> {
+        pub(crate) fn hear(&mut self, tcp: &mut Tcp, now: u64) -> Vec<Got> {
             let mut all = Vec::new();
             let mut segment = [0u8; SEGMENT];
             while let Some((to, length)) = tcp.output(OURS, now, &mut segment) {
                 assert_eq!(to, THEIRS);
                 let segment = &segment[..length];
                 assert_eq!(checksum(OURS, THEIRS, segment), 0, "the checksum of what we send");
-                if be16(segment, 2) != self.port {
-                    continue;
-                }
-                let header = (segment[12] >> 4) as usize * 4;
-                let got = Got { flags: segment[13], number: be32(segment, 4), acknowledged: be32(segment, 8), room: be16(segment, 14), bytes: segment[header..].to_vec() };
-                if got.flags & SYN != 0 {
-                    self.expected = got.number.wrapping_add(1);
-                } else if got.number == self.expected {
-                    self.expected = self.expected.wrapping_add(got.bytes.len() as u32 + (got.flags & FIN != 0) as u32);
-                }
-                all.push(got);
+                all.extend(self.takes(segment));
                 assert!(all.len() < 100, "it never stops sending");
             }
             all

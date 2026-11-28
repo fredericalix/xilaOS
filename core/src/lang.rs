@@ -269,6 +269,17 @@ pub fn line(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     if let (true, Some(watch)) = (program, waits(sys)) {
         return begin(sys, crate::jobs::What::Program(written), watch, out);
     }
+    // so is a command that waits for the network, so that the system
+    // lives meanwhile; with no place left among the jobs it runs at once
+    if crate::waits::asks(line) {
+        if let Some(watch) = waits(sys) {
+            match crate::jobs::begin(sys, crate::jobs::What::Lines(&[Line::from_bytes(line)]), watch, out) {
+                Ok(_) => return true,
+                Err(message) if message.is_empty() => return false,
+                Err(_) => {}
+            }
+        }
+    }
     crate::machine::lines(sys, &[Line::from_bytes(line)], out)
 }
 
@@ -1564,6 +1575,47 @@ mod tests {
         type_lines(&mut sys, &["let id = 'mine'", "insert into expenses values ('tea', 2)"]);
         assert_eq!(in_background(&mut sys), ["on_insert_expenses: audit tea 5", "on_insert_expenses: back tea"]);
         assert_eq!(said(&mut sys, &["say id"]), ["mine"]);
+    }
+
+    #[test]
+    fn a_command_that_waits_for_the_network_is_a_job_where_a_prompt_waits() {
+        use crate::jobs::{self, Watch};
+        let ping = shell::Request::Ping([8, 8, 8, 8]);
+        // a system with no rooms: it runs at once, and leaves its request
+        let mut sys = crate::waits::tests::networked();
+        assert!(shell::exec(&mut sys, b"net ping 8.8.8.8", &mut Lines::default()));
+        assert_eq!(sys.request.take(), Some(ping));
+        // with rooms, the prompt of the screen waits for it: nothing ran yet
+        crate::machine::tests::rooms(&mut sys, jobs::PLACES + 1);
+        let mut out = Lines::default();
+        assert!(shell::exec(&mut sys, b"net ping 8.8.8.8", &mut out));
+        let at = jobs::watched(&sys, Watch::Screen).unwrap();
+        assert_eq!((sys.request, sys.jobs.list()[at].program.bytes()), (None, &b"net ping 8.8.8.8"[..]));
+        jobs::turn(&mut sys, at, &mut out, &mut || true);
+        assert_eq!(sys.request, Some(ping));
+        assert!(crate::waits::begin(&mut sys, at, 0));
+        assert!(jobs::stop_watched(&mut sys, Watch::Screen).is_some());
+        assert_eq!((jobs::outcome(&mut sys, Watch::Screen), crate::waits::any(&sys)), (Some(false), false));
+        // what is wrong with it is said by the job, which then has failed
+        assert!(shell::exec(&mut sys, b"net ping nowhere", &mut out));
+        let at = jobs::watched(&sys, Watch::Screen).unwrap();
+        let mut said = Lines::default();
+        jobs::turn(&mut sys, at, &mut said, &mut || true);
+        assert_eq!(said.lines, ["Type net ping and an address: net ping 192.168.1.1"]);
+        assert_eq!(jobs::outcome(&mut sys, Watch::Screen), Some(false));
+        // from the prompt over the network it runs at once, as everything does there
+        sys.session = crate::events::NETWORK;
+        assert!(shell::exec(&mut sys, b"net ping 8.8.8.8", &mut Lines::default()));
+        assert_eq!((sys.request.take(), jobs::watched(&sys, Watch::Screen)), (Some(ping), None));
+        sys.session = crate::events::SCREEN;
+        // with every place taken it runs at once rather than be refused
+        let forever = [Line::from_bytes(b"while 1 = 1"), Line::from_bytes(b"end")];
+        for _ in 0..jobs::PLACES {
+            jobs::begin(&mut sys, jobs::What::Lines(&forever), Watch::Nobody, &mut Lines::default()).unwrap();
+        }
+        let mut out = Lines::default();
+        assert!(shell::exec(&mut sys, b"net ping 8.8.8.8", &mut out));
+        assert_eq!((sys.request.take(), jobs::watched(&sys, Watch::Screen), out.lines.len()), (Some(ping), None, 0));
     }
 
     #[test]

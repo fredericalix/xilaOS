@@ -677,10 +677,10 @@ pub(crate) mod tests {
         }
     }
 
-    const OURS: Mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
-    const THEIRS: Mac = [0x52, 0x55, 0x0a, 0, 2, 2];
-    const BOX: Ip = [192, 168, 1, 1];
-    const US: Ip = [192, 168, 1, 20];
+    pub(crate) const OURS: Mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+    pub(crate) const THEIRS: Mac = [0x52, 0x55, 0x0a, 0, 2, 2];
+    pub(crate) const BOX: Ip = [192, 168, 1, 1];
+    pub(crate) const US: Ip = [192, 168, 1, 20];
 
     /// A frame as another machine would send it, built by other code than
     /// the one above: a packet of a kind with its data.
@@ -740,7 +740,7 @@ pub(crate) mod tests {
         net
     }
 
-    fn arp(asking: bool, from_card: Mac, from: Ip, wanted: Ip) -> Vec<u8> {
+    pub(crate) fn arp(asking: bool, from_card: Mac, from: Ip, wanted: Ip) -> Vec<u8> {
         let mut frame = Vec::new();
         frame.extend_from_slice(if asking { &EVERYONE } else { &OURS });
         frame.extend_from_slice(&from_card);
@@ -826,7 +826,7 @@ pub(crate) mod tests {
     }
 
     /// The answer to a ping that was sent: the same back, as type 0.
-    fn echo(sent: &[u8], from: Ip) -> Vec<u8> {
+    pub(crate) fn echo(sent: &[u8], from: Ip) -> Vec<u8> {
         let mut data = sent[34..58].to_vec();
         data[0] = 0;
         data[2..4].fill(0);

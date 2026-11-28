@@ -48,6 +48,7 @@ pub mod text;
 pub mod tftp;
 pub mod theme;
 pub mod ui;
+pub mod waits;
 pub mod watch;
 pub mod web;
 
