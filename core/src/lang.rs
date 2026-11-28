@@ -92,10 +92,10 @@ const PROGRAMS: &[u8] = b"programs";
 
 /// The words that start a block. `on` and `every` are kept for programs
 /// that run by themselves.
-const OPENERS: [&[u8]; 6] = [b"if", b"for", b"while", b"program", b"on", b"every"];
+const OPENERS: [&[u8]; 7] = [b"if", b"for", b"while", b"program", b"on", b"every", b"panel"];
 /// Words that cannot be the name of a value or of a program.
-const WORDS: [&[u8]; 14] =
-    [b"let", b"say", b"if", b"else", b"end", b"for", b"in", b"while", b"program", b"run", b"return", b"cancel", b"on", b"every"];
+const WORDS: [&[u8]; 15] =
+    [b"let", b"say", b"if", b"else", b"end", b"for", b"in", b"while", b"program", b"run", b"return", b"cancel", b"on", b"every", b"panel"];
 
 /// The first word of a line, in small letters, and what follows it.
 pub(crate) fn word_of(line: &[u8]) -> (FixedStr<12>, &[u8]) {
@@ -338,6 +338,7 @@ pub fn typed(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
     let (first, rest) = word_of(lines[0].bytes());
     match first.bytes() {
         b"program" => define(sys, rest, &lines[1..lines.len() - 1], out),
+        b"panel" => crate::panel::define(sys, rest, &lines[1..lines.len() - 1], out),
         b"on" | b"every" => define_runs(sys, lines[0].bytes(), &lines[1..lines.len() - 1], out),
         _ => match waits(sys) {
             Some(watch) => begin(sys, crate::jobs::What::Lines(lines), watch, out),
@@ -348,13 +349,20 @@ pub fn typed(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool {
 
 /// The table of programs, if it is there and is what it should be.
 fn programs(db: &Database) -> Result<Option<usize>, Message> {
-    let Some(table) = db.find(PROGRAMS) else {
+    kept_in(db, PROGRAMS)
+}
+
+/// A table that keeps lines under names, as programs are kept and
+/// panels are (name, line, text): where it is, if it is there and is
+/// what it should be.
+pub(crate) fn kept_in(db: &Database, kept: &[u8]) -> Result<Option<usize>, Message> {
+    let Some(table) = db.find(kept) else {
         return Ok(None);
     };
     let columns = &db.tables()[table].columns;
     let wanted: [(&[u8], Kind); 4] = [(b"id", Kind::Int), (b"name", Kind::Text), (b"line", Kind::Int), (b"text", Kind::Text)];
     if columns.len() != wanted.len() || columns.iter().zip(&wanted).any(|(column, (name, kind))| column.name != *name || column.kind != *kind) {
-        return Err(Message::from_bytes(b"The table programs is not the one the system keeps programs in."));
+        return Err(sql::error(b"The table ", kept).also(b" is not the one the system keeps ").also(kept).also(b" in."));
     }
     Ok(Some(table))
 }
@@ -365,14 +373,21 @@ fn programs(db: &Database) -> Result<Option<usize>, Message> {
 pub(crate) struct Loaded {
     pub count: usize,
     pub takes: Line,
+    /// Line 0 as it is kept, whatever it says; nothing when there is none.
+    pub first: Line,
 }
 
 /// Reads the lines of a program. `None` if there is no such program.
 pub(crate) fn load(db: &Database, name: &[u8], into: &mut [Line; MAX_LINES]) -> Result<Option<Loaded>, Message> {
-    let Some(table) = programs(db)? else {
+    load_from(db, PROGRAMS, name, into)
+}
+
+/// Reads the lines kept under a name in a table of such lines.
+pub(crate) fn load_from(db: &Database, kept: &[u8], name: &[u8], into: &mut [Line; MAX_LINES]) -> Result<Option<Loaded>, Message> {
+    let Some(table) = kept_in(db, kept)? else {
         return Ok(None);
     };
-    let (mut loaded, mut found) = (Loaded { count: 0, takes: Line::new() }, false);
+    let (mut loaded, mut found) = (Loaded { count: 0, takes: Line::new(), first: Line::new() }, false);
     db.scan(table, &mut |fields| {
         if let (Field::Text(of), Field::Int(number), Field::Text(text)) = (fields[1], fields[2], fields[3]) {
             if of.eq_ignore_ascii_case(name) {
@@ -383,6 +398,7 @@ pub(crate) fn load(db: &Database, name: &[u8], into: &mut [Line; MAX_LINES]) -> 
                     into[loaded.count] = Line::from_bytes(text);
                     loaded.count += 1;
                 } else if number == 0 {
+                    loaded.first = Line::from_bytes(text);
                     if let Some(takes) = text.strip_prefix(b"(").and_then(|rest| rest.strip_suffix(b")")) {
                         loaded.takes = Line::from_bytes(takes);
                     }
@@ -411,7 +427,12 @@ fn header(db: &Database, name: &[u8]) -> Option<Line> {
 
 /// Whether a program of that name is kept.
 pub fn exists(db: &Database, name: &[u8]) -> bool {
-    let Ok(Some(table)) = programs(db) else {
+    exists_in(db, PROGRAMS, name)
+}
+
+/// Whether lines are kept under a name in a table of such lines.
+pub(crate) fn exists_in(db: &Database, kept: &[u8], name: &[u8]) -> bool {
+    let Ok(Some(table)) = kept_in(db, kept) else {
         return false;
     };
     let mut found = false;
@@ -423,9 +444,15 @@ pub fn exists(db: &Database, name: &[u8]) -> bool {
 /// had. `first` is its line 0, if it has one: the values it takes, or
 /// when it runs by itself. Returns whether the program was there before.
 fn store(db: &mut Database, name: &[u8], first: Option<&[u8]>, lines: &[Line]) -> Result<bool, xila_db::Error> {
-    let table = match db.find(PROGRAMS) {
+    store_in(db, PROGRAMS, name, first, lines)
+}
+
+/// Puts lines under a name in a table of such lines, which is made if it
+/// is not there, in place of those the name had. `first` is their line 0.
+pub(crate) fn store_in(db: &mut Database, kept: &[u8], name: &[u8], first: Option<&[u8]>, lines: &[Line]) -> Result<bool, xila_db::Error> {
+    let table = match db.find(kept) {
         Some(table) => table,
-        None => db.create(PROGRAMS, &[(b"name", Kind::Text), (b"line", Kind::Int), (b"text", Kind::Text)])?,
+        None => db.create(kept, &[(b"name", Kind::Text), (b"line", Kind::Int), (b"text", Kind::Text)])?,
     };
     let replaced = db.delete(table, &mut |fields| matches!(fields[1], Field::Text(of) if of.eq_ignore_ascii_case(name)))? > 0;
     if let Some(first) = first {
@@ -447,6 +474,10 @@ fn define(sys: &mut System, written: &[u8], lines: &[Line], out: &mut dyn Out) -
         out.line(Style::Error, b"A program is named by a letter, then letters, digits or _, and not as a command.");
         return false;
     };
+    if exists_in(&sys.db, crate::panel::PANELS, name) {
+        out.line(Style::Error, sql::error(name, b" is a panel: a program cannot have its name.").bytes());
+        return false;
+    }
     let params = match Params::read(takes) {
         Ok(params) => params,
         Err(message) => {

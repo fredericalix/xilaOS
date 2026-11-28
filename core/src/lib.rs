@@ -36,6 +36,7 @@ pub mod line;
 pub mod machine;
 pub mod mem;
 pub mod net;
+pub mod panel;
 pub mod qr;
 pub mod remote;
 pub mod secrets;

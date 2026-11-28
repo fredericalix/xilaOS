@@ -1173,17 +1173,17 @@ impl System {
 }
 
 /// Names of the commands, for completion.
-pub const NAMES: [&[u8]; 57] = [
+pub const NAMES: [&[u8]; 59] = [
     b"about", b"alter", b"ask", b"cancel", b"city", b"clear", b"companion", b"create", b"delete", b"devices", b"disk", b"display", b"drop", b"else", b"end", b"every", b"for", b"help",
-    b"if", b"insert", b"install", b"job", b"jobs", b"key", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"peek", b"program", b"programs", b"qr", b"reboot",
+    b"if", b"insert", b"install", b"job", b"jobs", b"key", b"keymap", b"let", b"listen", b"mem", b"mood", b"net", b"notify", b"on", b"panel", b"panels", b"peek", b"program", b"programs", b"qr", b"reboot",
     b"remote", b"return",
     b"run", b"say", b"screen", b"select", b"show", b"spin", b"stop", b"submit", b"tables", b"tasks", b"theme", b"time", b"unlisten", b"update",
     b"uptime", b"vars", b"web", b"while",
 ];
 
 /// The commands that are not statements of the language: what `command` runs.
-const LANGUAGE: [&[u8]; 13] =
-    [b"cancel", b"else", b"end", b"every", b"for", b"if", b"let", b"on", b"program", b"return", b"run", b"say", b"while"];
+const LANGUAGE: [&[u8]; 14] =
+    [b"cancel", b"else", b"end", b"every", b"for", b"if", b"let", b"on", b"panel", b"program", b"return", b"run", b"say", b"while"];
 
 /// Whether a word, in small letters, is a command of the prompt. The
 /// statements of the language are not: `lang` takes them first.
@@ -1245,7 +1245,7 @@ const HELP_COMMANDS: [&[u8]; 38] = [
     b"   reboot                     - Restarts the machine.",
 ];
 
-const HELP_LANGUAGE: [&[u8]; 28] = [
+const HELP_LANGUAGE: [&[u8]; 31] = [
     b"XilaScript: one statement per line, at the prompt or in a program.",
     b"   let name = value           - Keeps a value: let total = select sum(n) from t",
     b"   say value                  - Shows a value: say 'Total: ' + total",
@@ -1264,6 +1264,9 @@ const HELP_LANGUAGE: [&[u8]; 28] = [
     b"                                on delete from t, on notify channel.",
     b"   every 5 minutes ... end    - Runs again and again: seconds, hours, days.",
     b"   every day at 8:00 ... end  - Runs once a day, by the clock of the machine.",
+    b"   panel name on table ... end - Keeps a screen of an application, on a table:",
+    b"                                title 'Stock', list a, b, field a 'Label'.",
+    b"   panels                     - Lists the panels. show panel x, drop panel x.",
     b"   programs                   - Lists the programs.",
     b"   show name                  - Shows a program; show table t, a table.",
     b"   drop program name          - Removes a program.",
@@ -1369,6 +1372,13 @@ pub(crate) fn command(sys: &mut System, line: &[u8], out: &mut dyn Out) -> bool 
             false
         }
         b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"program") => crate::lang::remove(sys, trim(split_word(arg).1), out),
+        b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"panel") && sys.acting => {
+            out.line(Style::Error, b"Panels are not the companion's to change.");
+            false
+        }
+        b"drop" if split_word(arg).0.eq_ignore_ascii_case(b"panel") => crate::panel::remove(sys, trim(split_word(arg).1), out),
+        b"panels" => crate::panel::list(sys, out),
+        b"show" if split_word(arg).0.eq_ignore_ascii_case(b"panel") && !trim(split_word(arg).1).is_empty() => crate::panel::show(sys, trim(split_word(arg).1), out),
         b"alter" | b"create" | b"drop" | b"insert" | b"update" | b"delete" => change(sys, line, out),
         b"programs" => crate::lang::list(sys, out),
         b"submit" => submit(sys, arg, out),

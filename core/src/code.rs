@@ -378,6 +378,7 @@ fn translate(lines: &[Line], code: &mut Code) -> Result<(), Fault> {
                 code.emit(Op::Call, at, true);
             }
             b"program" | b"on" | b"every" => return Err(fault(b"A program is made at the prompt, not inside another.")),
+            b"panel" => return Err(fault(b"A panel is made at the prompt, not inside a block or a program.")),
             _ => match call_of(text) {
                 // values between parentheses after a name that is no
                 // command and no word of the language: a program is called
